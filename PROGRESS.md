@@ -84,9 +84,11 @@ Nothing.
 - `demo/src/tools/scene.ts [conflict|landed]` + `screenshot.ts <baseline> <out.png>` produce dashboard stills.
 
 ## 2026-10-10: submission video
-- Done: `video/` (Remotion) renders `video/out/atc.mp4`, about 101 s at 1080p30 (metaphor intro, go-around = rebase onto main then land), with ElevenLabs voice-over. The real
-  run is `booking-261010210302`: conflict 6.7 s after push, B fixed in flight, A then B landed, main typechecks.
-  See ADR 0016.
+- Done: `video/` (Remotion) renders `video/out/atc.mp4`, 2:29 at 1080p30, with ElevenLabs voice-over: the metaphor
+  (PRs are planes, GitHub has no controller), today's go-around (rebase onto main, then land late), then a real
+  five-PR run (`booking-261010213346`). In that run all 10 pairs are merged and type checked, only PR1 + PR2 fails,
+  and ATC orders PR4 → PR5 → PR2 → PR1 → PR3 by its rules. PR1 holds behind PR2 and fixes the call in flight;
+  all five land and nobody rebases. See ADR 0016.
 - Rebuild: `pnpm --dir demo exec tsx src/video-run.ts` (optional, for a new run), then `pnpm --dir video voiceover`
   and `pnpm --dir video render`.
 - Open: Cloudflare logo for the hero cloud (needs the asset).

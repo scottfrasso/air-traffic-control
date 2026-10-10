@@ -1,23 +1,24 @@
 /** Beat 5: the wide shot. More traffic lands in sequence while captions name the Cloudflare pieces; then the close. */
 import { AbsoluteFill } from "remotion";
 import type { Scene } from "../scene/draw";
-import { CHECK, clamp, GATES, HANGARS, landing, LIVERY, TOWER, type Plane } from "../scene/geometry";
+import { CHECK, clamp, glide, HANGARS, LIVERY, smooth, TOWER, type Plane } from "../scene/geometry";
 import { At, C, Callout, PIXEL, Stage, Tag, TERM } from "../scene/Stage";
 import { RUN, T } from "../timeline";
-import { runA, runB } from "./RealRun";
+import { LIV, PRS, where } from "./RealRun";
 
 const TRAFFIC = [
-  { id: "c", pr: "PR3" },
-  { id: "d", pr: "PR4" },
-  { id: "e", pr: "PR5" },
-  { id: "f", pr: "PR6" },
+  { id: "f", pr: "PR6", s: 0.82 },
+  { id: "a", pr: "PR7", s: 0.62 },
+  { id: "b", pr: "PR8", s: 0.42 },
 ] as const;
 
 export function Airport({ t }: { t: number }) {
-  const parked: Plane[] = ([[runA(t), "a"], [runB(t), "b"]] as const).map(([l, id]) => ({ id, x: l.p[0], y: l.p[1], face: l.face, livery: LIVERY[id] }));
+  const parked: Plane[] = PRS.map((pr) => { const w = where(pr, t); return { id: pr, x: w.p[0], y: w.p[1], face: w.face, livery: LIV[pr]! }; });
+  // New traffic: more agents start work and fly in to their slots (illustration).
   const traffic = TRAFFIC.map((x, i) => {
-    const l = landing(t, { t0: T.b5 - 0.6 + i * 1.3, s0: -0.05, tTouch: T.b5 + 4.2 + i * 2.0, gate: GATES[i + 2]! });
-    return { ...x, l, plane: { id: x.id, x: l.p[0], y: l.p[1], face: l.face, livery: LIVERY[x.id] } as Plane };
+    const s = x.s - 0.6 * (1 - smooth(clamp((t - T.b5 - i * 0.8) / 4)));
+    const [px, py] = glide(s);
+    return { ...x, l: { phase: "approach" as const }, plane: { id: x.id, x: px, y: py, face: 1, livery: LIVERY[x.id] } as Plane };
   });
   const at = (k: number) => T.airportVo + k;
   const show = (k: number) => clamp((t - at(k)) / 0.35);
@@ -43,7 +44,7 @@ export function Airport({ t }: { t: number }) {
         <>
           {HANGARS.map((hx, i) => (
             <At key={hx} x={hx + 22} y={226 - 18} anchor="center">
-              <div style={{ font: `20px/1 ${PIXEL}`, color: "#fff", textShadow: "3px 3px 0 #0f1530", opacity: show(0.6 + i * 0.25) }}>{["PR3", "PR4", "PR5"][i]}</div>
+              <div style={{ font: `20px/1 ${PIXEL}`, color: "#fff", textShadow: "3px 3px 0 #0f1530", opacity: show(0.6 + i * 0.25) }}>{["PR6", "PR7", "PR8"][i]}</div>
             </At>
           ))}
           <Callout x={HANGARS[1]! + 22} y={200} rise={34} title="ARTIFACTS" sub="a Git fork per agent" opacity={show(0.2)} />

@@ -16,23 +16,13 @@
   },
   "real1": {
     "file": "vo/real1.mp3",
-    "seconds": 7.601633,
-    "hash": "b98f88ffaf0c"
+    "seconds": 11.52,
+    "hash": "4d0cc126c5a7"
   },
   "real2": {
     "file": "vo/real2.mp3",
-    "seconds": 7.47102,
-    "hash": "5f8486df5b0a"
-  },
-  "real3": {
-    "file": "vo/real3.mp3",
-    "seconds": 3.892245,
-    "hash": "2d46806fea38"
-  },
-  "real4": {
-    "file": "vo/real4.mp3",
-    "seconds": 2.533878,
-    "hash": "e75bd7914fe3"
+    "seconds": 9.195102,
+    "hash": "d939c63a42e5"
   },
   "airport": {
     "file": "vo/airport.mp3",
@@ -53,5 +43,20 @@
     "file": "vo/intro2.mp3",
     "seconds": 4.022857,
     "hash": "a450bde30596"
+  },
+  "order": {
+    "file": "vo/order.mp3",
+    "seconds": 23.666939,
+    "hash": "e80bea35422d"
+  },
+  "hold": {
+    "file": "vo/hold.mp3",
+    "seconds": 11.232653,
+    "hash": "b00291e6b02d"
+  },
+  "land": {
+    "file": "vo/land.mp3",
+    "seconds": 7.706122,
+    "hash": "40638ec803d8"
   }
 }

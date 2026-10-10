@@ -16,18 +16,41 @@ const find = (pred: (e: Ev) => boolean, what: string): number => {
   if (!e) throw new Error(`run.json has no ${what}`);
   return e.t;
 };
-const pushes = run.events.filter((e) => e.kind === "push.received" && e.pr === run.b);
-/** Real seconds since the first push, for the moments beat 4 shows. */
-export const REAL = {
-  push: 0,
-  conflict: find((e) => e.kind === "check.pair" && e.detail?.status === "semantic_conflict", "semantic conflict"),
-  fix: pushes[1]?.t ?? NaN,
-  clean: find((e) => e.kind === "check.pair" && e.detail?.status === "clean", "clean re-check"),
-  landA: find((e) => e.kind === "land.merged" && e.pr === run.a, "A landing"),
-  landB: find((e) => e.kind === "land.merged" && e.pr === run.b, "B landing"),
+const pushesA = run.events.filter((e) => e.kind === "push.received" && e.pr === run.a);
+type Seq = (typeof run.sequences)[number];
+const firstSeq = (pred: (s: Seq) => boolean, what: string): Seq => {
+  const s = run.sequences.find(pred);
+  if (!s) throw new Error(`run.json has no ${what}`);
+  return s;
 };
 const conflictEvent = run.events.find((e) => e.kind === "check.pair" && e.detail?.status === "semantic_conflict");
 export const ERROR = String(conflictEvent?.detail?.errors?.[0] ?? ""); // "src/walk-in.ts:5 TS2554 Expected 3 arguments, but got 2"
+const fixT = pushesA[1]?.t ?? NaN;
+/** The first ordering ATC settled on (PR1 holding), and the one after PR1's fix. */
+export const SEQ1 = firstSeq((s) => s.sequence.some((x) => x.clearance === "hold"), "hold");
+export const SEQ2 = firstSeq((s) => s.t > fixT && s.sequence.length === 5 && !s.sequence.some((x) => x.clearance === "checking"), "settled sequence after the fix");
+export const LANDS = run.events.filter((e) => e.kind === "land.merged").map((e) => ({ pr: e.pr!, t: e.t }));
+/** Each unordered pair's first fresh check: when it finished and how. */
+export const PAIRS = (() => {
+  const seen = new Map<string, { a: string; b: string; status: string; t: number }>();
+  for (const e of run.events) {
+    if (e.kind !== "check.pair" || !e.detail?.fresh || e.t > fixT) continue;
+    const [x, y] = [String(e.detail.a), String(e.detail.b)].sort();
+    const k = `${x}|${y}`;
+    if (!seen.has(k)) seen.set(k, { a: x!, b: y!, status: String(e.detail.status), t: e.t });
+  }
+  return [...seen.values()];
+})();
+/** Real seconds since the first push, for the moments beat 4 shows. */
+export const REAL = {
+  push: 0,
+  conflict: conflictEvent?.t ?? NaN,
+  settled: SEQ1.t,
+  fix: fixT,
+  resequenced: SEQ2.t,
+  firstLand: LANDS[0]!.t,
+  lastLand: LANDS[LANDS.length - 1]!.t,
+};
 export const RUN = run;
 
 // ── beat 0: what ATC is; beats 1–3: the go-around today ──
@@ -44,18 +67,17 @@ const rewindEnd = todayEnd + Math.max(2.6, d("rewind") + 0.7);
 const b4 = rewindEnd;
 const real1Vo = b4 + 0.3;
 const v0 = b4 + 0.8; // video time of the first push
-const flag = Math.max(v0 + REAL.conflict, real1Vo + d("real1") + 0.3);
-const real2Vo = flag + 0.5;
-const fix = Math.max(flag + (REAL.fix - REAL.conflict), real2Vo + d("real2") + 0.3);
-const real3Vo = fix + 0.1;
-const landA = Math.max(fix + (REAL.landA - REAL.fix) * 0.6, real3Vo + d("real3") + 0.2);
-const real4Vo = landA - 0.2;
-const landB = landA + (REAL.landB - REAL.landA) * 0.6;
-const b4End = Math.max(landB + 1.4, real4Vo + d("real4") + 0.4);
-const clean = fix + ((landA - fix) * (REAL.clean - REAL.fix)) / (REAL.landA - REAL.fix);
-
+const real2Vo = Math.max(real1Vo + d("real1") + 0.3, v0 + REAL.conflict * 0.5);
+const flag = real2Vo - 0.1;
+const orderVo = real2Vo + d("real2") + 0.4;
+const holdVo = orderVo + d("order") + 0.4;
+const fix = holdVo + d("hold") - 0.8;
+const firstLand = fix + 2.4;
+const landVo = firstLand - 0.3;
+const lastLand = firstLand + 11;
+const b4End = Math.max(lastLand + 3.8, landVo + d("land") + 0.5);
 /** Real seconds (since the first push) → video seconds, piecewise linear through the beat's anchors. */
-const ANCHORS: Array<[number, number]> = [[REAL.push, v0], [REAL.conflict, flag], [REAL.fix, fix], [REAL.landA, landA], [REAL.landB, landB]];
+const ANCHORS: Array<[number, number]> = [[REAL.push, v0], [REAL.conflict, flag], [REAL.settled, orderVo], [REAL.fix, fix], [REAL.firstLand, firstLand], [REAL.lastLand, lastLand]];
 export function realToVideo(r: number): number {
   for (let i = 0; i + 1 < ANCHORS.length; i++) {
     const [r0, v0_] = ANCHORS[i]!, [r1, v1] = ANCHORS[i + 1]!;
@@ -81,13 +103,13 @@ const end = closeVo + d("close") + 1.6;
 
 export const T = {
   introVo, intro2Vo, setupStart, setupVo, todayStart, todayVo, todayEnd, rewindEnd,
-  b4, real1Vo, v0, flag, real2Vo, fix, clean, real3Vo, landA, real4Vo, landB, b4End,
+  b4, real1Vo, v0, flag, real2Vo, orderVo, holdVo, fix, firstLand, landVo, lastLand, b4End,
   b5, airportVo, closeStart, closeVo, end,
 };
 
 export const VO: Array<{ id: LineId; at: number }> = [
   { id: "intro", at: introVo }, { id: "intro2", at: intro2Vo }, { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
-  { id: "real1", at: real1Vo }, { id: "real2", at: real2Vo }, { id: "real3", at: real3Vo }, { id: "real4", at: real4Vo },
+  { id: "real1", at: real1Vo }, { id: "real2", at: real2Vo }, { id: "order", at: orderVo }, { id: "hold", at: holdVo }, { id: "land", at: landVo },
   { id: "airport", at: airportVo }, { id: "close", at: closeVo },
 ];
 export const voFile = (id: LineId) => vo[id].file;
