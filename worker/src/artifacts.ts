@@ -41,12 +41,15 @@ export async function indexFork(env: Env, baseline: string, fork: string, headSh
   using forkRepo = await env.ARTIFACTS.get(fork);
   using baseRepo = await env.ARTIFACTS.get(baseline);
 
-  const [forkLog, baseLog] = await Promise.all([forkRepo.log({ ref: headSha, limit: 200 }), baseRepo.log({ ref: "main", limit: 200 })]);
-  const onBaseline = new Set(baseLog.map((c) => c.hash));
-  const base = forkLog.find((c) => onBaseline.has(c.hash));
-  if (!base) throw new Error(`no common ancestor between ${fork}@${headSha} and ${baseline}/main`);
-  const head = forkLog[0];
+  const baseHead = (await baseRepo.log({ ref: "main", limit: 1 }))[0];
+  if (!baseHead) throw new Error(`baseline ${baseline} has no commits`);
+  const [forkAncestry, baseAncestry] = await Promise.all([ancestry(forkRepo, headSha), ancestry(baseRepo, baseHead.hash)]);
+  const head = forkAncestry.get(headSha);
   if (!head) throw new Error(`cannot resolve ${fork}@${headSha}`);
+  // Merge base: the newest commit reachable from both (all parents, not just first-parent).
+  const common = [...forkAncestry.values()].filter((c) => baseAncestry.has(c.hash));
+  const base = common.sort((x, y) => y.committedAt - x.committedAt || (baseAncestry.get(y.hash)!.order - baseAncestry.get(x.hash)!.order))[0];
+  if (!base) throw new Error(`no common ancestor between ${fork}@${headSha} and ${baseline}/main`);
 
   const changed: Array<{ path: string; before: string | null; after: string | null }> = [];
   async function walk(prefix: string, beforeTree: string | null, afterTree: string | null) {
@@ -111,7 +114,7 @@ export async function indexFork(env: Env, baseline: string, fork: string, headSh
     fork,
     headSha: head.hash,
     baseSha: base.hash,
-    baselineHead: baseLog[0]?.hash ?? base.hash,
+    baselineHead: baseHead.hash,
     files,
     diffLines: files.reduce((n, f) => n + f.lines, 0),
   };
@@ -128,4 +131,25 @@ async function listPaths(repo: ArtifactsRepo, treeHash: string, prefix = ""): Pr
     }),
   );
   return out;
+}
+
+type Ancestor = ArtifactsCommitMetadata & { order: number };
+
+/**
+ * All commits reachable from `head` (every parent, not just first-parent), up to `limit`.
+ * `log()` only follows first parents, so we fetch first-parent chains in chunks and queue the other parents.
+ */
+async function ancestry(repo: ArtifactsRepo, head: string, limit = 500): Promise<Map<string, Ancestor>> {
+  const seen = new Map<string, Ancestor>();
+  const queue = [head];
+  while (queue.length && seen.size < limit) {
+    const start = queue.shift()!;
+    if (seen.has(start)) continue;
+    for (const c of await repo.log({ ref: start, limit: 100 })) {
+      if (seen.has(c.hash)) break;
+      seen.set(c.hash, { ...c, order: seen.size });
+      for (const p of c.parents.slice(1)) if (!seen.has(p)) queue.push(p);
+    }
+  }
+  return seen;
 }

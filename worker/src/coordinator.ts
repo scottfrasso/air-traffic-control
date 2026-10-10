@@ -2,11 +2,12 @@ import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
-import type { PairResult, SingleResult } from "./checker";
+import type { LandResult, PairResult, SingleResult } from "./checker";
+import { approachQueue, isGreen, landingOrder } from "./landing";
 import { analyzePair, describeError } from "./conflicts";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { CoordinatorState, ForkCredentials, ForkRow, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import type { CoordinatorState, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Stop polling after this long without a push or API activity, so idle DOs hibernate (and pick up new deploys). */
@@ -175,6 +176,10 @@ export class Coordinator extends DurableObject<Env> {
       this.setMeta("baseline_head", index.baselineHead);
     });
     this.log("index.updated", { sha: index.headSha, base: index.baseSha, files: index.files.map((f) => f.path), diffLines: index.diffLines }, index.fork);
+    if (index.baseSha === index.baselineHead) {
+      this.resolveSignals({ fork: index.fork, kind: "rebase_required" });
+      this.resolveSignals({ fork: index.fork, kind: "land_blocked" });
+    }
     this.syncDerivedSignals();
   }
 
@@ -355,6 +360,123 @@ export class Coordinator extends DurableObject<Env> {
     return { status: v.status };
   }
 
+  // ── landing gate (milestone 5) ─────────────────────────────────────────
+
+  /** Open conflicts (semantic or textual) between `fork` and other active forks. */
+  private rivals(fork: string): ForkRow[] {
+    const names = this.sql
+      .exec<{ about_fork: string }>(
+        "SELECT DISTINCT about_fork FROM signals WHERE fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL AND about_fork IS NOT NULL",
+        fork,
+      )
+      .toArray()
+      .map((r) => r.about_fork);
+    return names.map((n) => this.fork(n)).filter((f): f is ForkRow => f?.status === "active");
+  }
+
+  /**
+   * Merge `fork` into baseline only if it is current and green. If it conflicts with another fork that is
+   * closer to landing (ADR-0011), it yields. On landing, conflicting forks get "rebase required".
+   */
+  async requestLand(fork: string): Promise<LandResponse> {
+    const row = this.fork(fork);
+    if (!row || row.status !== "active") return { landed: false, fork, reason: `unknown or inactive fork ${fork}` };
+    // An agent typically pushes and immediately asks to land: pick up a push we haven't seen yet.
+    const liveFork = await headOf(this.env, fork);
+    if (liveFork && liveFork.hash !== row.head_sha) {
+      await this.onPush(fork, liveFork.hash, "reconcile");
+      return { landed: false, fork, reason: "Picked up your latest push; checks are running. Retry in a few seconds.", retry: true };
+    }
+    if (row.land_requested_at === null) this.sql.exec("UPDATE forks SET land_requested_at = ? WHERE name = ?", Date.now(), fork);
+    this.log("land.requested", { head: row.head_sha }, fork);
+
+    const baseline = this.baseline;
+    const live = await headOf(this.env, baseline);
+    if (live && live.hash !== this.meta("baseline_head")) this.setMeta("baseline_head", live.hash);
+    const baselineHead = this.meta("baseline_head") ?? "";
+    const me = this.fork(fork)!;
+
+    const deny = (reason: string, kind: SignalKind | null = "land_blocked"): LandResponse => {
+      this.log("land.denied", { reason }, fork);
+      if (kind)
+        this.emitSignal({ fork, kind, about_fork: null, symbol: null, message: reason, data: { baselineHead }, dedupe_key: `${kind}:${fork}:${me.head_sha}:${baselineHead}:${reason.slice(0, 40)}` });
+      return { landed: false, fork, reason, baselineHead };
+    };
+
+    // base_sha is only known once the push is indexed, so "still checking" must be answered first.
+    if (me.processed_sha !== me.head_sha || me.check_status === "pending" || me.check_sha !== me.head_sha)
+      return { landed: false, fork, reason: "Checks for your latest push are still running; retry in a few seconds.", baselineHead, retry: true };
+    if (me.base_sha !== baselineHead) return deny(`Baseline has moved to ${baselineHead.slice(0, 7)}; rebase onto it and push before landing.`, "rebase_required");
+    if (!isGreen(me)) return deny(`Your fork does not typecheck at ${me.head_sha.slice(0, 7)}: ${me.check_detail ?? ""}`.trim());
+
+    const ahead = this.rivals(fork).filter((r) => landingOrder(r, me, baselineHead) < 0);
+    if (ahead.length) {
+      const r = ahead[0]!;
+      return deny(`${r.name} conflicts with your fork and is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Wait for it to land, then rebase.`);
+    }
+
+    if (this.meta("landing") && Number(this.meta("landing")) > Date.now() - 120_000) return { landed: false, fork, reason: "Another landing is in progress; retry shortly.", baselineHead, retry: true };
+    this.setMeta("landing", String(Date.now()));
+    try {
+      const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
+      const result = JSON.parse(
+        await this.env.CHECKER.getByName(`checker-${baseline}`).run({ mode: "land", fork: forkRef, baseline: { ...baseRef, expectedHead: baselineHead } }),
+      ) as LandResult & { error?: string };
+      if (result.error) return deny(`Landing failed: ${result.error}`);
+      if (!result.landed || !result.forkHead) return deny(result.reason ?? "landing refused", result.reason?.includes("rebase") ? "rebase_required" : "land_blocked");
+      return this.onLanded(me, result.forkHead, baselineHead);
+    } finally {
+      this.setMeta("landing", "");
+    }
+  }
+
+  private async repoRef(repo: string, scope: "read" | "write") {
+    using handle = await this.env.ARTIFACTS.get(repo);
+    const [token, info] = await Promise.all([handle.createToken(scope, 600), handle.info()]);
+    return { name: repo, remote: info.remote, token: token.plaintext };
+  }
+
+  private async onLanded(winner: ForkRow, newHead: string, previousHead: string): Promise<LandResponse> {
+    const now = Date.now();
+    this.setMeta("baseline_head", newHead);
+    this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
+    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines }, winner.name);
+    if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
+
+    const conflicted = new Set(this.rivals(winner.name).map((r) => r.name));
+    this.resolveSignals({ fork: winner.name });
+    const told: string[] = [];
+    for (const other of this.activeForks()) {
+      const sem = this.sql
+        .exec<{ symbol: string | null; message: string }>(
+          "SELECT symbol, message FROM signals WHERE fork = ? AND about_fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL",
+          other.name, winner.name,
+        )
+        .toArray()[0];
+      this.resolveSignals({ fork: other.name, about_fork: winner.name });
+      const conflict = conflicted.has(other.name);
+      this.emitSignal({
+        fork: other.name,
+        kind: "rebase_required",
+        about_fork: winner.name,
+        symbol: sem?.symbol ?? null,
+        message: conflict
+          ? `${winner.name} landed (baseline is now ${newHead.slice(0, 7)}). Your fork conflicts with it${sem?.symbol ? ` on ${sem.symbol}` : ""}: rebase onto baseline main and fix before landing. ${sem ? `Earlier finding: ${sem.message}` : ""}`.trim()
+          : `${winner.name} landed (baseline is now ${newHead.slice(0, 7)}). Rebase onto baseline main before landing.`,
+        data: { newHead, conflict },
+        dedupe_key: `rebase:${other.name}:${newHead}`,
+      });
+      told.push(other.name);
+    }
+    this.emitSignal({
+      fork: winner.name, kind: "landed", about_fork: null, symbol: null,
+      message: `Landed at ${newHead.slice(0, 7)}.${told.length ? ` Told ${told.join(", ")} to rebase.` : ""}`,
+      data: { newHead }, dedupe_key: `landed:${winner.name}:${newHead}`,
+    });
+    this.syncDerivedSignals();
+    return { landed: true, fork: winner.name, baselineHead: newHead, previousHead, rebaseRequired: told };
+  }
+
   // ── overlaps ────────────────────────────────────────────────────────────
 
   /** File-level and symbol-level overlaps between every pair of active forks. */
@@ -465,6 +587,7 @@ export class Coordinator extends DurableObject<Env> {
         symbols: symbolChanges.filter((s) => s.fork === f.name),
       })),
       overlaps: this.overlaps(),
+      approach: approachQueue(this.activeForks(), this.meta("baseline_head") ?? ""),
       signals: this.sql
         .exec<SignalRow & { data: string }>("SELECT * FROM signals ORDER BY id DESC LIMIT 100")
         .toArray()

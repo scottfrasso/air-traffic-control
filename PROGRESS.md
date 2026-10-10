@@ -32,10 +32,15 @@ Nothing. The Worker subscription token was added 2026-10-10, and per-fork push s
   - Both agents get a `semantic_conflict` signal naming `applyDiscount` and the other fork about 21 s after push, before any landing.
 - Repo: private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog secret scan on every PR.
 
+- **Milestone 5: Landing gate** ✅ and **acceptance test** ✅
+  - `demo/run.sh` passes end to end against deployed resources (2 consecutive runs, about 40 s each). All 6 acceptance steps PASS.
+  - M2–M4 checks re-run green after M5.
+
 ## Next
 
-- Milestone 5: `request_land` landing gate + arbitration + rebase-required.
-- Then: `demo/run.sh`, the 8-bit runway dashboard (see memory/user request), README, DEMO_SCRIPT.
+- 8-bit retro top-down runway dashboard (planes = agents, approach order = landing order, clouds; Cloudflare logo later).
+- README.md, DEMO_SCRIPT.md, final PROGRESS honesty pass.
+- Stretch: MCP variant with two real coding agents; blast-radius scheduling.
 
 ## Stubbed / cut / known gaps
 

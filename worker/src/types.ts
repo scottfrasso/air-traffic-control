@@ -53,6 +53,8 @@ export interface CoordinatorState {
     }
   >;
   overlaps: Overlap[];
+  /** Active forks in landing order: index 0 is next to land. */
+  approach: string[];
   signals: SignalRow[];
   intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number }>;
   events: Array<{ id: number; at: number; kind: string; fork: string | null; detail: unknown }>;
@@ -69,4 +71,15 @@ export type SignalRow = {
   dedupe_key: string;
   created_at: number;
   resolved_at: number | null;
+};
+
+export type LandResponse = {
+  landed: boolean;
+  fork: string;
+  reason?: string;
+  baselineHead?: string;
+  previousHead?: string;
+  rebaseRequired?: string[];
+  /** True when the caller should simply retry (checks running, landing in progress). */
+  retry?: boolean;
 };

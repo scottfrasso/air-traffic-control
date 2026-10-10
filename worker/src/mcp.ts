@@ -66,6 +66,18 @@ function createServer(env: Env) {
     },
   );
 
+  server.registerTool(
+    "request_land",
+    {
+      description:
+        "Ask to merge your fork into the baseline. Lands only if your fork is current with baseline and green (typechecks). " +
+        "If another fork conflicts with yours and is closer to landing (or ties with a smaller diff), you are told to wait; " +
+        "after someone lands, conflicting forks get a 'rebase required' signal. If the response says retry, checks are still running.",
+      inputSchema: z.object({ fork: z.string().describe("Your fork name") }),
+    },
+    async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).requestLand(fork)),
+  );
+
   return server;
 }
 
