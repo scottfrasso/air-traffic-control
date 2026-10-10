@@ -84,7 +84,7 @@ Nothing.
 - `demo/src/tools/scene.ts [conflict|landed]` + `screenshot.ts <baseline> <out.png>` produce dashboard stills.
 
 ## 2026-10-10: submission video
-- Done: `video/` (Remotion) renders `video/out/atc.mp4`, about 67 s at 1080p30, with ElevenLabs voice-over. The real
+- Done: `video/` (Remotion) renders `video/out/atc.mp4`, about 101 s at 1080p30 (metaphor intro, go-around = rebase onto main then land), with ElevenLabs voice-over. The real
   run is `booking-261010210302`: conflict 6.7 s after push, B fixed in flight, A then B landed, main typechecks.
   See ADR 0016.
 - Rebuild: `pnpm --dir demo exec tsx src/video-run.ts` (optional, for a new run), then `pnpm --dir video voiceover`

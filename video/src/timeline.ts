@@ -30,11 +30,14 @@ const conflictEvent = run.events.find((e) => e.kind === "check.pair" && e.detail
 export const ERROR = String(conflictEvent?.detail?.errors?.[0] ?? ""); // "src/walk-in.ts:5 TS2554 Expected 3 arguments, but got 2"
 export const RUN = run;
 
-// ── beats 1–3: the go-around today ──
-const setupVo = 0.5;
+// ── beat 0: what ATC is; beats 1–3: the go-around today ──
+const introVo = 0.5;
+const intro2Vo = introVo + d("intro") + 0.5;
+const setupStart = intro2Vo + d("intro2") + 0.8;
+const setupVo = setupStart + 0.3;
 const todayStart = setupVo + d("setup") + 0.3;
 const todayVo = todayStart + 0.1;
-const todayEnd = todayVo + d("today") + 0.4;
+const todayEnd = todayVo + d("today") + 1.8; // room for B to come back down and land
 const rewindEnd = todayEnd + Math.max(2.6, d("rewind") + 0.7);
 
 // ── beat 4: the real run ──
@@ -77,13 +80,13 @@ const closeVo = closeStart + 0.4;
 const end = closeVo + d("close") + 1.6;
 
 export const T = {
-  setupVo, todayStart, todayVo, todayEnd, rewindEnd,
+  introVo, intro2Vo, setupStart, setupVo, todayStart, todayVo, todayEnd, rewindEnd,
   b4, real1Vo, v0, flag, real2Vo, fix, clean, real3Vo, landA, real4Vo, landB, b4End,
   b5, airportVo, closeStart, closeVo, end,
 };
 
 export const VO: Array<{ id: LineId; at: number }> = [
-  { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
+  { id: "intro", at: introVo }, { id: "intro2", at: intro2Vo }, { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
   { id: "real1", at: real1Vo }, { id: "real2", at: real2Vo }, { id: "real3", at: real3Vo }, { id: "real4", at: real4Vo },
   { id: "airport", at: airportVo }, { id: "close", at: closeVo },
 ];

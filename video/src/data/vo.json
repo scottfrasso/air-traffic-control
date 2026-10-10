@@ -1,47 +1,57 @@
 {
   "setup": {
     "file": "vo/setup.mp3",
-    "seconds": 12.382041,
-    "hash": "eda89f66136f"
+    "seconds": 16.065306,
+    "hash": "e95ba4e87cd8"
   },
   "today": {
     "file": "vo/today.mp3",
-    "seconds": 9.613061,
-    "hash": "c96c9c82564b"
+    "seconds": 20.140408,
+    "hash": "e68a7f80a524"
   },
   "rewind": {
     "file": "vo/rewind.mp3",
-    "seconds": 1.906939,
-    "hash": "c5a9c6da1ca4"
+    "seconds": 1.697959,
+    "hash": "26404194fdec"
   },
   "real1": {
     "file": "vo/real1.mp3",
-    "seconds": 5.694694,
-    "hash": "f68b2eee567f"
+    "seconds": 7.601633,
+    "hash": "b98f88ffaf0c"
   },
   "real2": {
     "file": "vo/real2.mp3",
-    "seconds": 8.306939,
-    "hash": "44f1fec77622"
+    "seconds": 7.47102,
+    "hash": "5f8486df5b0a"
   },
   "real3": {
     "file": "vo/real3.mp3",
-    "seconds": 3.369796,
-    "hash": "7254c0496525"
+    "seconds": 3.892245,
+    "hash": "2d46806fea38"
   },
   "real4": {
     "file": "vo/real4.mp3",
     "seconds": 2.533878,
-    "hash": "d0d39978e551"
+    "hash": "e75bd7914fe3"
   },
   "airport": {
     "file": "vo/airport.mp3",
-    "seconds": 9.795918,
-    "hash": "054373d74d49"
+    "seconds": 10.631837,
+    "hash": "39e42ea05244"
   },
   "close": {
     "file": "vo/close.mp3",
-    "seconds": 3.160816,
-    "hash": "b17f1d91bda4"
+    "seconds": 3.474286,
+    "hash": "022b8e01c0d8"
+  },
+  "intro": {
+    "file": "vo/intro.mp3",
+    "seconds": 11.52,
+    "hash": "69c9af7022c3"
+  },
+  "intro2": {
+    "file": "vo/intro2.mp3",
+    "seconds": 4.022857,
+    "hash": "a450bde30596"
   }
 }

@@ -43,8 +43,8 @@ export function RealRun({ t }: { t: number }) {
   const seq = [...RUN.sequences].reverse().find((s) => s.t <= r)?.sequence ?? [];
   return (
     <Stage scene={scene}>
-      {a.phase === "approach" && <At x={pa.x} y={pa.y + 10} anchor="top" align="edge"><Tag below text={`${RUN.a} · A: adds nights to createBooking`} light={clean ? { color: C.green, text: "ATC" } : flagged ? { color: C.red, text: "ATC" } : undefined} /></At>}
-      {b.phase === "approach" && <At x={pb.x} y={pb.y - 8} align="edge"><Tag text={fixed ? `${RUN.b} · B: merged ${RUN.a}, passes nights` : `${RUN.b} · B: calls createBooking the old way`} bg={flagged ? "#8a1f1f" : undefined} light={bLight} /></At>}
+      {a.phase === "approach" && <At x={pa.x} y={pa.y + 10} anchor="top" align="edge"><Tag below text={`${RUN.a} · A: changes a function's parameters`} light={clean ? { color: C.green, text: "ATC" } : flagged ? { color: C.red, text: "ATC" } : undefined} /></At>}
+      {b.phase === "approach" && <At x={pb.x} y={pb.y - 8} align="edge"><Tag text={fixed ? `${RUN.b} · B: merged ${RUN.a}, fixed its call` : `${RUN.b} · B: calls that function the old way`} bg={flagged ? "#8a1f1f" : undefined} light={bLight} /></At>}
 
       <At x={pa.x} y={pa.y}><Popup text={t < T.flag ? "PUSH" : t < T.landA ? "CONFLICT!" : "LANDED"} color={t < T.flag ? "#fff" : t < T.landA ? C.red : C.green} age={t < T.flag ? (t - T.v0) / 2 : t < T.landA ? (t - T.flag) / 2.4 : (t - T.landA) / 2.2} /></At>
       <At x={pb.x} y={pb.y}><Popup text={t < T.flag ? "PUSH" : t < T.fix ? "CONFLICT!" : t < T.landB ? "PUSH FIX" : "LANDED"} color={t < T.flag ? "#fff" : t < T.fix ? C.red : t < T.landB ? C.cyan : C.green} age={t < T.flag ? (t - T.v0) / 2 : t < T.fix ? (t - T.flag) / 2.4 : t < T.landB ? (t - T.fix) / 2 : (t - T.landB) / 2.2} /></At>
@@ -52,7 +52,7 @@ export function RealRun({ t }: { t: number }) {
       {flagged && <ErrorBox t={t} />}
       {flagged && <FarOut x={pb.x} opacity={clamp((t - T.flag - 0.8) / 0.4)} />}
       {fixed && seq.length > 0 && <Board seq={seq} />}
-      {t < T.flag && <Caption opacity={clamp((t - T.b4 - 0.4) / 0.4)}>Every push: merged with the other open forks, then <span style={{ color: C.cyan }}>tsc</span></Caption>}
+      {t < T.flag && <Caption opacity={clamp((t - T.b4 - 0.4) / 0.4)}>Every push is merged with the other open PRs and type checked</Caption>}
       <Clock r={r} />
     </Stage>
   );
@@ -74,12 +74,12 @@ function ErrorBox({ t }: { t: number }) {
   const [where, code, ...msg] = ERROR.split(" ");
   return (
     <div style={{ position: "absolute", left: 1090, top: 120, transform: `translateX(-50%) scale(${0.9 + 0.1 * k})`, opacity: k, width: 1120, padding: "22px 30px 18px", background: "rgba(15,21,48,0.96)", border: `6px solid ${C.red}`, boxShadow: "8px 8px 0 #0f1530" }}>
-      <div style={{ font: `22px/1.4 ${PIXEL}`, color: C.red }}>SEMANTIC CONFLICT · {REAL.conflict.toFixed(1)}s AFTER PUSH</div>
-      <div style={{ font: `36px/1.2 ${TERM}`, color: C.dim, marginTop: 10 }}>merge {RUN.a} + {RUN.b} → tsc</div>
+      <div style={{ font: `22px/1.4 ${PIXEL}`, color: C.red }}>{RUN.a} + {RUN.b} FAIL TOGETHER · {REAL.conflict.toFixed(1)}s AFTER PUSH</div>
+      <div style={{ font: `36px/1.2 ${TERM}`, color: C.dim, marginTop: 10 }}>tsc on the merged code</div>
       <div style={{ font: `42px/1.15 ${TERM}`, color: C.text, marginTop: 6 }}>
         <span style={{ color: C.amber }}>{where}</span> {code} {msg.join(" ")}
       </div>
-      <div style={{ font: `34px/1.2 ${TERM}`, color: C.dim, marginTop: 6 }}>{RUN.a} changed <span style={{ color: C.text }}>createBooking</span>. Neither fork fails alone.</div>
+      <div style={{ font: `34px/1.2 ${TERM}`, color: C.dim, marginTop: 6 }}>Each pull request passes on its own. Both agents get this signal.</div>
     </div>
   );
 }
@@ -93,7 +93,7 @@ function FarOut({ x, opacity }: { x: number; opacity: number }) {
       <div style={{ position: "absolute", left: 0, right: 0, top: 18, height: 8, background: C.orange }} />
       <div style={{ position: "absolute", left: -4, top: 0, width: 8, height: 44, background: C.orange }} />
       <div style={{ position: "absolute", right: -4, top: 0, width: 8, height: 44, background: C.orange }} />
-      <div style={{ position: "absolute", left: "50%", top: 40, transform: "translateX(-50%)", padding: "10px 18px 6px", background: "rgba(15,21,48,0.92)", color: C.orange, font: `24px/1 ${PIXEL}`, whiteSpace: "nowrap" }}>STILL FAR FROM THE RUNWAY</div>
+      <div style={{ position: "absolute", left: "50%", top: 40, transform: "translateX(-50%)", padding: "10px 18px 6px", background: "rgba(15,21,48,0.92)", color: C.orange, font: `24px/1 ${PIXEL}`, whiteSpace: "nowrap" }}>B IS STILL A LONG WAY FROM LANDING</div>
     </div>
   );
 }

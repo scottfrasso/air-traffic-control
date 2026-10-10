@@ -3,7 +3,7 @@ import { loadFont as loadTerm } from "@remotion/google-fonts/VT323";
 import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { AbsoluteFill } from "remotion";
 import { drawScene, type Scene } from "./draw";
-import { H, SCALE, W } from "./geometry";
+import { H, RUNWAY, SCALE, W } from "./geometry";
 
 export const PIXEL = loadPixel("normal", { weights: ["400"], subsets: ["latin"] }).fontFamily;
 export const TERM = loadTerm("normal", { weights: ["400"], subsets: ["latin"] }).fontFamily;
@@ -19,6 +19,7 @@ export function Stage({ scene, children, style }: { scene: Scene; children?: Rea
   return (
     <AbsoluteFill style={{ backgroundColor: C.night, ...style }}>
       <canvas ref={ref} width={W} height={H} style={{ width: W * SCALE, height: H * SCALE, imageRendering: "pixelated" }} />
+      <div style={{ position: "absolute", left: (RUNWAY.x + RUNWAY.w / 2) * SCALE, top: (RUNWAY.y + 11) * SCALE, transform: "translateX(-50%)", font: `22px/1 ${PIXEL}`, color: "#e8ecf4", textShadow: "3px 3px 0 #1f3d1b" }}>MAIN</div>
       {children}
     </AbsoluteFill>
   );
