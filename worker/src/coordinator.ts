@@ -55,7 +55,111 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   log(kind: string, detail: unknown, fork: string | null = null) {
-    this.sql.exec("INSERT INTO event_log(at, kind, fork, detail) VALUES (?, ?, ?, ?)", Date.now(), kind, fork, JSON.stringify(detail));
+    const at = Date.now();
+    this.sql.exec("INSERT INTO event_log(at, kind, fork, detail) VALUES (?, ?, ?, ?)", at, kind, fork, JSON.stringify(detail));
+    const id = this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id;
+    this.deliverWebhooks({ id, at, kind, fork, pr: fork ? prLabel(fork) : null, detail });
+    this.scheduleFlush();
+  }
+
+  // ── live push, recording, webhooks ──────────────────────────────────────
+
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Coalesce bursts of events into one snapshot + one broadcast. */
+  private scheduleFlush() {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      try {
+        this.flush();
+      } catch (err) {
+        console.error("flush failed", err);
+      }
+    }, 120);
+  }
+
+  private flush() {
+    if (!this.meta("baseline")) return;
+    const model = this.readModel();
+    const full = JSON.stringify(model);
+    // Recording: compact snapshot for replay, stored only when the airspace actually changed.
+    const compact = JSON.stringify({
+      baseline: model.baseline,
+      baselineHead: model.baselineHead,
+      forks: model.forks.map(({ name, pr, status, landed_at, check_status, check_sha, head_sha, base_sha, diff_lines }) => ({ name, pr, status, landed_at, check_status, check_sha, head_sha, base_sha, diff_lines })),
+      sequence: model.sequence,
+      signals: model.signals
+        .filter((x) => x.resolved_at === null && ["semantic_conflict", "merge_conflict", "rebase_required"].includes(x.kind))
+        .map(({ kind, fork, about_fork, symbol }) => ({ kind, fork, about_fork, symbol, resolved_at: null })),
+    });
+    const last = this.sql.exec<{ state: string }>("SELECT state FROM snapshots ORDER BY id DESC LIMIT 1").toArray()[0]?.state;
+    if (last !== compact) this.sql.exec("INSERT INTO snapshots(at, state) VALUES (?, ?)", Date.now(), compact);
+    // Live push to every connected dashboard.
+    for (const ws of this.ctx.getWebSockets("dashboard")) {
+      try {
+        ws.send(full);
+      } catch {
+        /* socket closing */
+      }
+    }
+  }
+
+  /** Dashboards connect here (Worker forwards the authorized upgrade request). */
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade") !== "websocket") return new Response("expected websocket", { status: 426 });
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    this.ctx.acceptWebSocket(server, ["dashboard"]);
+    if (this.meta("baseline")) server.send(JSON.stringify(this.readModel()));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (message === "state" && this.meta("baseline")) ws.send(JSON.stringify(this.readModel()));
+  }
+
+  /** Full recording for replay: every snapshot plus every event. */
+  async timelineJson(): Promise<string> {
+    const snapshots = this.sql.exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id").toArray();
+    const events = this.sql.exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id").toArray();
+    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
+      .map((e) => JSON.stringify({ id: e.id, at: e.at, kind: e.kind, fork: e.fork, detail: JSON.parse(e.detail) as unknown }))
+      .join(",")}]}`;
+  }
+
+  async addWebhook(url: string, secret: string | null): Promise<{ url: string }> {
+    const u = new URL(url);
+    if (u.protocol !== "https:") throw new Error("webhook URL must be https");
+    this.sql.exec("INSERT INTO webhooks(url, secret, created_at) VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET secret = excluded.secret", url, secret, Date.now());
+    return { url };
+  }
+
+  async listWebhooks(): Promise<string[]> {
+    return this.sql.exec<{ url: string }>("SELECT url FROM webhooks").toArray().map((r) => r.url);
+  }
+
+  async removeWebhook(url: string): Promise<void> {
+    this.sql.exec("DELETE FROM webhooks WHERE url = ?", url);
+  }
+
+  private deliverWebhooks(event: { id: number; at: number; kind: string; fork: string | null; pr: string | null; detail: unknown }) {
+    const hooks = this.sql.exec<{ url: string; secret: string | null }>("SELECT url, secret FROM webhooks").toArray();
+    if (!hooks.length) return;
+    const body = JSON.stringify({ type: "atc.event", baseline: this.meta("baseline"), event });
+    for (const h of hooks) {
+      this.ctx.waitUntil(
+        (async () => {
+          const headers: Record<string, string> = { "content-type": "application/json", "user-agent": "atc-webhooks/1" };
+          if (h.secret) {
+            const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(h.secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+            const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)));
+            headers["x-atc-signature"] = `sha256=${[...sig].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+          }
+          await fetch(h.url, { method: "POST", headers, body }).catch(() => undefined);
+        })(),
+      );
+    }
   }
 
   // ── forks ───────────────────────────────────────────────────────────────

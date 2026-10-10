@@ -67,6 +67,12 @@
   form.key button { margin-top: 12px; padding: 10px 14px; font: 10px "Press Start 2P", monospace; color: var(--night); background: var(--amber); border: 0; cursor: pointer; }
   :focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
 
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0 0; }
+  .controls button { padding: 8px 10px; font: 10px "Press Start 2P", monospace; color: var(--text); background: var(--panel); border: 2px solid var(--edge); cursor: pointer; }
+  .controls button[aria-pressed="true"] { color: var(--night); background: var(--amber); border-color: var(--amber); }
+  .controls .clock { margin-left: auto; color: var(--dim); }
+  .controls progress { flex: 1 1 160px; height: 10px; accent-color: var(--orange); }
+  .replay-link { color: var(--cyan); }
   @media (max-width: 1100px) { main { grid-template-columns: 1fr; padding: 12px; } header { padding: 12px 16px; } }
 </style>
 </head>
@@ -75,6 +81,7 @@
   <h1>ATC</h1>
   <span class="sub">AIR TRAFFIC CONTROL</span>
   <span class="baseline" id="baseline"></span>
+  <a class="replay-link" id="replayLink" hidden>Replay this run</a>
   <span class="live" id="live" hidden>LIVE</span>
 </header>
 <div id="app"></div>
@@ -87,7 +94,7 @@
   const TOUCHDOWN = { x: RUNWAY.x + 6, y: GROUND };
   const SLOPE = { x: -0.92, y: -0.39 };                    // unit vector up the glide path
   const SLOTS = 7;                                         // approach slots before overflow → holding
-  const HOLD = { x: 214, y0: 26, dy: 20, rx: 30 };         // holding stack, top centre
+  const HOLD = { x: 200, y0: 34, dy: 30, rx: 26 };         // holding stack, top centre (staggered)
   const GATE = { x: 352, y: GROUND + 12, dx: -32 };        // parked planes on the ground
   const LIVERY = ["#f38020", "#3fa2ff", "#ff5fb0", "#3ccf6e", "#ffd23f", "#a07bff", "#ff6b4a", "#2fd6c8"];
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -152,6 +159,45 @@
     for (const f of state.forks) {
       if (f.status === "abandoned") { planes.delete(f.name); continue; }
       if (!planes.has(f.name)) planes.set(f.name, { x: -30, y: 40 + (prNum(f.name) * 29) % 90, face: 1, livery: LIVERY[(prNum(f.name) - 1 + LIVERY.length) % LIVERY.length], t: Math.random() * 6, phase: null });
+    }
+  }
+
+  // ── event popups: real events float up from the plane they happened to ──
+  const popups = [];
+  let seenEvent = -1;
+  const POP = {
+    "fork.created": ["NEW PR", "#78d7ff"], "push.received": ["PUSH", "#ffffff"], "land.merged": ["LANDED", "#62e07c"],
+    "signal.rebase_required": ["REBASE", "#ff5757"], "land.denied": ["DENIED", "#faae40"], "land.requested": ["REQ LAND", "#faae40"],
+  };
+  function addPopup(p) {
+    const i = popups.findIndex((x) => x.fork === p.fork);
+    if (i >= 0) popups.splice(i, 1); // one popup per plane: the latest real event wins
+    popups.push(p);
+  }
+  function popEvents(events, initial) {
+    const fresh = events.filter((e) => e.id > seenEvent).sort((a, b) => a.id - b.id);
+    if (fresh.length) seenEvent = Math.max(seenEvent, ...fresh.map((e) => e.id));
+    if (initial) return;
+    for (const e of fresh) {
+      if (e.kind === "check.pair" && e.detail && e.detail.status === "semantic_conflict") {
+        for (const f of [e.detail.a, e.detail.b]) addPopup({ fork: f, text: "CONFLICT!", color: "#ff5757", born: performance.now() });
+      } else if (POP[e.kind] && e.fork) {
+        addPopup({ fork: e.fork, text: POP[e.kind][0], color: POP[e.kind][1], born: performance.now() });
+      }
+    }
+  }
+  function drawPopups(now) {
+    for (let i = popups.length - 1; i >= 0; i--) {
+      const p = popups[i], age = (now - p.born) / 2400;
+      const plane = planes.get(p.fork);
+      if (age > 1 || !plane) { popups.splice(i, 1); continue; }
+      ctx.globalAlpha = 1 - age * age;
+      ctx.font = "8px 'Press Start 2P'";
+      const w = ctx.measureText(p.text).width;
+      const y = plane.y - 24 - age * 18;
+      px(plane.x - w / 2 - 2, y - 8, w + 4, 10, "rgba(15,21,48,0.9)");
+      ctx.fillStyle = p.color; ctx.fillText(p.text, Math.round(plane.x - w / 2), Math.round(y));
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -248,7 +294,7 @@
       if (t.mode === "approach") { p.phase = null; p.face = 1; ease(p, t.x, t.y, k); }
       else if (t.mode === "holding") {
         p.phase = null;
-        const cx = HOLD.x, cy = HOLD.y0 + t.level * HOLD.dy;
+        const cx = HOLD.x + (t.level % 2 ? 70 : 0), cy = HOLD.y0 + Math.floor(t.level / 2) * HOLD.dy + (t.level % 2 ? 14 : 0);
         const ox = reduceMotion ? 0 : Math.cos(p.t * 0.9) * HOLD.rx;
         p.face = reduceMotion ? 1 : (Math.sin(p.t * 0.9) > 0 ? -1 : 1);
         ease(p, cx + ox, cy + (reduceMotion ? 0 : Math.sin(p.t * 1.8)), Math.min(1, dt * 0.004));
@@ -284,6 +330,7 @@
         const p = planes.get(f.name);
         if (p) drawPlane(p, pr(f.name), { conflict: inConflict.has(f.name), tag: tags.get(f.name) });
       }
+      drawPopups(now);
     }
     requestAnimationFrame(frame);
   }
@@ -318,27 +365,86 @@
     document.getElementById("log").innerHTML = lines || `<li class="empty">Frequency quiet.</li>`;
   }
 
-  let timer = 0;
-  async function poll() {
-    clearTimeout(timer);
-    try {
-      const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/state`, { headers: { authorization: `Bearer ${key}` } });
-      if (res.status === 401) { key = ""; return askForKey("KEY REJECTED. PASTE AGENTMESH_API_KEY."); }
-      const next = await res.json();
-      if (!res.ok) throw new Error(next.error || res.statusText);
-      state = next; syncPlanes(); renderPanel();
-      live.hidden = false; live.classList.remove("stale"); live.textContent = "LIVE";
-    } catch (_) {
-      live.hidden = false; live.classList.add("stale"); live.textContent = "RECONNECTING";
-    }
-    timer = setTimeout(poll, 1000);
+  // ── live: ATC pushes every change over a WebSocket (polling only as fallback) ──
+  function applyState(next, initial) {
+    state = next; syncPlanes(); popEvents(state.events || [], initial); renderPanel();
+  }
+  let timer = 0, socket = null, backoff = 1000, gotFirst = false;
+  function setLive(ok, text) { live.hidden = false; live.classList.toggle("stale", !ok); live.textContent = text; }
+  async function pollOnce() {
+    const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/state`, { headers: { authorization: `Bearer ${key}` } });
+    if (res.status === 401) { key = ""; askForKey("KEY REJECTED. PASTE AGENTMESH_API_KEY."); return false; }
+    const next = await res.json();
+    if (!res.ok) throw new Error(next.error || res.statusText);
+    applyState(next, !gotFirst); gotFirst = true;
+    return true;
+  }
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(`${proto}://${location.host}/api/repos/${encodeURIComponent(repo)}/live?key=${encodeURIComponent(key)}`);
+    socket.onopen = () => { backoff = 1000; clearTimeout(timer); setLive(true, "LIVE"); };
+    socket.onmessage = (m) => { try { applyState(JSON.parse(m.data), !gotFirst); gotFirst = true; } catch (_) {} };
+    socket.onclose = () => {
+      setLive(false, "RECONNECTING");
+      const fallback = async () => { try { await pollOnce(); } catch (_) {} timer = setTimeout(fallback, 3000); };
+      fallback();
+      setTimeout(() => { clearTimeout(timer); connect(); }, backoff);
+      backoff = Math.min(backoff * 2, 15000);
+    };
+  }
+
+  // ── replay: play a recorded run through the same animation ──────────────
+  async function startReplay() {
+    const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/timeline`, { headers: { authorization: `Bearer ${key}` } });
+    if (res.status === 401) { key = ""; return askForKey("KEY REJECTED. PASTE AGENTMESH_API_KEY."); }
+    const tl = await res.json();
+    if (!tl.snapshots.length) { setLive(false, "NOTHING RECORDED"); return; }
+    const GAP = 2500; // compress idle stretches so the video keeps moving
+    const snaps = tl.snapshots;
+    const vt = [0];
+    for (let i = 1; i < snaps.length; i++) vt.push(vt[i - 1] + Math.min(snaps[i].at - snaps[i - 1].at, GAP));
+    const total = vt[vt.length - 1] + 1500;
+    const realAt = (v) => {
+      let i = 0; while (i + 1 < vt.length && vt[i + 1] <= v) i++;
+      const next = snaps[i + 1] ? snaps[i + 1].at : Infinity;
+      return { i, t: Math.min(snaps[i].at + (v - vt[i]), next - 1) };
+    };
+    let v = 0, speed = 2, playing = true, lastI = -1, lastNow = performance.now();
+    const ctl = document.getElementById("controls");
+    ctl.hidden = false;
+    ctl.innerHTML = `<button id="pp">PAUSE</button><button id="rs">RESTART</button>
+      ${[1, 2, 4, 8].map((x) => `<button data-speed="${x}" aria-pressed="${x === speed}">${x}X</button>`).join("")}
+      <progress id="pg" max="1000" value="0"></progress><span class="clock" id="clk"></span>`;
+    const fmt = (ms) => `${String(Math.floor(ms / 60000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+    document.getElementById("pp").onclick = (e) => { playing = !playing; e.target.textContent = playing ? "PAUSE" : "PLAY"; };
+    document.getElementById("rs").onclick = () => { v = 0; lastI = -1; seenEvent = -1; planes.clear(); popups.length = 0; playing = true; document.getElementById("pp").textContent = "PAUSE"; };
+    ctl.querySelectorAll("[data-speed]").forEach((b) => (b.onclick = () => { speed = Number(b.dataset.speed); ctl.querySelectorAll("[data-speed]").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); }));
+    setLive(true, "REPLAY");
+    const tick = () => {
+      const now = performance.now();
+      if (playing) v = Math.min(total, v + (now - lastNow) * speed);
+      lastNow = now;
+      const { i, t } = realAt(v);
+      const events = tl.events.filter((e) => e.at <= t);
+      if (i !== lastI || events.length !== (state && state.events ? state.events.length : -1)) {
+        const first = lastI === -1;
+        lastI = i;
+        applyState({ ...snaps[i].state, events: events.slice().reverse() }, first);
+      }
+      document.getElementById("pg").value = Math.round((v / total) * 1000);
+      document.getElementById("clk").textContent = `${fmt(v)} / ${fmt(total)}`;
+      if (v >= total) { playing = false; document.getElementById("pp").textContent = "PLAY"; }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   async function boot() {
     if (!repo) return askForRepo();
     if (!key) return askForKey("ATC ACCESS KEY");
     app.innerHTML = `<main>
-      <div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Side view of the approach: each pull request is a plane, nearest the runway lands next"></canvas></div>
+      <div><div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Side view of the approach: each pull request is a plane, nearest the runway lands next"></canvas></div>
+      <div class="controls" id="controls" hidden></div></div>
       <aside>
         <section><h2>LANDING SEQUENCE</h2><div id="seq"></div></section>
         <section><h2>ATC LOG</h2><ul class="log" id="log"></ul></section>
@@ -348,7 +454,15 @@
     ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
     try { await document.fonts.load("8px 'Press Start 2P'"); } catch (_) {}
-    poll();
+    const link = document.getElementById("replayLink");
+    if (new URLSearchParams(location.search).has("replay")) {
+      link.hidden = false; link.textContent = "Back to live"; link.href = location.pathname;
+      startReplay();
+    } else {
+      link.hidden = false; link.href = `${location.pathname}?replay`;
+      try { await pollOnce(); } catch (_) {}
+      connect();
+    }
     requestAnimationFrame(frame);
   }
   boot();

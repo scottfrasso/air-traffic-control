@@ -70,6 +70,18 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
       return json(await stub.getClearance(fork));
     },
   ],
+  ["GET", /^\/timeline$/, async (stub) => new Response(await stub.timelineJson(), { headers: { "content-type": "application/json" } })],
+  ["GET", /^\/webhooks$/, async (stub) => json(await stub.listWebhooks())],
+  [
+    "POST",
+    /^\/webhooks$/,
+    async (stub, request) => {
+      const b = await body<{ url?: string; secret?: string }>(request);
+      if (!b.url) throw new HttpError(400, "url is required");
+      return json(await stub.addWebhook(b.url, b.secret ?? null), 201);
+    },
+  ],
+  ["DELETE", /^\/webhooks$/, async (stub, _r, url) => (await stub.removeWebhook(url.searchParams.get("url") ?? ""), json({ ok: true }))],
   ["POST", /^\/reconcile$/, async (stub) => json({ found: await stub.reconcile() })],
 ];
 
@@ -79,9 +91,14 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   if (!m?.[1] || !m[2]) return json({ error: "not found" }, 404);
   const baseline = m[1];
   const rest = m[2];
+  const stub = env.COORDINATOR.getByName(baseline);
+  if (rest === "/live") {
+    // Live push to the dashboard: WebSocket served by the Coordinator (hibernatable).
+    await stub.ensure(baseline);
+    return stub.fetch(request);
+  }
   const route = routes.find(([method, pattern]) => method === request.method && pattern.test(rest));
   if (!route) return json({ error: "not found" }, 404);
-  const stub = env.COORDINATOR.getByName(baseline);
   try {
     await stub.ensure(baseline);
     return await route[2](stub, request, new URL(rest + url.search, url), { env, baseline });

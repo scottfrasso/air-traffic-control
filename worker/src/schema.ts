@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS pair_checks(
   detail TEXT NOT NULL, checked_at INTEGER NOT NULL,
   PRIMARY KEY(fork_a, fork_b));
 
+-- Recorded airspace snapshots for replay (one per state change, de-duplicated).
+CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, state TEXT NOT NULL);
+
+-- Outbound webhooks: every event is POSTed to each URL.
+CREATE TABLE IF NOT EXISTS webhooks(url TEXT PRIMARY KEY, secret TEXT, created_at INTEGER NOT NULL);
+
 CREATE TABLE IF NOT EXISTS event_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL, kind TEXT NOT NULL, fork TEXT, detail TEXT NOT NULL);
