@@ -26,13 +26,13 @@
   },
   "airport": {
     "file": "vo/airport.mp3",
-    "seconds": 10.161633,
-    "hash": "85a9981520ad"
+    "seconds": 13.453061,
+    "hash": "adab289ca45f"
   },
   "close": {
     "file": "vo/close.mp3",
-    "seconds": 3.474286,
-    "hash": "022b8e01c0d8"
+    "seconds": 4.963265,
+    "hash": "f6bd0ac888c8"
   },
   "intro": {
     "file": "vo/intro.mp3",
@@ -41,8 +41,8 @@
   },
   "intro2": {
     "file": "vo/intro2.mp3",
-    "seconds": 4.022857,
-    "hash": "a450bde30596"
+    "seconds": 5.616327,
+    "hash": "f2011e905c86"
   },
   "order": {
     "file": "vo/order.mp3",
@@ -58,5 +58,15 @@
     "file": "vo/land.mp3",
     "seconds": 3.526531,
     "hash": "d450bb4e8006"
+  },
+  "durable": {
+    "file": "vo/durable.mp3",
+    "seconds": 10.213878,
+    "hash": "7c624ada6e02"
+  },
+  "sandbox": {
+    "file": "vo/sandbox.mp3",
+    "seconds": 7.549388,
+    "hash": "08d51d26afc5"
   }
 }

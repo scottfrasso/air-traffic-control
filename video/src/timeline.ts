@@ -97,20 +97,22 @@ export function videoToReal(v: number): number {
 // ── beat 5: the airport, then the close ──
 const b5 = b4End;
 const airportVo = b5 + 0.4;
-const closeStart = airportVo + d("airport") + 0.5;
+const durableVo = airportVo + d("airport") + 0.5;
+const sandboxVo = durableVo + d("durable") + 0.5;
+const closeStart = sandboxVo + d("sandbox") + 0.6;
 const closeVo = closeStart + 0.4;
 const end = closeVo + d("close") + 1.6;
 
 export const T = {
   introVo, intro2Vo, setupStart, setupVo, todayStart, todayVo, todayEnd, rewindEnd,
   b4, real1Vo, v0, flag, real2Vo, orderVo, holdVo, fix, firstLand, landVo, lastLand, b4End,
-  b5, airportVo, closeStart, closeVo, end,
+  b5, airportVo, durableVo, sandboxVo, closeStart, closeVo, end,
 };
 
 export const VO: Array<{ id: LineId; at: number }> = [
   { id: "intro", at: introVo }, { id: "intro2", at: intro2Vo }, { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
   { id: "real1", at: real1Vo }, { id: "real2", at: real2Vo }, { id: "order", at: orderVo }, { id: "hold", at: holdVo }, { id: "land", at: landVo },
-  { id: "airport", at: airportVo }, { id: "close", at: closeVo },
+  { id: "airport", at: airportVo }, { id: "durable", at: durableVo }, { id: "sandbox", at: sandboxVo }, { id: "close", at: closeVo },
 ];
 export const voFile = (id: LineId) => vo[id].file;
 export const voSeconds = d;

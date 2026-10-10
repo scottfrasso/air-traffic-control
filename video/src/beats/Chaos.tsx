@@ -58,6 +58,7 @@ function Title({ k, fadeOut }: { k: number; fadeOut: number }) {
       <div style={{ font: `150px/1 ${PIXEL}`, color: C.orange, textShadow: "10px 10px 0 #0f1530" }}>ATC</div>
       <div style={{ font: `30px/1.4 ${PIXEL}`, color: C.amber }}>AIR TRAFFIC CONTROL</div>
       <div style={{ font: `48px/1.2 ${TERM}`, color: C.text }}>for AI coding agents merging pull requests into one repo</div>
+      <div style={{ font: `26px/1.2 ${PIXEL}`, color: C.orange, marginTop: 10 }}>BUILT ON CLOUDFLARE</div>
     </AbsoluteFill>
   );
 }
