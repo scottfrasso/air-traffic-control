@@ -18,7 +18,9 @@ the raw spike findings (milestone 1).
 | [0009](docs/adr/0009-stateless-mcp-and-token-split.md) | Stateless MCP; separate subscription token | Accepted |
 | [0010](docs/adr/0010-checker-container.md) | Speculative merges in a container-backed Checker DO | Accepted |
 | [0011](docs/adr/0011-landing-gate.md) | Landing gate, arbitration, rebase-required, full-ancestry merge base | Accepted |
-| [0012](docs/adr/0012-runway-dashboard.md) | 8-bit top-down runway dashboard | Accepted |
+| [0012](docs/adr/0012-runway-dashboard.md) | 8-bit runway dashboard (now side view + ATC sequence) | Accepted |
+| [0013](docs/adr/0013-incremental-checks.md) | Compute main once, check only deltas (repo cache, tree-hash results, incremental tsc) | Accepted |
+| [0014](docs/adr/0014-live-push-replay-webhooks.md) | Live WebSocket push, recorded replay, outbound webhooks, real agents | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 

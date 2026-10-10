@@ -6,20 +6,33 @@
 //   single typecheck one ref
 //   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 interface RepoRef { name: string; remote: string; token: string; sha?: string }
 interface TsError { file: string; line: number; col: number; code: string; message: string; lineText: string }
-interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: string }
+interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: string; cached?: boolean; ms?: number }
 
 type Input =
-  | { mode: "single"; repo: RepoRef }
-  | { mode: "pair"; a: RepoRef; b: RepoRef }
+  | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
+  | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
   | { mode: "land"; fork: RepoRef; baseline: RepoRef & { expectedHead: string } };
 
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
-const dir = mkdtempSync("/work/check-");
+// Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
+// fork and baseline commit, so each check fetches only deltas; typecheck results keyed by git TREE hash;
+// TypeScript incremental state computed once per baseline tree and reused by every check on top of it.
+const CACHE = "/cache";
+const repoDir = join(CACHE, "repo");
+mkdirSync(join(CACHE, "tc"), { recursive: true });
+mkdirSync(join(CACHE, "tsbuild"), { recursive: true });
+if (!existsSync(join(repoDir, ".git"))) {
+  mkdirSync(repoDir, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: repoDir });
+}
+let dir = repoDir; // git commands run here; typechecks run in throwaway worktrees
+const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
+const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
 function git(args: string[], opts: { token?: string; allowFail?: boolean } = {}): { ok: boolean; out: string } {
   const auth = opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [];
@@ -35,57 +48,113 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean } = {})
 
 /** Fetch `main` of a repo into refs/agentmesh/<label>; returns the fetched sha. */
 function fetchMain(repo: RepoRef, label: string): string {
-  git(["fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:refs/agentmesh/${label}`], { token: repo.token });
-  return git(["rev-parse", `refs/agentmesh/${label}`]).out;
+  const ref = `refs/agentmesh/${repo.name}`;
+  timed(`fetch ${label}`, () => git(["fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token }));
+  return git(["rev-parse", ref]).out;
 }
 
-function typecheck(ref: string): Typecheck {
-  git(["checkout", "-q", "--force", "--detach", ref]);
-  git(["clean", "-qfdx"]);
-  const sha = git(["rev-parse", "HEAD"]).out;
-  let output = "";
-  let ok = true;
+const treeOf = (rev: string) => git(["rev-parse", `${rev}^{tree}`]).out;
+
+/** Main's incremental TypeScript state for a baseline commit, computed once and cached by tree. */
+function mainBuildInfo(baseSha: string | null): string | null {
+  if (!baseSha) return null;
+  const file = join(CACHE, "tsbuild", `${treeOf(baseSha)}.tsbuildinfo`);
+  if (existsSync(file)) return file;
+  const wt = mkdtempSync("/work/main-");
   try {
-    output = execFileSync("tsc", ["--noEmit", "-p", ".", "--pretty", "false"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string };
-    output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-    ok = false;
+    git(["worktree", "add", "-q", "--detach", wt, baseSha]);
+    timed("build main incremental state", () => {
+      try { execFileSync("tsc", ["--noEmit", "-p", ".", "--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo"], { cwd: wt, stdio: "ignore" }); } catch { /* main may not typecheck; state is still useful */ }
+    });
+    if (existsSync(join(wt, ".atc.tsbuildinfo"))) copyFileSync(join(wt, ".atc.tsbuildinfo"), file);
+  } finally {
+    git(["worktree", "remove", "--force", wt], { allowFail: true });
   }
-  const errors: TsError[] = [];
-  for (const line of output.split("\n")) {
-    const m = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/.exec(line.trim());
-    if (!m) continue;
-    const [, file = "", l = "0", c = "0", code = "", message = ""] = m;
-    let lineText = "";
+  return existsSync(file) ? file : null;
+}
+
+/** Typecheck a commit in a throwaway worktree. Results are cached by tree hash; main's incremental state seeds tsc. */
+function typecheck(rev: string, label: string, buildInfo: string | null): Typecheck {
+  const sha = git(["rev-parse", rev]).out;
+  const tree = treeOf(sha);
+  const cacheFile = join(CACHE, "tc", `${tree}.json`);
+  if (existsSync(cacheFile)) {
+    timings.push({ step: `typecheck ${label}`, ms: 0, cached: true });
+    return { ...(JSON.parse(readFileSync(cacheFile, "utf8")) as Typecheck), sha, cached: true, ms: 0 };
+  }
+  const wt = mkdtempSync("/work/check-");
+  const started = Date.now();
+  try {
+    git(["worktree", "add", "-q", "--detach", wt, sha]);
+    const args = ["--noEmit", "-p", ".", "--pretty", "false"];
+    if (buildInfo) {
+      copyFileSync(buildInfo, join(wt, ".atc.tsbuildinfo"));
+      args.push("--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo");
+    }
+    let output = "";
+    let ok = true;
     try {
-      lineText = (readFileSync(join(dir, file), "utf8").split("\n")[Number(l) - 1] ?? "").trim();
-    } catch { /* file may not exist */ }
-    errors.push({ file, line: Number(l), col: Number(c), code, message, lineText });
+      output = execFileSync("tsc", args, { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string };
+      output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
+      ok = false;
+    }
+    const errors: TsError[] = [];
+    for (const line of output.split("\n")) {
+      const m = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/.exec(line.trim());
+      if (!m) continue;
+      const [, file = "", l = "0", c = "0", code = "", message = ""] = m;
+      let lineText = "";
+      try {
+        lineText = (readFileSync(join(wt, file), "utf8").split("\n")[Number(l) - 1] ?? "").trim();
+      } catch { /* file may not exist */ }
+      errors.push({ file, line: Number(l), col: Number(c), code, message, lineText });
+    }
+    const result: Typecheck = { sha, ok: ok && errors.length === 0, errors, output: output.slice(0, 4000) };
+    writeFileSync(cacheFile, JSON.stringify(result));
+    const ms = Date.now() - started;
+    timings.push({ step: `typecheck ${label}`, ms, cached: false });
+    return { ...result, cached: false, ms };
+  } finally {
+    git(["worktree", "remove", "--force", wt], { allowFail: true });
   }
-  return { sha, ok: ok && errors.length === 0, errors, output: output.slice(0, 4000) };
 }
 
 function run(): unknown {
-  git(["init", "-q"]);
   if (input.mode === "single") {
-    const sha = fetchMain(input.repo, "x");
-    return { mode: "single", repo: input.repo.name, result: typecheck(sha) };
+    const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
+    const sha = fetchMain(input.repo, "fork");
+    return { mode: "single", repo: input.repo.name, result: typecheck(sha, "fork", mainBuildInfo(base)), timings };
   }
   if (input.mode === "pair") {
+    const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
     const a = fetchMain(input.a, "a");
     const b = fetchMain(input.b, "b");
-    const aloneA = typecheck(a);
-    const aloneB = typecheck(b);
-    git(["checkout", "-q", "--force", "--detach", a]);
-    const merge = git(["merge", "--no-edit", "-q", b], { allowFail: true });
-    if (!merge.ok) {
-      const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
-      git(["merge", "--abort"], { allowFail: true });
-      return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: false, conflicts, output: merge.out.slice(0, 2000) } };
+    const info = mainBuildInfo(base);
+    const aloneA = typecheck(a, "A alone", info);
+    const aloneB = typecheck(b, "B alone", info);
+    // Merge B into A in a scratch worktree (no checkout of the shared cache repo).
+    const mwt = mkdtempSync("/work/merge-");
+    try {
+      git(["worktree", "add", "-q", "--detach", mwt, a]);
+      const merge = (() => { const prev = dir; dir = mwt; try { return git(["merge", "--no-edit", "-q", b], { allowFail: true }); } finally { dir = prev; } })();
+      if (!merge.ok) {
+        dir = mwt;
+        const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
+        dir = repoDir;
+        return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: false, conflicts, output: merge.out.slice(0, 2000) }, timings };
+      }
+      dir = mwt;
+      const mergedSha = git(["rev-parse", "HEAD"]).out;
+      dir = repoDir;
+      git(["update-ref", `refs/agentmesh/merge-${a.slice(0, 12)}-${b.slice(0, 12)}`, mergedSha]);
+      const merged = typecheck(mergedSha, "merge", info);
+      return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: true, conflicts: [], typecheck: merged }, timings };
+    } finally {
+      dir = repoDir;
+      git(["worktree", "remove", "--force", mwt], { allowFail: true });
     }
-    const merged = typecheck("HEAD");
-    return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: true, conflicts: [], typecheck: merged } };
   }
   // land
   const baseHead = fetchMain(input.baseline, "base");
@@ -93,7 +162,7 @@ function run(): unknown {
   const forkHead = fetchMain(input.fork, "fork");
   const current = git(["merge-base", "--is-ancestor", baseHead, forkHead], { allowFail: true }).ok;
   if (!current) return { mode: "land", landed: false, reason: "fork is not current with baseline (rebase required)", forkHead, baseHead };
-  const check = typecheck(forkHead);
+  const check = typecheck(forkHead, "land", mainBuildInfo(baseHead));
   if (!check.ok) return { mode: "land", landed: false, reason: "fork does not typecheck", forkHead, baseHead, typecheck: check };
   const push = git(["push", "-q", input.baseline.remote, `${forkHead}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
   if (!push.ok) return { mode: "land", landed: false, reason: `push to baseline failed: ${push.out}`, forkHead, baseHead };
@@ -105,5 +174,5 @@ try {
 } catch (err) {
   console.log(`@@RESULT ${JSON.stringify({ error: (err as Error).message })}`);
 } finally {
-  rmSync(dir, { recursive: true, force: true });
+  git(["worktree", "prune"], { allowFail: true });
 }

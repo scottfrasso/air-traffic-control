@@ -7,8 +7,8 @@ export interface RepoRef {
   token: string;
 }
 export type CheckInput =
-  | { mode: "single"; repo: RepoRef }
-  | { mode: "pair"; a: RepoRef; b: RepoRef }
+  | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
+  | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
   | { mode: "land"; fork: RepoRef; baseline: RepoRef & { expectedHead: string } };
 
 export interface TsError {
@@ -24,7 +24,11 @@ export interface Typecheck {
   ok: boolean;
   errors: TsError[];
   output: string;
+  /** True when served from the container's tree-hash cache. */
+  cached?: boolean;
+  ms?: number;
 }
+export type Timing = { step: string; ms: number; cached?: boolean };
 export interface PairResult {
   mode: "pair";
   a: string;
@@ -32,6 +36,7 @@ export interface PairResult {
   aloneA: Typecheck;
   aloneB: Typecheck;
   merge: { clean: boolean; conflicts: string[]; output?: string; typecheck?: Typecheck };
+  timings?: Timing[];
 }
 export interface SingleResult {
   mode: "single";

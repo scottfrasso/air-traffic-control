@@ -10,7 +10,16 @@ Nothing.
 
 ## Works (verified against deployed Cloudflare resources)
 
-- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps, about 40 s, on 3 consecutive runs.
+- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order, about 60 s.
+- **ATC:** forks are numbered PRs. ATC computes a landing sequence (CLEARED / FOLLOW / HOLD / GO AROUND / STANDBY) with one reason
+  each, which agents read via `get_clearance` (MCP + HTTP) and which the dashboard flies.
+- **Real agents:** `demo/src/live.ts` + `agents/` prompts + `handover/02-…`. One headless Claude Code agent landed a PR end to end
+  through the MCP server. Several agents at once hasn't been tried yet; that's for the owner to run.
+- **Live push, recording, replay:** hibernatable WebSocket push on every event (verified: 63 pushes in one run). Snapshots are recorded
+  (39 in one run), and `/r/<baseline>?replay` replays them with popups from real events.
+- **Outbound webhooks:** HMAC-signed POST per event. **Not verified against a real receiver yet.**
+- **Incremental checks (ADR-0013):** persistent repo cache, typecheck results cached by tree hash, main's incremental tsc state.
+  In the 5-PR run, 22 of 60 typecheck requests were cache hits.
 - **M1 spike:** import (create + `git push`), fork ×2, push with plain git, push event into the Worker. Findings are in DECISIONS.md.
 - **M2 in-flight index:** forks through the Artifacts binding, per-fork push subscriptions, a Workflow per push, a tree diff against the true
   merge base (full ancestry), touched files, exported-symbol deltas, imports, file and symbol overlaps. Check: `demo/src/checks/m2-index.ts`.
@@ -20,8 +29,9 @@ Nothing.
   produces `semantic_conflict` to both forks, naming the symbol and the other fork, about 11–21 s after push. Check: `m4-speculative.ts`.
 - **M5 landing gate:** current + green gate, closest-to-landing arbitration with ties to the smaller diff, fast-forward landing in the
   container, `rebase_required` to the others. Covered by `run.sh` and `worker/test/landing.test.ts`.
-- **Dashboard:** an 8-bit top-down runway at `/r/<baseline>`. Planes approach in landing order, conflicts blink and link,
-  rebase-required planes hold, and landings roll out to the apron. Includes a flight board and tower radio.
+- **Dashboard:** an 8-bit side view at `/r/<baseline>`. PR planes descend a glide slope in ATC order with clouds behind them,
+  conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
+  Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
   clean before the first push), 16 unit tests, strict TypeScript in every package.
 
@@ -31,7 +41,8 @@ Nothing.
   Semantic-conflict verdicts come only from real `tsc`.
 - **Symbol attribution** in a semantic conflict matches the error line against the forks' changed export names. An error
   that doesn't mention a changed symbol is still reported as a conflict, but `symbol` is null.
-- **Pair checks are O(n²)** per push across active forks. That's fine for a handful of agents but not tuned for dozens.
+- **Pair checks are O(n²)** per push across active forks. They run in parallel on a pool of 3 `standard-3` containers, which splits the
+  result cache. Routing by fork, or passing ATC's known results into pair checks, would help.
 - **Push events vs reconcile:** a new Artifacts subscription takes 30–60 s to start delivering, so a fork's first pushes are
   usually caught by the Coordinator's 5 s reconcile poll (ADR-0006). Both paths are live; the event log shows which one fired.
 - **Auth:** one shared API key for every agent and the dashboard (ADR-0005). Agent identity is not authenticated.
@@ -45,7 +56,7 @@ Nothing.
 - **Second demo variant with two real coding agents over MCP.** The tools are built and exercised by a scripted MCP client
   (`m3-signals.ts`), but there's no recorded run with two LLM agents.
 - Cloudflare logo in the dashboard's hero cloud (slot reserved; waiting on the owner's asset).
-- The dashboard polls every second instead of using WebSockets (ADR-0008).
+- An LLM to phrase ATC's reasons: rejected for now. The ordering and reasons are deterministic so the demo is repeatable.
 
 ## Next
 

@@ -437,7 +437,7 @@ export class Coordinator extends DurableObject<Env> {
       x, y, x === r.a ? r.aloneA.sha : r.aloneB.sha, x === r.a ? r.aloneB.sha : r.aloneA.sha, v.status,
       JSON.stringify({ newErrors: v.newErrors, symbol: v.symbol, changer: v.changer, conflicts: v.conflicts }), Date.now(),
     );
-    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError) }, null);
+    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError), timings: r.timings ?? [] }, null);
     if (!fresh) return { status: `${v.status} (stale)` };
 
     if (v.status === "clean" || v.status === "inherited_failure") {

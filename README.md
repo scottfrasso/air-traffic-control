@@ -1,20 +1,23 @@
-# Air Traffic Control
+# ATC: Air Traffic Control for coding agents
 
-**Early conflict signals and landing order for many coding agents working on one repo.**
+**Early conflict signals and a landing sequence for many coding agents working on one repo.**
 Built on Cloudflare Workers and Artifacts for the "Build the next Git platform" competition.
 
 GitHub shows you a conflict at PR or merge time. By then two agents have each spent an hour on work that can't
-both land. Air Traffic Control (internally `agentmesh`) watches every agent's fork **while the work is in flight**, and
-it tells agents early when another agent's change will break theirs:
+both land. ATC (internally `agentmesh`) watches every agent's pull request (each one is a fork in Cloudflare Artifacts)
+**while the work is in flight**. It tells agents early when another agent's change will break theirs, and it decides the
+**landing sequence**: who merges next, and why.
 
-- **Agent A** changes the signature of `applyDiscount`.
-- **Agent B**, in another fork, adds a new caller of `applyDiscount` in a different file.
-- Plain `git merge` reports **no conflict**. Each fork typechecks on its own.
-- About 15 seconds after B pushes, both agents get a **semantic-conflict signal** naming `applyDiscount` and the other fork.
+- **PR1** changes the signature of `applyDiscount`.
+- **PR2**, in another fork, adds a new caller of `applyDiscount` in a different file.
+- Plain `git merge` reports **no conflict**. Each PR typechecks on its own.
+- About 10–15 seconds after PR2 pushes, both agents get a **semantic-conflict signal** naming `applyDiscount` and the other PR.
   That comes from a speculative merge plus `tsc` in a container. No one had asked to land yet.
-- A asks to land and merges. B is told to **rebase**. B fixes the call and lands. Baseline typechecks.
+- ATC's sequence shows, for example, `#1 PR2 CLEARED: beats PR1 on applyDiscount, smaller diff` and `PR1 HOLD: lands after PR2`.
+- PR1 asks to land and merges. PR2 is told to **rebase**, fixes the call, and lands. Three more independent PRs land in sequence.
+  Baseline typechecks.
 
-![Runway dashboard: two agents on approach, flagged in conflict](docs/screenshots/runway-conflict.png)
+![ATC replay: PR1 landing, PR2 rebased, three PRs going around](docs/screenshots/atc-replay.png)
 
 ## Run the demo
 
@@ -24,7 +27,17 @@ pnpm install
 ```
 
 `.env` at the repo root needs `CLOUDFLARE_API_TOKEN` (Artifacts edit, for seeding the baseline) and `AGENTMESH_API_KEY`.
-The script prints a dashboard link (`/r/<baseline>`). Paste the API key once when it asks.
+The script prints a dashboard link (`/r/<baseline>`). Paste the API key once when it asks. Add `?replay` to replay the
+recorded run through the animation (1x–8x), which is how the video is made.
+
+### Real agents
+
+```bash
+pnpm --dir demo exec tsx src/live.ts 4     # fresh runway + 4 agent prompts + the `claude mcp add` command
+```
+See [`handover/02-run-real-claude-code-agents.md`](handover/02-run-real-claude-code-agents.md). Each Claude Code session
+calls `start_work` and gets a PR number plus ready-to-run git commands. It then works, pushes, follows `get_signals` and
+`get_clearance`, and calls `request_land`. One headless Claude Code agent was verified to land a PR this way end to end.
 
 Milestone checks, each against deployed resources:
 
@@ -47,7 +60,7 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
  │ Artifacts            │ ───────────────▶  │ Worker "agentmesh"                         │
  │  baseline repo       │  (Queues event    │  queue consumer ──┐                        │
  │  one fork per agent  │   subscription,   │  /api, /mcp ──────┤                        │
- └──────────────────────┘   per fork)       │  /r/<baseline> dashboard (8-bit runway)    │
+ └──────────────────────┘   per fork)       │  /r/<baseline> dashboard (8-bit ATC)       │
         ▲   ▲                               └───────────────────┼────────────────────────┘
         │   │ readTree / readBlob / log / fork / createToken    ▼
         │   └──────────────────────────────  Coordinator DO (SQLite, one per baseline)
@@ -75,16 +88,22 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
 | **Durable Objects (SQLite)** | `Coordinator`, one per baseline, holds the in-flight index, intents, signals, pair-check results, landing state and event log. The `Checker` DO owns the container. |
 | **Containers / Sandbox** | `Checker` follows the Sandbox SDK 1.0 model (`ctx.container`). It clones forks, runs `git merge`, `tsc --noEmit`, and fast-forward landing pushes. |
 | **Workflows** | `PushPipeline` runs one durable, retried pipeline per push: index → signals → speculative merges. |
-| **Agents SDK (MCP)** | `/mcp` is a stateless MCP server (`createMcpHandler`) with tools `start_work`, `declare_intent`, `get_signals`, `request_land`. |
+| **Agents SDK (MCP)** | `/mcp` is a stateless MCP server (`createMcpHandler`) with tools `start_work`, `declare_intent`, `get_signals`, `get_clearance`, `request_land`. |
+| **Durable Object WebSockets** | The Coordinator pushes every state change to dashboards over hibernatable WebSockets. It records snapshots for replay and sends HMAC-signed outbound webhooks. |
 
 ### The rules
 
 - **Signals are context, not commands.** Kinds: `signature_change` (an export you use, edit, or plan to touch is changing),
   `overlap` (same file), `intent_overlap`, `semantic_conflict` (the merge fails typecheck and neither fork does alone),
   `merge_conflict` (textual), `rebase_required`, `land_blocked`, `landed`.
-- **Landing gate:** a fork lands only if it is **current** (its merge base is baseline main) and **green** (it typechecks).
-  When forks conflict, the one **closest to landing** wins: requested landing > current > green. **Ties go to the
-  smaller diff.** The dashboard's approach order uses the same ranking, so the plane on short final lands next.
+- **Landing gate:** a PR lands only if it is **current** (its merge base is baseline main) and **green** (it typechecks).
+  When PRs conflict, the one **closest to landing** wins: requested landing > current > green. **Ties go to the
+  smaller diff.**
+- **ATC sequence:** every in-flight PR gets one clearance and one reason: `CLEARED`, `FOLLOW`, `HOLD`
+  (a conflicting PR lands first), `GO AROUND` (baseline moved, so rebase) or `STANDBY` (checks running). Agents read theirs with
+  `get_clearance`. The dashboard flies the planes in exactly this order.
+- **Checks reuse work** (ADR-0013): main is computed once per baseline head (incremental TypeScript state). Results are cached
+  by git tree hash, so a fork's own check is reused by every pair it's in, and each pair usually costs a single `tsc` on the merge.
 
 Design decisions and their evidence are in [`DECISIONS.md`](DECISIONS.md) and [`docs/adr/`](docs/adr/).
 Status, including what's stubbed and cut, is in [`PROGRESS.md`](PROGRESS.md).

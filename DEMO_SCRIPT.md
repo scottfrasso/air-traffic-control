@@ -1,26 +1,22 @@
 # Demo video script (2:30)
 
-The video is built around `./demo/run.sh`. Record two windows side by side: **left**, the terminal running `run.sh`;
-**right**, the runway dashboard at the `/r/<baseline>` link the script prints. Use a fresh run with the key already
-stored in the browser.
-
-Tip: start `run.sh`, copy the dashboard link from its second line, and the dashboard fills in as agents fork.
+Record from **replay**, so every frame is a real recorded run. Do a fresh `./demo/run.sh`, then open
+`<dashboard>/r/<baseline>?replay` at 2x and screen-record the browser (1440 px or wider). Optionally put the terminal
+output of the same run side by side, using the timestamps in the ATC LOG to line them up.
 
 | # | Time | Shot | Voice-over / on-screen text |
 | --- | --- | --- | --- |
-| 1 | 0:00–0:12 | Title card over the empty runway (clouds drifting). | "Ten coding agents, one repo. GitHub tells you they collided at merge time. We tell them while they're still flying." |
-| 2 | 0:12–0:25 | Terminal: `./demo/run.sh`. Step 1 scrolls: agent A forks, changes `applyDiscount(price, percent)` → `applyDiscount(price, discount)`. Dashboard: plane **A** enters approach. | "Every agent gets its own fork in Cloudflare Artifacts, a real Git repo created in about two seconds." |
-| 3 | 0:25–0:40 | Step 2: agent B forks and adds `checkout.ts` calling `applyDiscount(price, 15)`. Plane **B** appears. Tower radio shows the early `signature_change` note to B. | "B adds a new caller in a different file. Before any check runs, B is told that A is changing the signature of a function B uses." |
-| 4 | 0:40–0:55 | Step 3: **PASS: plain git merge … clean, no conflicts.** Zoom on that line. | "Plain git sees nothing wrong. The two forks touch different files." |
-| 5 | 0:55–1:20 | Step 4: both planes **blink red**, dashed red link between them. Flight board: CONFLICT / GREEN / GREEN. Radio: "Speculative merge … fails typecheck: src/checkout.ts:6 TS2345 … Neither fork fails alone." | "On every push, a Workflow merges each pair of in-flight forks in a container and runs the typechecker. A failure neither fork has alone is a semantic conflict, and both agents hear about it about 15 seconds after the push, before anyone asks to land." |
-| 6 | 1:20–1:35 | Point at the approach order (B on short final, A behind) and the DIFF column. | "Approach order is landing order: closest to landing wins, ties go to whoever is cheaper to rebase." |
-| 7 | 1:35–1:55 | Step 5: A requests landing. Plane **A** touches down, rolls out, taxis to the apron. Plane **B** peels off into the **holding pattern**. Radio: "A landed … rebase onto baseline main and fix." Terminal: B's early landing is refused. | "A asks to land, and it's current and green, so it lands. B is sent to hold: rebase required, with the exact symbol and error." |
-| 8 | 1:55–2:15 | B merges baseline, fixes the call, pushes. Plane B rejoins approach, goes green, lands, and parks next to A. | "B rebases, fixes one line, and lands." |
-| 9 | 2:15–2:25 | Step 6: **PASS: tsc --noEmit on baseline**, `git log` on baseline, **DEMO PASSED**. | "Baseline typechecks. No broken main, no merge-time surprise." |
-| 10 | 2:25–2:30 | Architecture diagram from the README: Artifacts → Queues → Durable Object → Workflow → Container, plus MCP. | "Workers, Artifacts, Durable Objects, Workflows, Sandbox containers and an MCP server, all on Cloudflare." |
+| 1 | 0:00–0:10 | Empty sky, clouds drifting, runway on the right. Title: **ATC: Air Traffic Control for coding agents**. | "Five coding agents, one repo. GitHub tells you they collided at merge time. ATC tells them while they're still in the air." |
+| 2 | 0:10–0:25 | PR1 and PR2 appear ("NEW PR", then "PUSH" popups). Terminal: PR1 changes `applyDiscount(price, percent)` → `(price, discount)`; PR2 adds `checkout.ts` calling `applyDiscount(price, 15)`. | "Every PR is its own fork in Cloudflare Artifacts, a real Git repo. Agents just push." |
+| 3 | 0:25–0:35 | PR3–PR5 join the approach (independent work). | "More traffic: shipping, docs, formatting. None of it collides." |
+| 4 | 0:35–0:45 | Terminal: **PASS: plain git merge … clean, no conflicts.** | "Plain git sees nothing wrong. Different files." |
+| 5 | 0:45–1:10 | "CONFLICT!" pops over PR1 and PR2, red dashed link, both blinking. LANDING SEQUENCE: **#1 PR2 CLEARED: beats PR1 on applyDiscount, smaller diff** / **PR1 HOLD: lands after PR2**. | "On every push, a Workflow merges each pair of PRs in a container and runs the typechecker, reusing main's results so only the deltas are checked. A failure neither PR has alone is a semantic conflict. Both agents hear about it within seconds, before anyone asks to land." |
+| 6 | 1:10–1:25 | Point at the sequence board: CLEARED / FOLLOW / HOLD with one reason each. | "ATC gives every PR one clearance and one reason. Agents ask ATC with get_clearance. Nobody guesses." |
+| 7 | 1:25–1:45 | PR1 requests landing ("REQ LAND"), touches down ("LANDED"), rolls out and parks. Every other plane shows "REBASE" and goes around. | "PR1 asks to land first, and it's current and green, so it lands. Everyone else is told to rebase. PR2 gets the exact symbol and error." |
+| 8 | 1:45–2:10 | PR2 rebases ("PUSH"), goes green, lands. PR3–PR5 rejoin and land one by one. "Landed: PR1, PR2, …". | "PR2 fixes one line and lands. The rest follow the sequence." |
+| 9 | 2:10–2:20 | Terminal: **PASS tsc --noEmit on baseline**, **DEMO PASSED**. | "Main stays green. No merge-time surprises." |
+| 10 | 2:20–2:30 | README architecture diagram, plus a clip of real Claude Code sessions calling `start_work` and `request_land`. | "Workers, Artifacts, Durable Objects, Workflows, Sandbox containers and MCP, and it works with real Claude Code agents today." |
 
-## Pre-flight checklist
-- `pnpm exec tsx demo/src/teardown.ts` so old planes don't clutter anything (each run uses a fresh baseline anyway).
-- Run `./demo/run.sh` once off-camera to warm the checker container. The first run after a deploy is about 5 s slower.
-- Browser at 1440 px wide or more. Dashboard key saved (open any `/r/...` link once).
-- If you show MCP: `demo/src/checks/m3-signals.ts` drives agent B entirely through `/mcp`.
+## Pre-flight
+- Run `pnpm exec tsx demo/src/teardown.ts`, then run `./demo/run.sh` once off-camera to warm the checker containers.
+- For the real-agent clip, follow `handover/02-run-real-claude-code-agents.md` and record its replay the same way.

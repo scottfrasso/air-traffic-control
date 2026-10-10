@@ -32,14 +32,19 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
     if (plan.others.length === 0) {
       await step.do("typecheck fork alone", slow, async () => {
         // Tokens are minted inside the step so they never land in Workflow state.
-        await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork) }));
+        await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork), baseline: await readRef(this.env, baseline) }));
       });
     }
     // All pairs in parallel (each in its own work dir in the same warm container).
     const statuses = await Promise.all(
       plan.others.map((other) =>
         step.do(`speculative merge with ${other}`, slow, async () => {
-          const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({ mode: "pair", a: await readRef(this.env, fork), b: await readRef(this.env, other) });
+          const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({
+            mode: "pair",
+            a: await readRef(this.env, fork),
+            b: await readRef(this.env, other),
+            baseline: await readRef(this.env, baseline),
+          });
           return (await coordinator.applyPair(out)).status;
         }),
       ),
