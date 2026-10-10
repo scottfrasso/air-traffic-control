@@ -1,3 +1,6 @@
+/** Flat JSON record for signal payloads (RPC typing turns `unknown` into `never` and chokes on recursive types). */
+export type SignalData = Record<string, string | number | boolean | null | string[]>;
+
 export type PushSource = "event" | "reconcile" | "land";
 
 // A type alias (not an interface) so it satisfies SqlStorage row constraints.
@@ -50,5 +53,20 @@ export interface CoordinatorState {
     }
   >;
   overlaps: Overlap[];
+  signals: SignalRow[];
+  intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number }>;
   events: Array<{ id: number; at: number; kind: string; fork: string | null; detail: unknown }>;
 }
+
+export type SignalRow = {
+  id: number;
+  fork: string;
+  kind: string;
+  about_fork: string | null;
+  symbol: string | null;
+  message: string;
+  data: SignalData;
+  dedupe_key: string;
+  created_at: number;
+  resolved_at: number | null;
+};

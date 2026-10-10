@@ -1,8 +1,11 @@
 # PROGRESS
 
-## Blocked
+## Blocked (soft; not stopping work)
 
-Nothing. Workers Paid is active (2026-10-10), and the token reaches Artifacts, Containers, Queues, Workflows and Event Subscriptions.
+- **Worker can't create push subscriptions:** the main token appears IP-restricted. A browser-bot prompt for a Queues-only token is in
+  `handover/01-create-subscriptions-token.md`. Until then, pushes are detected by the reconcile fallback (about 5 s).
+
+Previously: nothing. Workers Paid is active (2026-10-10), and the token reaches Artifacts, Containers, Queues, Workflows and Event Subscriptions.
 Note that the API token expires 2026-10-15 21:59 UTC.
 
 ## Done
@@ -22,9 +25,15 @@ Note that the API token expires 2026-10-15 21:59 UTC.
   - Dashboard at `/r/<baseline>` (strip-bay design, polls every second).
   - Indexing completes about 10 s after push.
 
+- **Milestone 3: Intent and early signals** ✅ (`demo/src/checks/m3-signals.ts` passes; agent B runs entirely over MCP)
+  - `declare_intent` returns overlaps with other forks' changes, uses and intents, and notifies those forks.
+  - `get_signals`: signature changes reach forks that import, edit, or plan to touch the symbol; the changer learns its dependents;
+    file overlaps; intent overlaps. Signals refresh in place and resolve when they stop holding.
+  - MCP server at `/mcp` (stateless), with tools `start_work`, `declare_intent`, `get_signals`.
+
 ## Next
 
-- Milestone 3: `declare_intent` + `get_signals` (+ MCP server).
+- Milestone 4: speculative merges + typecheck in a Sandbox container, run from the Workflow.
 
 ## Stubbed / cut / known gaps
 

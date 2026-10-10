@@ -15,5 +15,10 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "wrangler": "4.149.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.28.0",
+    "zod": "4.6.5"
   }
 }

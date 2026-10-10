@@ -22,7 +22,7 @@ export class HttpError extends Error {
 }
 
 const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
-  ["GET", /^\/state$/, async (stub) => json(await stub.state())],
+  ["GET", /^\/state$/, async (stub) => new Response(await stub.stateJson(), { headers: { "content-type": "application/json" } })],
   [
     "POST",
     /^\/forks$/,
@@ -33,6 +33,24 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     },
   ],
   ["DELETE", /^\/forks\/([^/]+)$/, async (stub, _r, url) => (await stub.abandonFork(decodeURIComponent(url.pathname.split("/").pop() ?? "")), json({ ok: true }))],
+  [
+    "POST",
+    /^\/intents$/,
+    async (stub, request) => {
+      const b = await body<{ fork?: string; description?: string; files?: string[]; symbols?: string[] }>(request);
+      if (!b.fork || !b.description) throw new HttpError(400, "fork and description are required");
+      return json(await stub.declareIntent(b.fork, b.description, b.files ?? [], b.symbols ?? []));
+    },
+  ],
+  [
+    "GET",
+    /^\/signals$/,
+    async (stub, _r, url) => {
+      const fork = url.searchParams.get("fork");
+      if (!fork) throw new HttpError(400, "fork query parameter is required");
+      return json(await stub.getSignals(fork, url.searchParams.get("all") === "1"));
+    },
+  ],
   ["POST", /^\/reconcile$/, async (stub) => json({ found: await stub.reconcile() })],
 ];
 
@@ -47,7 +65,7 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   const stub = env.COORDINATOR.getByName(baseline);
   try {
     await stub.ensure(baseline);
-    return await route[2](stub, request, new URL(rest, url));
+    return await route[2](stub, request, new URL(rest + url.search, url));
   } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message }, err.status);
     return json({ error: (err as Error).message }, 500);
