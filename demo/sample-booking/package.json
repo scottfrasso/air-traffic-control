@@ -1,0 +1,13 @@
+{
+  "name": "booking-core",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Second sample repo (hotel bookings) for the submission video's recorded run.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

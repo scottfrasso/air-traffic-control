@@ -14,14 +14,14 @@ import { ROOT } from "./lib/env.ts";
 import { Repo } from "./lib/git.ts";
 import { say } from "./lib/log.ts";
 
-export async function seed(name: string): Promise<string> {
-  const created = await artifacts.create(name, "agentmesh demo baseline (shop-core)");
+export async function seed(name: string, source = "sample-repo"): Promise<string> {
+  const created = await artifacts.create(name, `agentmesh demo baseline (${source})`);
   const dir = mkdtempSync(join(tmpdir(), "agentmesh-seed-"));
   try {
-    cpSync(join(ROOT, "sample-repo"), dir, { recursive: true, filter: (src) => !src.includes("node_modules") });
+    cpSync(join(ROOT, source), dir, { recursive: true, filter: (src) => !src.includes("node_modules") });
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
     const repo = new Repo(dir, { [created.remote]: created.token }, { name: "agentmesh", email: "seed@agentmesh.dev" });
-    repo.commitAll("Import shop-core");
+    repo.commitAll(`Import ${source.split("/").pop()}`);
     repo.push(created.remote);
     say("system", `baseline ${name} created and seeded at ${repo.head().slice(0, 7)}`);
   } finally {

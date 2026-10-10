@@ -1,0 +1,492 @@
+{
+  "baseline": "booking-261010210302",
+  "recordedAt": "2026-10-10T21:03:43.275Z",
+  "a": "PR1",
+  "b": "PR2",
+  "signalToB": "Speculative merge with PR1 merges cleanly but fails typecheck: src/walk-in.ts:5 TS2554 Expected 3 arguments, but got 2. PR1 changed createBooking, and your src/walk-in.ts still uses the old shape. Neither fork fails alone.",
+  "events": [
+    {
+      "t": -14.484,
+      "kind": "baseline.registered",
+      "pr": null,
+      "detail": null
+    },
+    {
+      "t": -10.213,
+      "kind": "fork.created",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": -9.591,
+      "kind": "subscription.created",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": -6.755,
+      "kind": "fork.created",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": -6.396,
+      "kind": "subscription.created",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 0,
+      "kind": "push.received",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 0.001,
+      "kind": "push.received",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 0.764,
+      "kind": "pipeline.started",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 0.829,
+      "kind": "pipeline.started",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 2.506,
+      "kind": "index.updated",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 2.533,
+      "kind": "index.updated",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 2.533,
+      "kind": "signal.signature_change",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 2.533,
+      "kind": "signal.signature_change",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 5.278,
+      "kind": "check.single",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 6.261,
+      "kind": "check.single",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 6.676,
+      "kind": "check.pair",
+      "pr": null,
+      "detail": {
+        "a": "PR2",
+        "b": "PR1",
+        "status": "semantic_conflict",
+        "symbol": "createBooking",
+        "errors": [
+          "src/walk-in.ts:5 TS2554 Expected 3 arguments, but got 2"
+        ]
+      }
+    },
+    {
+      "t": 6.676,
+      "kind": "signal.semantic_conflict",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 6.676,
+      "kind": "signal.semantic_conflict",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 6.698,
+      "kind": "check.pair",
+      "pr": null,
+      "detail": {
+        "a": "PR1",
+        "b": "PR2",
+        "status": "semantic_conflict",
+        "symbol": "createBooking",
+        "errors": [
+          "src/walk-in.ts:5 TS2554 Expected 3 arguments, but got 2"
+        ]
+      }
+    },
+    {
+      "t": 11.118,
+      "kind": "push.received",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 11.492,
+      "kind": "pipeline.started",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "index.updated",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change.updated",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change.updated",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.signature_change",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.overlap",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.overlap",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.overlap",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 12.703,
+      "kind": "signal.overlap",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 14.738,
+      "kind": "check.single",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 14.824,
+      "kind": "check.pair",
+      "pr": null,
+      "detail": {
+        "a": "PR2",
+        "b": "PR1",
+        "status": "clean",
+        "symbol": null,
+        "errors": []
+      }
+    },
+    {
+      "t": 15.188,
+      "kind": "land.requested",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 16.379,
+      "kind": "land.merged",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 16.752,
+      "kind": "signal.landed",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 16.752,
+      "kind": "signal.landed",
+      "pr": "PR1",
+      "detail": null
+    },
+    {
+      "t": 17.222,
+      "kind": "pipeline.started",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 17.358,
+      "kind": "land.requested",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 20.034,
+      "kind": "check.single",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 20.577,
+      "kind": "land.requested",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 22.079,
+      "kind": "land.merged",
+      "pr": "PR2",
+      "detail": null
+    },
+    {
+      "t": 22.246,
+      "kind": "signal.landed",
+      "pr": "PR2",
+      "detail": null
+    }
+  ],
+  "sequences": [
+    {
+      "t": -14.364,
+      "sequence": []
+    },
+    {
+      "t": -10.093,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "checking",
+          "reason": "No changes pushed yet."
+        }
+      ]
+    },
+    {
+      "t": -6.635,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "checking",
+          "reason": "No changes pushed yet."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "No changes pushed yet."
+        }
+      ]
+    },
+    {
+      "t": 0.12,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "checking",
+          "reason": "Checks running."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Checks running."
+        }
+      ]
+    },
+    {
+      "t": 2.626,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Checks running."
+        },
+        {
+          "pr": "PR1",
+          "clearance": "checking",
+          "reason": "Checks running."
+        }
+      ]
+    },
+    {
+      "t": 5.398,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "cleared",
+          "reason": "Cleared to land. No conflicts."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Checks running."
+        }
+      ]
+    },
+    {
+      "t": 6.381,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "cleared",
+          "reason": "Cleared to land. No conflicts."
+        },
+        {
+          "pr": "PR1",
+          "clearance": "follow",
+          "reason": "Follow PR2. No conflicts."
+        }
+      ]
+    },
+    {
+      "t": 6.796,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "cleared",
+          "reason": "Cleared to land. Beats PR1 on createBooking: smaller diff."
+        },
+        {
+          "pr": "PR1",
+          "clearance": "hold",
+          "reason": "Conflicts with PR2 on createBooking. Lands after PR2, then rebase."
+        }
+      ]
+    },
+    {
+      "t": 11.238,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "cleared",
+          "reason": "Cleared to land. Beats PR2 on createBooking: smaller diff."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Checks running."
+        }
+      ]
+    },
+    {
+      "t": 12.823,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "cleared",
+          "reason": "Cleared to land. Beats PR2 on createBooking: smaller diff."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Checks running."
+        }
+      ]
+    },
+    {
+      "t": 14.858,
+      "sequence": [
+        {
+          "pr": "PR1",
+          "clearance": "cleared",
+          "reason": "Cleared to land. No conflicts."
+        },
+        {
+          "pr": "PR2",
+          "clearance": "follow",
+          "reason": "Follow PR1. No conflicts."
+        }
+      ]
+    },
+    {
+      "t": 16.499,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Main moved. Re-checking against the new main."
+        }
+      ]
+    },
+    {
+      "t": 16.872,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "checking",
+          "reason": "Main moved. Re-checking against the new main."
+        }
+      ]
+    },
+    {
+      "t": 20.154,
+      "sequence": [
+        {
+          "pr": "PR2",
+          "clearance": "cleared",
+          "reason": "Cleared to land. No conflicts."
+        }
+      ]
+    },
+    {
+      "t": 22.199,
+      "sequence": []
+    }
+  ]
+}
