@@ -2,8 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
-import type { LandResult, PairResult, SingleResult } from "./checker";
+import { checkerFor, type LandResult, type PairResult, type SingleResult } from "./checker";
 import { approachQueue, isGreen, landingOrder } from "./landing";
+import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
@@ -70,8 +71,9 @@ export class Coordinator extends DurableObject<Env> {
   /** Fork the baseline for `agent`, mint credentials, subscribe to its pushes, start tracking it. */
   async createFork(agent: string): Promise<ForkCredentials> {
     const baseline = this.baseline;
-    const name = forkName(baseline, agent);
-    if (this.fork(name)?.status === "active") throw new Error(`fork ${name} already exists`);
+    const pr = Number(this.meta("pr_seq") ?? 0) + 1;
+    this.setMeta("pr_seq", String(pr));
+    const name = forkName(baseline, pr);
 
     using base = await this.env.ARTIFACTS.get(baseline);
     const baseHead = (await base.log({ ref: "main", limit: 1 }))[0];
@@ -83,19 +85,20 @@ export class Coordinator extends DurableObject<Env> {
 
     const now = Date.now();
     this.sql.exec(
-      `INSERT INTO forks(name, agent, status, created_at, base_sha, head_sha, processed_sha, subscription_id, remote)
-       VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)
+      `INSERT INTO forks(name, agent, pr, status, created_at, base_sha, head_sha, processed_sha, subscription_id, remote)
+       VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
        ON CONFLICT(name) DO UPDATE SET agent = excluded.agent, status = 'active', created_at = excluded.created_at,
          base_sha = excluded.base_sha, head_sha = excluded.head_sha, processed_sha = excluded.processed_sha,
          subscription_id = excluded.subscription_id, remote = excluded.remote, diff_lines = 0,
          land_requested_at = NULL, check_status = 'unknown', check_sha = NULL, check_detail = NULL`,
-      name, agent, now, baseHead.hash, baseHead.hash, baseHead.hash, subscriptionId, forked.remote,
+      name, agent, pr, now, baseHead.hash, baseHead.hash, baseHead.hash, subscriptionId, forked.remote,
     );
-    this.log("fork.created", { agent, baseSha: baseHead.hash, subscriptionId }, name);
+    this.log("fork.created", { agent, pr, baseSha: baseHead.hash }, name);
     await this.scheduleReconcile();
 
     return {
       fork: name,
+      pr,
       agent,
       remote: forked.remote,
       token: forked.token,
@@ -210,7 +213,14 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /** Insert a signal unless an identical one (same dedupe key) exists; re-open it if it was resolved. */
-  emitSignal(s: DesiredSignal): boolean {
+  /** Agents and the dashboard talk in PR numbers: replace fork repo names with "PR<N>". */
+  private relabel(text: string): string {
+    const names = this.sql.exec<{ name: string }>("SELECT name FROM forks ORDER BY length(name) DESC").toArray().map((r) => r.name);
+    return names.reduce((t, n) => t.split(n).join(prLabel(n)), text);
+  }
+
+  emitSignal(input: DesiredSignal): boolean {
+    const s = { ...input, message: this.relabel(input.message) };
     const existing = this.sql
       .exec<{ id: number; resolved_at: number | null; message: string }>("SELECT id, resolved_at, message FROM signals WHERE dedupe_key = ?", s.dedupe_key)
       .toArray()[0];
@@ -360,6 +370,33 @@ export class Coordinator extends DurableObject<Env> {
     return { status: v.status };
   }
 
+  // ── ATC sequence ────────────────────────────────────────────────────────
+
+  private conflictMap(): Map<string, Conflict[]> {
+    const m = new Map<string, Conflict[]>();
+    for (const r of this.sql
+      .exec<{ fork: string; about_fork: string; symbol: string | null }>(
+        "SELECT fork, about_fork, symbol FROM signals WHERE kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL AND about_fork IS NOT NULL",
+      )
+      .toArray())
+      m.set(r.fork, [...(m.get(r.fork) ?? []), { other: r.about_fork, symbol: r.symbol }]);
+    return m;
+  }
+
+  sequence(): SequenceEntry[] {
+    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "");
+  }
+
+  /** What ATC tells one PR: its place in the landing sequence and why. */
+  async getClearance(fork: string): Promise<{ fork: string; pr: string; position: number | null; clearance: string; message: string }> {
+    const row = this.fork(fork);
+    if (!row) return { fork, pr: prLabel(fork), position: null, clearance: "unknown", message: `ATC: ${prLabel(fork)} is not in this airspace.` };
+    if (row.status === "landed") return { fork, pr: prLabel(fork), position: null, clearance: "landed", message: `ATC: ${prLabel(fork)} has landed.` };
+    const e = this.sequence().find((x) => x.fork === fork);
+    if (!e) return { fork, pr: prLabel(fork), position: null, clearance: row.status, message: `ATC: ${prLabel(fork)} is ${row.status}.` };
+    return { fork, pr: e.pr, position: e.position, clearance: e.clearance, message: clearanceMessage(e) };
+  }
+
   // ── landing gate (milestone 5) ─────────────────────────────────────────
 
   /** Open conflicts (semantic or textual) between `fork` and other active forks. */
@@ -396,11 +433,12 @@ export class Coordinator extends DurableObject<Env> {
     const baselineHead = this.meta("baseline_head") ?? "";
     const me = this.fork(fork)!;
 
-    const deny = (reason: string, kind: SignalKind | null = "land_blocked"): LandResponse => {
+    const deny = (raw: string, kind: SignalKind | null = "land_blocked"): LandResponse => {
+      const reason = this.relabel(raw);
       this.log("land.denied", { reason }, fork);
       if (kind)
         this.emitSignal({ fork, kind, about_fork: null, symbol: null, message: reason, data: { baselineHead }, dedupe_key: `${kind}:${fork}:${me.head_sha}:${baselineHead}:${reason.slice(0, 40)}` });
-      return { landed: false, fork, reason, baselineHead };
+      return { landed: false, fork, reason, baselineHead, atc: this.sequence().find((e) => e.fork === fork) ? clearanceMessage(this.sequence().find((e) => e.fork === fork)!) : undefined };
     };
 
     // base_sha is only known once the push is indexed, so "still checking" must be answered first.
@@ -420,7 +458,7 @@ export class Coordinator extends DurableObject<Env> {
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
       const result = JSON.parse(
-        await this.env.CHECKER.getByName(`checker-${baseline}`).run({ mode: "land", fork: forkRef, baseline: { ...baseRef, expectedHead: baselineHead } }),
+        await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: forkRef, baseline: { ...baseRef, expectedHead: baselineHead } }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
       if (!result.landed || !result.forkHead) return deny(result.reason ?? "landing refused", result.reason?.includes("rebase") ? "rebase_required" : "land_blocked");
@@ -588,6 +626,7 @@ export class Coordinator extends DurableObject<Env> {
       })),
       overlaps: this.overlaps(),
       approach: approachQueue(this.activeForks(), this.meta("baseline_head") ?? ""),
+      sequence: this.sequence(),
       signals: this.sql
         .exec<SignalRow & { data: string }>("SELECT * FROM signals ORDER BY id DESC LIMIT 100")
         .toArray()

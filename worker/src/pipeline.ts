@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
 import { indexFork } from "./artifacts";
-import type { RepoRef } from "./checker";
+import { checkerFor, type RepoRef } from "./checker";
 
 export interface PipelineParams {
   baseline: string;
@@ -27,22 +27,24 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
     // Milestone 4: speculative merge + typecheck against every other active fork, in the Sandbox.
     const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
     if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
-    const checker = this.env.CHECKER.getByName(`checker-${baseline}`);
     const slow: WorkflowStepConfig = { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" };
 
     if (plan.others.length === 0) {
       await step.do("typecheck fork alone", slow, async () => {
         // Tokens are minted inside the step so they never land in Workflow state.
-        await coordinator.applySingle(await checker.run({ mode: "single", repo: await readRef(this.env, fork) }));
+        await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork) }));
       });
     }
-    const results: Record<string, string> = {};
-    for (const other of plan.others) {
-      results[other] = await step.do(`speculative merge with ${other}`, slow, async () => {
-        const out = await checker.run({ mode: "pair", a: await readRef(this.env, fork), b: await readRef(this.env, other) });
-        return (await coordinator.applyPair(out)).status;
-      });
-    }
+    // All pairs in parallel (each in its own work dir in the same warm container).
+    const statuses = await Promise.all(
+      plan.others.map((other) =>
+        step.do(`speculative merge with ${other}`, slow, async () => {
+          const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({ mode: "pair", a: await readRef(this.env, fork), b: await readRef(this.env, other) });
+          return (await coordinator.applyPair(out)).status;
+        }),
+      ),
+    );
+    const results = Object.fromEntries(plan.others.map((o, i) => [o, statuses[i]]));
     return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
   }
 }

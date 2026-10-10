@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forks(
   name TEXT PRIMARY KEY,
   agent TEXT NOT NULL,
+  pr INTEGER NOT NULL DEFAULT 0,      -- pull request number, assigned by ATC per baseline
   status TEXT NOT NULL,              -- active | landed | abandoned
   created_at INTEGER NOT NULL,
   base_sha TEXT NOT NULL,            -- baseline commit the fork's work sits on

@@ -7,6 +7,7 @@ export type PushSource = "event" | "reconcile" | "land";
 export type ForkRow = {
   name: string;
   agent: string;
+  pr: number;
   status: "active" | "landed" | "abandoned";
   created_at: number;
   base_sha: string;
@@ -24,6 +25,8 @@ export type ForkRow = {
 
 export interface ForkCredentials {
   fork: string;
+  /** Pull request number, e.g. 3 → "PR3". */
+  pr: number;
   agent: string;
   remote: string;
   /** Write token for the fork. */
@@ -55,6 +58,8 @@ export interface CoordinatorState {
   overlaps: Overlap[];
   /** Active forks in landing order: index 0 is next to land. */
   approach: string[];
+  /** ATC landing sequence with one clearance + reason per PR. */
+  sequence: import("./atc").SequenceEntry[];
   signals: SignalRow[];
   intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number }>;
   events: Array<{ id: number; at: number; kind: string; fork: string | null; detail: unknown }>;
@@ -82,4 +87,6 @@ export type LandResponse = {
   rebaseRequired?: string[];
   /** True when the caller should simply retry (checks running, landing in progress). */
   retry?: boolean;
+  /** What ATC says about this PR's place in the sequence. */
+  atc?: string;
 };

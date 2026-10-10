@@ -61,7 +61,7 @@ export class Checker extends DurableObject<Env> {
     if (!c.running) {
       const image = c.images.checker;
       if (!image) throw new Error("checker image missing from wrangler containers.images");
-      c.start({ image, enableInternet: true, instance: "standard-1" });
+      c.start({ image, enableInternet: true, instance: "standard-3" }); // 2 vCPU: several merges + tsc run concurrently
     }
     await c.setInactivityTimeout(10 * 60_000);
     return c;
@@ -80,3 +80,11 @@ export class Checker extends DurableObject<Env> {
     return line.slice("@@RESULT ".length);
   }
 }
+
+/** Pick one of a small pool of Checkers per baseline, so concurrent pair checks spread over containers. */
+export function checkerFor(env: Env, baseline: string, key: string): DurableObjectStub<Checker> {
+  let h = 0;
+  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return env.CHECKER.getByName(`checker-${baseline}-${h % CHECKER_POOL}`);
+}
+export const CHECKER_POOL = 3;

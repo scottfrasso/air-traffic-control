@@ -64,7 +64,7 @@ try {
   for (const s of JSON.parse(bSignals) as Array<{ kind: string; message: string }>) say("B", `signal [${s.kind}] ${s.message}`);
 
   const aSignals = await mesh.call<Array<{ kind: string; message: string }>>("GET", `/signals?fork=${a.fork}`);
-  check(aSignals.some((s) => s.kind === "signature_change" && s.message.includes(b.fork)), "A learns B depends on applyDiscount");
+  check(aSignals.some((s) => s.kind === "signature_change" && s.message.includes(`PR${b.pr}`)), "A learns B depends on applyDiscount");
   for (const s of aSignals) say("A", `signal [${s.kind}] ${s.message}`);
   say("system", `dashboard: https://agentmesh.scottfrasso.workers.dev/r/${baseline}`);
   await Promise.all([mesh.abandon(a.fork), mesh.abandon(b.fork)]);

@@ -55,3 +55,41 @@ export function agentBFixCaller(dir: string) {
   const file = join(dir, "src/checkout.ts");
   writeFileSync(file, readFileSync(file, "utf8").replace("applyDiscount(price, 15)", 'applyDiscount(price, { kind: "percent", value: 15 })'));
 }
+
+// ── background traffic: independent PRs that don't conflict with anything ──
+
+export function trafficShipping(dir: string) {
+  writeFileSync(
+    join(dir, "src/shipping.ts"),
+    `import type { Cents } from "./money";
+
+/** Flat rate plus a per-kilogram charge. */
+export function shippingCost(weightKg: number): Cents {
+  return 499 + Math.ceil(weightKg) * 150;
+}
+`,
+  );
+}
+
+export function trafficReadme(dir: string) {
+  const file = join(dir, "README.md");
+  writeFileSync(file, `${readFileSync(file, "utf8")}\n## Money\n\nAll amounts are integer cents.\n`);
+}
+
+export function trafficMoney(dir: string) {
+  const file = join(dir, "src/money.ts");
+  writeFileSync(
+    file,
+    `${readFileSync(file, "utf8")}
+export function formatCentsCompact(amount: Cents): string {
+  return amount >= 100_000 ? \`$\${Math.round(amount / 100_000)}k\` : formatCents(amount);
+}
+`,
+  );
+}
+
+export const TRAFFIC = [
+  { agent: "c", title: "Add shipping cost", apply: trafficShipping },
+  { agent: "d", title: "Document money units", apply: trafficReadme },
+  { agent: "e", title: "Compact money formatting", apply: trafficMoney },
+];

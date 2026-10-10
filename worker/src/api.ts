@@ -61,6 +61,15 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
       return json(await stub.requestLand(fork));
     },
   ],
+  [
+    "GET",
+    /^\/clearance$/,
+    async (stub, _r, url) => {
+      const fork = url.searchParams.get("fork");
+      if (!fork) throw new HttpError(400, "fork query parameter is required");
+      return json(await stub.getClearance(fork));
+    },
+  ],
   ["POST", /^\/reconcile$/, async (stub) => json({ found: await stub.reconcile() })],
 ];
 

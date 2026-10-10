@@ -23,11 +23,11 @@ function createServer(env: Env) {
     "start_work",
     {
       description:
-        "Fork the baseline repo for this agent. Returns a git remote and a write token for your fork, plus a read token for the baseline. " +
+        "Open a pull request: ATC forks the baseline for you and assigns a PR number. Returns a git remote and a write token for your fork, plus a read token for the baseline. " +
         "Use `git -c http.extraHeader=\"Authorization: Bearer <token>\" clone <remote>`; push to your fork's main branch.",
       inputSchema: z.object({
         repo: z.string().describe("Baseline repo name"),
-        agent: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/).describe("Short unique agent id, e.g. 'alice'"),
+        agent: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/).describe("Short agent id, e.g. 'claude-1' (who is flying this PR)"),
       }),
     },
     async ({ repo, agent }) => text(await startFork(env, repo, agent)),
@@ -64,6 +64,16 @@ function createServer(env: Env) {
       const signals = await (await coordinatorFor(env, baselineOf(fork))).getSignals(fork, include_resolved);
       return text(signals.length ? signals.map(({ id, kind, about_fork, symbol, message, resolved_at }) => ({ id, kind, about_fork, symbol, message, resolved: resolved_at !== null })) : "No open signals.");
     },
+  );
+
+  server.registerTool(
+    "get_clearance",
+    {
+      description:
+        "Ask Air Traffic Control (ATC) where your PR is in the landing sequence and why: cleared to land, follow another PR, hold for a conflicting PR, go around (rebase), or standby while checks run.",
+      inputSchema: z.object({ fork: z.string().describe("Your fork name, from start_work") }),
+    },
+    async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).getClearance(fork)),
   );
 
   server.registerTool(

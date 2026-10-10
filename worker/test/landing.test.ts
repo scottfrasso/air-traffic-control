@@ -4,7 +4,7 @@ import { approachQueue, landingOrder } from "../src/landing";
 import type { ForkRow } from "../src/types";
 
 const fork = (name: string, over: Partial<ForkRow> = {}): ForkRow => ({
-  name, agent: name, status: "active", created_at: 1, base_sha: "base", head_sha: "h", processed_sha: "h", diff_lines: 10,
+  name, agent: name, pr: 0, status: "active", created_at: 1, base_sha: "base", head_sha: "h", processed_sha: "h", diff_lines: 10,
   subscription_id: null, remote: "", land_requested_at: null, landed_at: null, check_status: "green", check_sha: "h", check_detail: null, ...over,
 });
 

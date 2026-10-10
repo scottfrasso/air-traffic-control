@@ -1,7 +1,7 @@
 import { changedLines, diffExports, extractExports, extractImports, resolveImport, type SymbolDelta } from "./symbols";
 
-/** Fork repos are named `<baseline>--<agent>`. */
-export const forkName = (baseline: string, agent: string) => `${baseline}--${agent}`;
+/** Fork repos are named `<baseline>--pr<N>`: each fork is a numbered pull request. */
+export const forkName = (baseline: string, pr: number) => `${baseline}--pr${pr}`;
 export const baselineOf = (repoName: string) => repoName.split("--")[0] ?? repoName;
 
 export async function headOf(env: Env, repo: string, ref = "main"): Promise<ArtifactsCommitMetadata | null> {
@@ -46,9 +46,7 @@ export async function indexFork(env: Env, baseline: string, fork: string, headSh
   const [forkAncestry, baseAncestry] = await Promise.all([ancestry(forkRepo, headSha), ancestry(baseRepo, baseHead.hash)]);
   const head = forkAncestry.get(headSha);
   if (!head) throw new Error(`cannot resolve ${fork}@${headSha}`);
-  // Merge base: the newest commit reachable from both (all parents, not just first-parent).
-  const common = [...forkAncestry.values()].filter((c) => baseAncestry.has(c.hash));
-  const base = common.sort((x, y) => y.committedAt - x.committedAt || (baseAncestry.get(y.hash)!.order - baseAncestry.get(x.hash)!.order))[0];
+  const base = mergeBase(forkAncestry, baseAncestry);
   if (!base) throw new Error(`no common ancestor between ${fork}@${headSha} and ${baseline}/main`);
 
   const changed: Array<{ path: string; before: string | null; after: string | null }> = [];
@@ -133,7 +131,27 @@ async function listPaths(repo: ArtifactsRepo, treeHash: string, prefix = ""): Pr
   return out;
 }
 
-type Ancestor = ArtifactsCommitMetadata & { order: number };
+type Ancestor = Pick<ArtifactsCommitMetadata, "hash" | "parents" | "committedAt" | "treeHash"> & { order: number };
+
+/**
+ * Best common ancestor: a commit reachable from both sides that is not itself an ancestor of another
+ * common ancestor (git's merge-base definition). Criss-cross ties go to the newest commit.
+ */
+export function mergeBase<T extends Ancestor>(left: Map<string, T>, right: Map<string, Ancestor>): T | undefined {
+  const common = [...left.values()].filter((c) => right.has(c.hash));
+  const dominated = new Set<string>();
+  for (const c of common) {
+    const stack = [...c.parents];
+    while (stack.length) {
+      const h = stack.pop()!;
+      if (dominated.has(h)) continue;
+      dominated.add(h);
+      const parent = left.get(h);
+      if (parent) stack.push(...parent.parents);
+    }
+  }
+  return common.filter((c) => !dominated.has(c.hash)).sort((a, b) => b.committedAt - a.committedAt)[0];
+}
 
 /**
  * All commits reachable from `head` (every parent, not just first-parent), up to `limit`.

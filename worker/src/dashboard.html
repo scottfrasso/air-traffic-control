@@ -3,97 +3,93 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Air Traffic Control</title>
+<title>ATC</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
 <style>
   :root {
-    --night: #10162a;
-    --panel: #18213d;
-    --panel-edge: #2c3a66;
-    --text: #e9eefc;
-    --dim: #8c9bc9;
+    --night: #0f1530;
+    --panel: #161f42;
+    --edge: #2d3b6e;
+    --text: #eef2ff;
+    --dim: #8f9dcc;
     --orange: #f38020;
     --amber: #faae40;
-    --red: #ff4d4d;
-    --green: #5ee07a;
-    --cyan: #6fd6ff;
+    --red: #ff5757;
+    --green: #62e07c;
+    --cyan: #78d7ff;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--night); color: var(--text); }
   body { font: 20px/1.15 "VT323", ui-monospace, monospace; }
-  header {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
-    padding: 14px 20px; border-bottom: 4px solid var(--panel-edge);
-  }
-  h1 { margin: 0; font: 16px/1.4 "Press Start 2P", monospace; color: var(--amber); }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; padding: 14px 20px; border-bottom: 4px solid var(--edge); }
+  h1 { margin: 0; font: 22px/1 "Press Start 2P", monospace; color: var(--orange); }
+  .sub { color: var(--amber); font: 10px/1 "Press Start 2P", monospace; }
   .baseline { color: var(--dim); }
   .baseline b { color: var(--text); font-weight: normal; }
   .live { margin-left: auto; color: var(--green); }
   .live.stale { color: var(--red); }
 
-  main {
-    display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 20px;
-    padding: 20px; max-width: 1600px; margin: 0 auto;
-  }
-  .scope {
-    position: relative; background: #2b5a22;
-    border: 4px solid var(--panel-edge); box-shadow: 0 0 0 4px var(--night), 0 0 0 8px var(--panel-edge);
-  }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 20px; padding: 20px; max-width: 1700px; margin: 0 auto; }
+  .scope { border: 4px solid var(--edge); box-shadow: 0 0 0 4px var(--night), 0 0 0 8px var(--edge); background: #4f8fe0; align-self: start; }
   canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges; }
 
   aside { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-  section { background: var(--panel); border: 4px solid var(--panel-edge); padding: 12px 14px; }
+  section { background: var(--panel); border: 4px solid var(--edge); padding: 12px 14px; }
   h2 { margin: 0 0 10px; font: 10px/1.6 "Press Start 2P", monospace; color: var(--cyan); }
 
-  .board { width: 100%; border-collapse: collapse; }
-  .board th { text-align: left; color: var(--dim); font-weight: normal; padding: 0 6px 4px 0; }
-  .board td { padding: 3px 6px 3px 0; vertical-align: top; }
-  .board .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; }
-  .s-final { color: var(--green); }
-  .s-approach { color: var(--text); }
-  .s-holding { color: var(--amber); }
-  .s-conflict { color: var(--red); }
-  .s-landed { color: var(--dim); }
+  .seq { list-style: none; margin: 0; padding: 0; }
+  .seq li { display: grid; grid-template-columns: 34px 54px 1fr; gap: 0 8px; padding: 7px 0; border-bottom: 2px dashed var(--edge); }
+  .seq li:last-child { border-bottom: 0; }
+  .seq .pos { color: var(--dim); }
+  .seq .pr { font: 10px/2 "Press Start 2P", monospace; }
+  .seq .clr { font: 10px/2 "Press Start 2P", monospace; }
+  .seq .why { grid-column: 3; color: var(--dim); }
+  .c-cleared { color: var(--green); }
+  .c-follow { color: var(--text); }
+  .c-hold, .c-fix { color: var(--amber); }
+  .c-go_around { color: var(--red); }
+  .c-checking { color: var(--cyan); }
+  .landed { color: var(--dim); margin-top: 10px; }
+  .landed b { color: var(--green); font-weight: normal; }
 
-  .radio { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
-  .radio li { padding: 6px 0; border-bottom: 2px dashed var(--panel-edge); }
-  .radio li:last-child { border-bottom: 0; }
-  .radio .who { color: var(--amber); }
-  .radio .k-semantic_conflict .who, .radio .k-merge_conflict .who, .radio .k-rebase_required .who { color: var(--red); }
-  .radio .k-landed .who { color: var(--green); }
-  .radio time { color: var(--dim); margin-right: 6px; }
+  .log { list-style: none; margin: 0; padding: 0; }
+  .log li { padding: 2px 0; }
+  .log time { color: var(--dim); margin-right: 8px; }
+  .log .bad { color: var(--red); }
+  .log .good { color: var(--green); }
   .empty { color: var(--dim); }
 
-  form.key { max-width: 460px; margin: 12vh auto; padding: 24px; background: var(--panel); border: 4px solid var(--panel-edge); }
+  form.key { max-width: 460px; margin: 12vh auto; padding: 24px; background: var(--panel); border: 4px solid var(--edge); }
   form.key label { display: block; margin-bottom: 10px; font: 10px/1.6 "Press Start 2P", monospace; color: var(--amber); }
-  form.key input { width: 100%; padding: 8px 10px; font: inherit; color: var(--text); background: var(--night); border: 2px solid var(--panel-edge); }
+  form.key input { width: 100%; padding: 8px 10px; font: inherit; color: var(--text); background: var(--night); border: 2px solid var(--edge); }
   form.key button { margin-top: 12px; padding: 10px 14px; font: 10px "Press Start 2P", monospace; color: var(--night); background: var(--amber); border: 0; cursor: pointer; }
   :focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
 
-  @media (max-width: 1000px) {
-    main { grid-template-columns: 1fr; padding: 12px; }
-    header { padding: 12px 16px; }
-  }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; padding: 12px; } header { padding: 12px 16px; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>AIR TRAFFIC CONTROL</h1>
-  <span class="baseline" id="baseline">No repo selected</span>
-  <span class="live" id="live" hidden>● LIVE</span>
+  <h1>ATC</h1>
+  <span class="sub">AIR TRAFFIC CONTROL</span>
+  <span class="baseline" id="baseline"></span>
+  <span class="live" id="live" hidden>LIVE</span>
 </header>
 <div id="app"></div>
 <script>
 (() => {
-  // ── config & helpers ───────────────────────────────────────────────────
-  const W = 384, H = 216;                       // logical pixel resolution
-  const RUNWAY = { x: 150, y: 150, w: 214, h: 18 };
-  const THRESHOLD = { x: RUNWAY.x + 6, y: RUNWAY.y + RUNWAY.h / 2 };
-  const HOLD = { x: 86, y: 58, rx: 44, ry: 24 }; // holding pattern oval
-  const APRON = { x: 214, y: 112 };              // where landed planes park
-  const PLANE_COLORS = ["#ffd23f", "#6fd6ff", "#ff7ad9", "#9dff6a", "#ffffff", "#c79bff", "#ff9f43"];
+  // ── geometry (logical pixels) ──────────────────────────────────────────
+  const W = 480, H = 240;
+  const GROUND = 204;                                      // horizon / ground line
+  const RUNWAY = { x: 392, w: 84, y: GROUND + 2 };         // short runway, right side
+  const TOUCHDOWN = { x: RUNWAY.x + 6, y: GROUND };
+  const SLOPE = { x: -0.92, y: -0.39 };                    // unit vector up the glide path
+  const SLOTS = 7;                                         // approach slots before overflow → holding
+  const HOLD = { x: 214, y0: 26, dy: 20, rx: 30 };         // holding stack, top centre
+  const GATE = { x: 352, y: GROUND + 12, dx: -32 };        // parked planes on the ground
+  const LIVERY = ["#f38020", "#3fa2ff", "#ff5fb0", "#3ccf6e", "#ffd23f", "#a07bff", "#ff6b4a", "#2fd6c8"];
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const app = document.getElementById("app");
@@ -103,13 +99,13 @@
   let key = "";
   try { key = localStorage.getItem("agentmesh-key") || ""; } catch (_) {}
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  const callsign = (fork) => (fork || "").split("--").slice(1).join("--").toUpperCase() || fork;
+  const pr = (fork) => { const m = /--pr(\d+)$/.exec(fork || ""); return m ? `PR${m[1]}` : (fork || "").split("--").slice(1).join("--").toUpperCase(); };
+  const prNum = (fork) => Number((/--pr(\d+)$/.exec(fork || "") || [])[1] || 0);
   const hhmmss = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false });
 
-  // ── key / repo prompts ─────────────────────────────────────────────────
   function askForKey(message) {
     app.innerHTML = `<form class="key"><label for="k">${esc(message)}</label>
-      <input id="k" type="password" autocomplete="off" placeholder="am_…"><button type="submit">CONTACT TOWER</button></form>`;
+      <input id="k" type="password" autocomplete="off" placeholder="am_…"><button type="submit">CONTACT ATC</button></form>`;
     app.querySelector("form").addEventListener("submit", (e) => {
       e.preventDefault();
       key = app.querySelector("input").value.trim();
@@ -129,252 +125,223 @@
 
   // ── scene state ────────────────────────────────────────────────────────
   let state = null;
-  const planes = new Map();     // fork → { x, y, heading, color, mode, orbit, landedAt }
-  let colorIndex = 0;
-  const clouds = Array.from({ length: 6 }, (_, i) => ({ x: (i * 83) % W, y: 14 + ((i * 47) % 120), s: 1 + (i % 3), v: 0.06 + (i % 3) * 0.03 }));
+  const planes = new Map();
+  const clouds = [
+    ...Array.from({ length: 5 }, (_, i) => ({ x: i * 101 % W, y: 18 + (i * 37) % 70, s: 2, v: 0.05, a: 0.95 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ x: (i * 89 + 40) % W, y: 90 + (i * 23) % 70, s: 1, v: 0.025, a: 0.7 })),
+  ];
 
-  function planeMode(fork) {
-    if (fork.status === "landed") return "landed";
-    const open = (state.signals || []).filter((s) => s.fork === fork.name && !s.resolved_at);
-    if (open.some((s) => s.kind === "rebase_required" || s.kind === "land_blocked")) return "holding";
-    return "approach";
-  }
-
-  /** Target position for each plane: queue slots on final approach, an orbit when holding, the apron when landed. */
+  /** Where each plane should be, from the ATC sequence. */
   function targets() {
     const out = new Map();
-    const approach = (state.approach || []).filter((n) => {
-      const f = state.forks.find((x) => x.name === n);
-      return f && planeMode(f) === "approach";
+    const seq = state.sequence || [];
+    const approach = seq.filter((e) => ["cleared", "follow", "checking"].includes(e.clearance));
+    const holding = seq.filter((e) => !["cleared", "follow", "checking"].includes(e.clearance));
+    approach.forEach((e, i) => {
+      if (i >= SLOTS) { holding.push(e); return; }
+      const d = 30 + i * 50;
+      out.set(e.fork, { mode: "approach", x: TOUCHDOWN.x + SLOPE.x * d, y: TOUCHDOWN.y - 8 + SLOPE.y * d, entry: e });
     });
-    approach.forEach((name, i) => {
-      // Slot 0 sits just short of the threshold; later slots extend back along the glide path.
-      const d = 34 + i * 52;
-      out.set(name, { x: THRESHOLD.x - d, y: THRESHOLD.y - d * 0.42, heading: 0.4, mode: "approach", slot: i });
-    });
-    const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at).slice(-5);
-    landed.forEach((f, i) => out.set(f.name, { x: APRON.x + i * 34, y: APRON.y, heading: -Math.PI / 2, mode: "landed" }));
-    for (const f of state.forks) if (f.status === "active" && planeMode(f) === "holding") out.set(f.name, { mode: "holding" });
+    holding.forEach((e, i) => out.set(e.fork, { mode: "holding", level: i, entry: e }));
+    state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at).slice(-4)
+      .forEach((f, i) => out.set(f.name, { mode: "landed", x: GATE.x + i * GATE.dx, y: GATE.y }));
     return out;
   }
 
   function syncPlanes() {
     for (const f of state.forks) {
       if (f.status === "abandoned") { planes.delete(f.name); continue; }
-      if (!planes.has(f.name)) {
-        planes.set(f.name, { x: -20, y: 20 + (colorIndex * 37) % 120, heading: 0.3, color: PLANE_COLORS[colorIndex++ % PLANE_COLORS.length], orbit: Math.random() * Math.PI * 2, rollout: 0 });
-      }
+      if (!planes.has(f.name)) planes.set(f.name, { x: -30, y: 40 + (prNum(f.name) * 29) % 90, face: 1, livery: LIVERY[(prNum(f.name) - 1 + LIVERY.length) % LIVERY.length], t: Math.random() * 6, phase: null });
     }
   }
 
   // ── drawing ────────────────────────────────────────────────────────────
   let canvas, ctx;
-  function px(x, y, w, h, color) { ctx.fillStyle = color; ctx.fillRect(Math.round(x), Math.round(y), w, h); }
+  const px = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), w, h); };
 
-  function drawGround(t) {
-    // Grass in two tones, checker-ish rows.
-    px(0, 0, W, H, "#2f6b27");
-    for (let y = 0; y < H; y += 8) for (let x = (y / 8) % 2 ? 0 : 8; x < W; x += 16) px(x, y, 8, 8, "#357530");
-    // Taxiway to apron.
-    px(APRON.x - 12, APRON.y - 10, 150, 20, "#4a4f5a");
-    px(APRON.x + 110, APRON.y + 8, 14, RUNWAY.y - APRON.y - 8, "#4a4f5a");
-    // Runway with threshold bars, centre line, numbers.
-    px(RUNWAY.x, RUNWAY.y, RUNWAY.w, RUNWAY.h, "#555b66");
-    px(RUNWAY.x, RUNWAY.y, RUNWAY.w, 1, "#6c7380"); px(RUNWAY.x, RUNWAY.y + RUNWAY.h - 1, RUNWAY.w, 1, "#3f444d");
-    for (let i = 0; i < 4; i++) px(RUNWAY.x + 3, RUNWAY.y + 2 + i * 4, 8, 2, "#f4f4f4");
-    for (let x = RUNWAY.x + 26; x < RUNWAY.x + RUNWAY.w - 10; x += 16) px(x, RUNWAY.y + RUNWAY.h / 2 - 1, 8, 2, "#f4f4f4");
-    ctx.fillStyle = "#f4f4f4"; ctx.font = "8px 'Press Start 2P'"; ctx.fillText("09", RUNWAY.x + 14, RUNWAY.y + 13);
-    // Approach lights blinking toward the threshold.
-    const k = Math.floor(t / 120) % 6;
-    for (let i = 0; i < 6; i++) px(RUNWAY.x - 8 - i * 8, THRESHOLD.y - 1, 3, 3, i === 5 - k ? "#ffffff" : "#c9a227");
-    // Tower.
-    px(130, 104, 10, 10, "#9aa3b5"); px(128, 100, 14, 5, "#6fd6ff"); px(127, 98, 16, 2, "#2c3a66");
+  function drawSky() {
+    const bands = ["#2a63c0", "#3471cc", "#3f80d8", "#4b8fe2", "#5a9dea", "#6cabf0", "#80baf4", "#96c8f7", "#aed6fa", "#c6e3fc"];
+    const bh = Math.ceil(GROUND / bands.length);
+    bands.forEach((c, i) => {
+      px(0, i * bh, W, bh, c);
+      if (bands[i + 1]) for (let x = (i % 2) * 2; x < W; x += 4) px(x, (i + 1) * bh - 1, 2, 1, bands[i + 1]); // dither seam
+    });
   }
 
-  function drawCloud(x, y, s, alpha) {
-    ctx.globalAlpha = alpha;
-    const c = "#ffffff", sh = "#d7e3f4";
-    px(x + 4 * s, y, 10 * s, 4 * s, c);
-    px(x, y + 3 * s, 20 * s, 5 * s, c);
-    px(x + 2 * s, y + 7 * s, 16 * s, 2 * s, sh);
+  function drawCloud(x, y, s, a) {
+    ctx.globalAlpha = a;
+    px(x + 6 * s, y, 10 * s, 3 * s, "#ffffff");
+    px(x + 2 * s, y + 3 * s, 20 * s, 4 * s, "#ffffff");
+    px(x, y + 6 * s, 26 * s, 3 * s, "#ffffff");
+    px(x + 2 * s, y + 9 * s, 22 * s, 1 * s, "#d5e4f6");
     ctx.globalAlpha = 1;
   }
 
   function drawClouds(dt) {
     for (const c of clouds) {
       if (!reduceMotion) c.x -= c.v * dt / 16;
-      if (c.x < -24 * c.s) c.x = W + 4;
-      // Shadow on the ground first, offset down-right.
-      ctx.globalAlpha = 0.18; px(c.x + 10, c.y + 14, 20 * c.s, 6 * c.s, "#000000"); ctx.globalAlpha = 1;
-      drawCloud(c.x, c.y, c.s, 0.85);
+      if (c.x < -28 * c.s) c.x = W + 6;
+      drawCloud(c.x, c.y, c.s, c.a);
     }
-    // Fixed hero cloud, top right: reserved for the Cloudflare logo.
-    drawCloud(W - 76, 6, 3, 0.95);
+    drawCloud(W - 92, 6, 3, 1); // hero cloud, top right: reserved for the Cloudflare logo
   }
 
-  /** 13×13 top-down plane sprite, rotated to `heading`. */
-  function drawPlane(p, label, flags) {
+  function drawGround(t) {
+    px(0, GROUND - 6, W, 6, "#6a9a5a");                    // distant hills
+    for (let x = 0; x < W; x += 24) px(x + 4, GROUND - 9, 14, 3, "#6a9a5a");
+    px(0, GROUND, W, H - GROUND, "#3f7d36");
+    for (let x = 0; x < W; x += 6) px(x, GROUND + 22, 3, 2, "#357030");
+    // Terminal + tower.
+    px(250, GROUND - 10, 70, 10, "#c7ccd8"); for (let x = 254; x < 316; x += 6) px(x, GROUND - 7, 3, 3, "#2b3a5c");
+    px(328, GROUND - 26, 8, 26, "#c7ccd8"); px(325, GROUND - 32, 14, 7, "#78d7ff"); px(324, GROUND - 34, 16, 2, "#2b3a5c");
+    // Apron + runway.
+    px(200, GROUND + 6, RUNWAY.x - 196, 12, "#5a606c");
+    px(RUNWAY.x, RUNWAY.y, RUNWAY.w, 8, "#4a4f5a");
+    for (let i = 0; i < 3; i++) px(RUNWAY.x + 2, RUNWAY.y + 1 + i * 2, 6, 1, "#f4f4f4");
+    for (let x = RUNWAY.x + 14; x < RUNWAY.x + RUNWAY.w - 4; x += 12) px(x, RUNWAY.y + 4, 6, 1, "#f4f4f4");
+    // Approach lights stepping toward the threshold.
+    const k = Math.floor(t / 110) % 6;
+    for (let i = 0; i < 6; i++) px(RUNWAY.x - 6 - i * 7, GROUND + 3, 2, 2, i === 5 - k ? "#ffffff" : "#d8a72a");
+  }
+
+  /** 24×10 side-view airliner, facing right when face = 1. */
+  function drawPlane(p, label, opts) {
     ctx.save();
     ctx.translate(Math.round(p.x), Math.round(p.y));
-    ctx.rotate(p.heading);
-    ctx.scale(2, 2);
-    const body = p.color, dark = "#1b2236";
-    // Shadow.
-    if (p.mode !== "landed" && !flags.onGround) { ctx.globalAlpha = 0.25; ctx.fillStyle = "#000"; ctx.fillRect(-4, 6, 12, 3); ctx.globalAlpha = 1; }
-    ctx.fillStyle = body;
-    ctx.fillRect(-6, -1, 13, 3);          // fuselage
-    ctx.fillRect(-1, -6, 4, 13);          // wings
-    ctx.fillRect(-6, -3, 2, 7);           // tail
-    ctx.fillStyle = dark;
-    ctx.fillRect(5, 0, 2, 1);             // cockpit
+    if (p.face < 0) ctx.scale(-1, 1);
+    const L = p.livery;
+    px(-12, -5, 4, 5, L);                 // tail fin
+    px(-12, -1, 22, 4, "#f4f6fb");        // fuselage
+    px(10, 0, 2, 2, "#f4f6fb");           // nose
+    px(-12, 2, 22, 1, L);                 // livery stripe
+    for (let x = -7; x < 8; x += 2) px(x, 0, 1, 1, "#24304f"); // windows
+    px(8, 0, 2, 1, "#24304f");            // cockpit
+    px(-3, 3, 7, 2, "#9aa3b5");           // wing
     ctx.restore();
-    // Conflict ring (blinks).
-    if (flags.conflict && Math.floor(performance.now() / 300) % 2 === 0) {
-      ctx.strokeStyle = "#ff4d4d"; ctx.lineWidth = 1;
-      ctx.strokeRect(Math.round(p.x) - 16.5, Math.round(p.y) - 16.5, 33, 33);
+
+    if (opts.conflict && Math.floor(performance.now() / 300) % 2 === 0) {
+      ctx.strokeStyle = "#ff5757"; ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(p.x) - 15.5, Math.round(p.y) - 8.5, 31, 15);
     }
-    if (flags.green) px(p.x + 13, p.y - 16, 4, 4, "#5ee07a");
     ctx.font = "8px 'Press Start 2P'";
     const w = ctx.measureText(label).width;
-    px(p.x - w / 2 - 2, p.y + 17, w + 4, 10, "rgba(16,22,42,0.8)");
-    ctx.fillStyle = flags.conflict ? "#ff4d4d" : "#ffffff";
-    ctx.fillText(label, Math.round(p.x - w / 2), Math.round(p.y + 25));
+    const bg = opts.tag === "cleared" ? "#1f7a3c" : opts.conflict ? "#8a1f1f" : "rgba(15,21,48,0.85)";
+    px(p.x - w / 2 - 2, p.y - 18, w + 4, 10, bg);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, Math.round(p.x - w / 2), Math.round(p.y - 10));
   }
 
   function conflictPairs() {
-    const pairs = new Set();
-    for (const s of state.signals || []) {
-      if (s.resolved_at || (s.kind !== "semantic_conflict" && s.kind !== "merge_conflict") || !s.about_fork) continue;
-      pairs.add([s.fork, s.about_fork].sort().join("|"));
-    }
-    return [...pairs].map((p) => p.split("|"));
+    const set = new Set();
+    for (const s of state.signals || []) if (!s.resolved_at && (s.kind === "semantic_conflict" || s.kind === "merge_conflict") && s.about_fork) set.add([s.fork, s.about_fork].sort().join("|"));
+    return [...set].map((x) => x.split("|"));
   }
 
-  function step(dt, t) {
+  function step(dt) {
     const tg = targets();
+    const ease = (p, x, y, k) => { p.x += (x - p.x) * k; p.y += (y - p.y) * k; };
     for (const [name, p] of planes) {
-      const target = tg.get(name);
-      if (!target) continue;
-      p.mode = target.mode;
-      if (target.mode === "holding") {
-        if (!reduceMotion) p.orbit += dt * 0.0012;
-        const tx = HOLD.x + Math.cos(p.orbit) * HOLD.rx, ty = HOLD.y + Math.sin(p.orbit) * HOLD.ry;
-        p.x += (tx - p.x) * Math.min(1, dt * 0.004); p.y += (ty - p.y) * Math.min(1, dt * 0.004);
-        p.heading = p.orbit + Math.PI / 2;
-      } else if (target.mode === "landed" && p.landedPhase !== "parked") {
-        // Touch down on the runway, roll out, then taxi to the apron.
-        if (!p.landedPhase) { p.landedPhase = "rollout"; p.x = THRESHOLD.x; p.y = THRESHOLD.y; p.heading = 0; }
-        if (p.landedPhase === "rollout") {
-          p.x += dt * 0.08; p.y += (THRESHOLD.y - p.y) * 0.2; p.heading = 0;
-          if (p.x > APRON.x + 116) { p.landedPhase = "taxi"; }
-        } else if (p.landedPhase === "taxi") {
-          p.heading = -Math.PI / 2;
-          p.y -= dt * 0.04; if (p.y <= APRON.y + 2) { p.landedPhase = "apron"; }
-        } else {
-          p.heading = Math.PI; p.x += (target.x - p.x) * Math.min(1, dt * 0.004); p.y += (target.y - p.y) * Math.min(1, dt * 0.004);
-          if (Math.abs(target.x - p.x) < 0.5) { p.landedPhase = "parked"; p.heading = -Math.PI / 2; }
-        }
-        if (reduceMotion) { p.landedPhase = "parked"; p.x = target.x; p.y = target.y; p.heading = -Math.PI / 2; }
-      } else if (target.mode === "landed") {
-        p.x = target.x; p.y = target.y;
-      } else {
-        const k = reduceMotion ? 1 : Math.min(1, dt * 0.003);
-        p.x += (target.x - p.x) * k; p.y += (target.y - p.y) * k;
-        p.heading += (target.heading - p.heading) * k;
+      const t = tg.get(name);
+      if (!t) continue;
+      p.t += dt / 1000;
+      const k = reduceMotion ? 1 : Math.min(1, dt * 0.003);
+      if (t.mode === "approach") { p.phase = null; p.face = 1; ease(p, t.x, t.y, k); }
+      else if (t.mode === "holding") {
+        p.phase = null;
+        const cx = HOLD.x, cy = HOLD.y0 + t.level * HOLD.dy;
+        const ox = reduceMotion ? 0 : Math.cos(p.t * 0.9) * HOLD.rx;
+        p.face = reduceMotion ? 1 : (Math.sin(p.t * 0.9) > 0 ? -1 : 1);
+        ease(p, cx + ox, cy + (reduceMotion ? 0 : Math.sin(p.t * 1.8)), Math.min(1, dt * 0.004));
+      } else if (t.mode === "landed") {
+        if (reduceMotion || p.phase === "parked") { p.phase = "parked"; p.x = t.x; p.y = t.y; p.face = -1; continue; }
+        if (!p.phase) p.phase = "flare";
+        if (p.phase === "flare") { p.face = 1; ease(p, TOUCHDOWN.x, RUNWAY.y - 3, Math.min(1, dt * 0.006)); if (Math.abs(p.x - TOUCHDOWN.x) < 2) p.phase = "rollout"; }
+        else if (p.phase === "rollout") { p.face = 1; p.y = RUNWAY.y - 3; p.x += dt * 0.06; if (p.x > RUNWAY.x + RUNWAY.w - 14) p.phase = "taxi"; }
+        else if (p.phase === "taxi") { p.face = -1; p.y += (t.y - p.y) * 0.1; p.x -= dt * 0.05; if (p.x <= t.x) p.phase = "parked"; }
       }
     }
   }
 
   let last = performance.now();
-  function frame(t) {
-    const dt = Math.min(64, t - last); last = t;
+  function frame(now) {
+    const dt = Math.min(64, now - last); last = now;
     if (state) {
-      step(dt, t);
-      drawGround(t);
-      // Conflict link between planes: dashed red line.
-      ctx.fillStyle = "#ff4d4d";
-      for (const [a, b] of conflictPairs()) {
+      step(dt);
+      drawSky();
+      drawClouds(dt);                       // clouds stay behind the planes
+      drawGround(now);
+      ctx.fillStyle = "#ff5757";
+      const pairs = conflictPairs();
+      for (const [a, b] of pairs) {
         const pa = planes.get(a), pb = planes.get(b);
         if (!pa || !pb) continue;
-        const n = Math.max(1, Math.floor(Math.hypot(pb.x - pa.x, pb.y - pa.y) / 4));
+        const n = Math.max(1, Math.floor(Math.hypot(pb.x - pa.x, pb.y - pa.y) / 3));
         for (let i = 0; i < n; i += 2) ctx.fillRect(Math.round(pa.x + (pb.x - pa.x) * i / n), Math.round(pa.y + (pb.y - pa.y) * i / n), 2, 2);
       }
-      const inConflict = new Set(conflictPairs().flat());
+      const inConflict = new Set(pairs.flat());
+      const tags = new Map((state.sequence || []).map((e) => [e.fork, e.clearance]));
       for (const f of state.forks) {
         const p = planes.get(f.name);
-        if (!p) continue;
-        const green = f.check_status === "green" && f.check_sha === f.head_sha;
-        drawPlane(p, callsign(f.name), { conflict: inConflict.has(f.name), green: green && f.status === "active", onGround: f.status === "landed" });
+        if (p) drawPlane(p, pr(f.name), { conflict: inConflict.has(f.name), tag: tags.get(f.name) });
       }
-      drawClouds(dt);
     }
     requestAnimationFrame(frame);
   }
 
-  // ── side panel ─────────────────────────────────────────────────────────
-  function boardStatus(f) {
-    const mode = planeMode(f);
-    if (mode === "landed") return ["LANDED", "s-landed"];
-    if (mode === "holding") return ["HOLDING", "s-holding"];
-    const conflict = (state.signals || []).some((s) => s.fork === f.name && !s.resolved_at && (s.kind === "semantic_conflict" || s.kind === "merge_conflict"));
-    if (conflict) return ["CONFLICT", "s-conflict"];
-    const slot = (state.approach || []).indexOf(f.name);
-    return slot === 0 ? ["FINAL", "s-final"] : [`APPROACH ${slot + 1}`, "s-approach"];
-  }
+  // ── ATC panel ──────────────────────────────────────────────────────────
+  const WORD = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD" };
 
-  /** Fork names → callsigns in tower messages ("shop-123--b changed …" → "B changed …"). */
-  function radioText(message) {
-    let out = message;
-    for (const f of state.forks) out = out.split(f.name).join(callsign(f.name));
-    return out;
+  function logLine(e) {
+    const d = e.detail || {};
+    const who = pr(e.fork);
+    switch (e.kind) {
+      case "fork.created": return [`${who} opened`, ""];
+      case "push.received": return [`${who} pushed ${(d.sha || "").slice(0, 7)}`, ""];
+      case "check.pair": return d.status === "semantic_conflict" ? [`${pr(d.a)} x ${pr(d.b)}: conflict${d.symbol ? ` on ${d.symbol}` : ""}`, "bad"] : null;
+      case "land.merged": return [`${who} landed`, "good"];
+      case "land.denied": return [`${who} landing denied`, "bad"];
+      case "signal.rebase_required": return [`${who} told to rebase`, "bad"];
+      default: return null;
+    }
   }
 
   function renderPanel() {
-    baselineEl.innerHTML = `Runway <b>${esc(state.baseline)}</b>, baseline at <b>${esc((state.baselineHead || "").slice(0, 7))}</b>`;
-    const forks = state.forks.filter((f) => f.status !== "abandoned");
-    const rows = forks.map((f) => {
-      const [label, cls] = boardStatus(f);
-      const p = planes.get(f.name);
-      const check = f.check_status === "green" ? "GREEN" : f.check_status === "red" ? "RED" : f.check_status === "pending" ? "CHECKING" : "—";
-      return `<tr><td><span class="swatch" style="background:${p ? p.color : "#fff"}"></span>${esc(callsign(f.name))}</td>
-        <td class="${cls}">${label}</td><td>${check}</td><td>${f.diff_lines}</td></tr>`;
-    }).join("");
-    const radio = (state.signals || []).slice(0, 30).map((s) =>
-      `<li class="k-${esc(s.kind)}"><time>${hhmmss(s.created_at)}</time><span class="who">TOWER → ${esc(callsign(s.fork))}</span>
-       ${s.resolved_at ? "<s>" : ""}${esc(radioText(s.message))}${s.resolved_at ? "</s>" : ""}</li>`).join("");
-    document.getElementById("board").innerHTML = forks.length
-      ? `<table class="board"><thead><tr><th>FLIGHT</th><th>STATUS</th><th>CHECK</th><th>DIFF</th></tr></thead><tbody>${rows}</tbody></table>`
-      : `<p class="empty">No aircraft yet. Agents appear when they fork ${esc(state.baseline)}.</p>`;
-    document.getElementById("radio").innerHTML = radio || `<li class="empty">Frequency quiet.</li>`;
+    baselineEl.innerHTML = `runway <b>${esc(state.baseline)}</b> at <b>${esc((state.baselineHead || "").slice(0, 7))}</b>`;
+    const seq = state.sequence || [];
+    const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
+      <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span></li>`).join("");
+    const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at).map((f) => pr(f.name));
+    document.getElementById("seq").innerHTML = (rows ? `<ul class="seq">${rows}</ul>` : `<p class="empty">No traffic. PRs appear when agents start work.</p>`)
+      + (landed.length ? `<p class="landed">Landed: <b>${landed.join(", ")}</b></p>` : "");
+    const lines = state.events.map((e) => [e, logLine(e)]).filter(([, l]) => l).slice(0, 10)
+      .map(([e, [t, cls]]) => `<li><time>${hhmmss(e.at)}</time><span class="${cls}">${esc(t)}</span></li>`).join("");
+    document.getElementById("log").innerHTML = lines || `<li class="empty">Frequency quiet.</li>`;
   }
 
-  // ── polling ────────────────────────────────────────────────────────────
   let timer = 0;
   async function poll() {
     clearTimeout(timer);
     try {
       const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/state`, { headers: { authorization: `Bearer ${key}` } });
-      if (res.status === 401) { key = ""; return askForKey("THAT KEY WAS REJECTED. PASTE AGENTMESH_API_KEY."); }
+      if (res.status === 401) { key = ""; return askForKey("KEY REJECTED. PASTE AGENTMESH_API_KEY."); }
       const next = await res.json();
       if (!res.ok) throw new Error(next.error || res.statusText);
-      state = next;
-      syncPlanes();
-      renderPanel();
-      live.hidden = false; live.classList.remove("stale"); live.textContent = "● LIVE";
+      state = next; syncPlanes(); renderPanel();
+      live.hidden = false; live.classList.remove("stale"); live.textContent = "LIVE";
     } catch (_) {
-      live.hidden = false; live.classList.add("stale"); live.textContent = "● RECONNECTING";
+      live.hidden = false; live.classList.add("stale"); live.textContent = "RECONNECTING";
     }
     timer = setTimeout(poll, 1000);
   }
 
   async function boot() {
     if (!repo) return askForRepo();
-    if (!key) return askForKey("TOWER ACCESS KEY");
+    if (!key) return askForKey("ATC ACCESS KEY");
     app.innerHTML = `<main>
-      <div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Top-down airfield: agents are planes approaching the runway in landing order"></canvas></div>
+      <div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Side view of the approach: each pull request is a plane, nearest the runway lands next"></canvas></div>
       <aside>
-        <section><h2>FLIGHT BOARD</h2><div id="board"></div></section>
-        <section><h2>TOWER RADIO</h2><ul class="radio" id="radio"></ul></section>
+        <section><h2>LANDING SEQUENCE</h2><div id="seq"></div></section>
+        <section><h2>ATC LOG</h2><ul class="log" id="log"></ul></section>
       </aside>
     </main>`;
     canvas = document.getElementById("scene");

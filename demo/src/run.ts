@@ -8,17 +8,18 @@
  *   6. Baseline typechecks at the end.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agentmesh, type Signal } from "./lib/agentmesh.ts";
 import { config, ROOT } from "./lib/env.ts";
 import { Repo } from "./lib/git.ts";
 import { say, sleep, waitFor } from "./lib/log.ts";
-import { agentAChangeSignature, agentBAddCaller, agentBFixCaller } from "./scenario.ts";
+import { agentAChangeSignature, agentBAddCaller, agentBFixCaller, TRAFFIC } from "./scenario.ts";
 import { seed } from "./seed.ts";
 
-type LandResponse = { landed: boolean; reason?: string; retry?: boolean; baselineHead?: string; rebaseRequired?: string[] };
+type LandResponse = { landed: boolean; reason?: string; retry?: boolean; baselineHead?: string; rebaseRequired?: string[]; atc?: string };
+const withTraffic = !process.argv.includes("--no-traffic");
 
 const step = (n: number, title: string) => console.log(`\n\x1b[1m── ${n}. ${title}\x1b[0m`);
 let failed = false;
@@ -52,7 +53,7 @@ try {
   agentAChangeSignature(ra.dir);
   ra.commitAll("Make applyDiscount take a Discount");
   ra.push(a.remote);
-  say("A", `pushed ${ra.head().slice(0, 7)} to ${a.fork}: applyDiscount(price, percent) → applyDiscount(price, discount: Discount)`);
+  say("A", `PR${a.pr} pushed ${ra.head().slice(0, 7)}: applyDiscount(price, percent) → applyDiscount(price, discount: Discount)`);
 
   step(2, "Agent B forks and adds a new caller in a different file");
   const b = await mesh.createFork("b");
@@ -60,8 +61,23 @@ try {
   agentBAddCaller(rb.dir);
   rb.commitAll("Add member pricing at checkout");
   rb.push(b.remote);
-  say("B", `pushed ${rb.head().slice(0, 7)} to ${b.fork}: new src/checkout.ts calls applyDiscount(price, 15)`);
+  say("B", `PR${b.pr} pushed ${rb.head().slice(0, 7)}: new src/checkout.ts calls applyDiscount(price, 15)`);
   const pushedAt = Date.now();
+
+  // Background traffic: more agents with independent PRs, so ATC has a real sequence to manage.
+  const traffic = withTraffic
+    ? await Promise.all(
+        TRAFFIC.map(async (t) => {
+          const creds = await mesh.createFork(t.agent);
+          const repo = Repo.clone(creds.remote, creds.token, join(work, t.agent), { name: `agent-${t.agent}`, email: `${t.agent}@agentmesh.dev` }, { [creds.baselineRemote]: creds.baselineToken });
+          t.apply(repo.dir);
+          repo.commitAll(t.title);
+          repo.push(creds.remote);
+          say("system", `PR${creds.pr} (agent ${t.agent.toUpperCase()}) pushed: ${t.title}`);
+          return { creds, repo };
+        }),
+      )
+    : [];
 
   step(3, "Plain git reports no conflict between the two forks");
   const probe = Repo.clone(b.remote, b.token, join(work, "probe"), { name: "probe", email: "probe@agentmesh.dev" }, { [a.remote]: a.token });
@@ -78,6 +94,8 @@ try {
   }, 240_000, 2000);
   say("A", `signal: ${sa.message}`);
   say("B", `signal: ${sb.message}`);
+  const seq = (await mesh.state()).sequence ?? [];
+  for (const e of seq) say("system", `ATC #${e.position} ${e.pr} ${e.clearance.toUpperCase()}: ${e.reason}`);
   check(sa.symbol === "applyDiscount" && sb.symbol === "applyDiscount" && sa.about_fork === b.fork && sb.about_fork === a.fork, `both signals name applyDiscount and the other fork (${((Date.now() - pushedAt) / 1000).toFixed(0)}s after push)`);
   const before = await mesh.state();
   check(!before.events.some((e) => e.kind === "land.requested"), "no landing had been requested yet");
@@ -100,7 +118,20 @@ try {
   const bLand = await land("B", b.fork);
   check(bLand.landed, `B landed: ${bLand.landed ? `baseline is now ${bLand.baselineHead?.slice(0, 7)}` : bLand.reason}`);
 
-  step(6, "Baseline typechecks at the end");
+  if (traffic.length) {
+    step(6, "ATC lands the remaining traffic in sequence (each rebases, then lands)");
+    const order = ((await mesh.state()).sequence ?? []).map((e) => e.fork);
+    traffic.sort((x, y) => order.indexOf(x.creds.fork) - order.indexOf(y.creds.fork));
+    for (const { creds, repo } of traffic) {
+      const head = repo.fetch(creds.baselineRemote);
+      repo.git(["merge", "--no-edit", "-q", head]);
+      repo.push(creds.remote);
+      const res = await land("B", creds.fork);
+      check(res.landed, `PR${creds.pr} landed: ${res.landed ? `baseline is now ${res.baselineHead?.slice(0, 7)}` : res.reason}`);
+    }
+  }
+
+  step(7, "Baseline typechecks at the end");
   const final = Repo.clone(a.baselineRemote, a.baselineToken, join(work, "final"), { name: "verify", email: "verify@agentmesh.dev" });
   const tsc = join(ROOT, "demo/node_modules/.bin/tsc");
   let ok = true;
@@ -113,6 +144,7 @@ try {
   check(ok, `tsc --noEmit on baseline ${final.head().slice(0, 7)}`);
   const checkout = readFileSync(join(final.dir, "src/checkout.ts"), "utf8");
   check(readFileSync(join(final.dir, "src/pricing.ts"), "utf8").includes("discount: Discount") && checkout.includes('kind: "percent"'), "baseline contains A's signature change and B's fixed caller");
+  if (traffic.length) check(["src/shipping.ts"].every((f) => existsSync(join(final.dir, f))) && readFileSync(join(final.dir, "src/money.ts"), "utf8").includes("formatCentsCompact"), "baseline contains all traffic PRs");
   say("system", `git log on baseline:\n${final.git(["log", "--oneline", "-6"]).out.split("\n").map((l) => `           ${l}`).join("\n")}`);
 } catch (err) {
   failed = true;

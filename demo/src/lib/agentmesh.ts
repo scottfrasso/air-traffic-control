@@ -2,6 +2,7 @@ import { config } from "./env.ts";
 
 export interface ForkCredentials {
   fork: string;
+  pr: number;
   agent: string;
   remote: string;
   token: string;
@@ -59,5 +60,6 @@ export interface StateResponse {
   }>;
   overlaps: Array<{ kind: string; forks: [string, string]; path: string; symbol: string | null; detail: string }>;
   signals?: Signal[];
+  sequence?: Array<{ fork: string; pr: string; position: number; clearance: string; reason: string }>;
   events: Array<{ at: number; kind: string; fork: string | null; detail: unknown }>;
 }
