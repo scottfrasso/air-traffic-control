@@ -19,3 +19,24 @@ export const artifacts = {
   list: (search?: string) =>
     call<Array<{ name: string; created_at: string }>>("GET", `/repos?limit=200${search ? `&search=${encodeURIComponent(search)}` : ""}`),
 };
+
+/** Event subscriptions (account-level REST) — only those this project created (name prefix "agentmesh "). */
+export async function listOurSubscriptions(): Promise<Array<{ id: string; name: string; repo: string | null }>> {
+  const out: Array<{ id: string; name: string; repo: string | null }> = [];
+  for (let page = 1; ; page++) {
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${config.accountId}/event_subscriptions/subscriptions?per_page=50&page=${page}`, {
+      headers: { authorization: `Bearer ${config.cfToken()}` },
+    });
+    const json = (await res.json()) as { result: Array<{ id: string; name: string; source: { repo_name?: string } }> | null };
+    const rows = json.result ?? [];
+    out.push(...rows.filter((r) => r.name.startsWith("agentmesh ")).map((r) => ({ id: r.id, name: r.name, repo: r.source.repo_name ?? null })));
+    if (rows.length < 50) return out;
+  }
+}
+
+export async function deleteSubscription(id: string) {
+  await fetch(`https://api.cloudflare.com/client/v4/accounts/${config.accountId}/event_subscriptions/subscriptions/${id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${config.cfToken()}` },
+  });
+}

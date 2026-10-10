@@ -1,6 +1,7 @@
 import type { Coordinator } from "./coordinator";
+import { startFork } from "./forks";
 
-type Handler = (stub: DurableObjectStub<Coordinator>, request: Request, url: URL) => Promise<Response>;
+type Handler = (stub: DurableObjectStub<Coordinator>, request: Request, url: URL, ctx: { env: Env; baseline: string }) => Promise<Response>;
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
@@ -26,10 +27,10 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   [
     "POST",
     /^\/forks$/,
-    async (stub, request) => {
+    async (_stub, request, _url, { env, baseline }) => {
       const { agent } = await body<{ agent?: string }>(request);
       if (!agent || !/^[a-z0-9][a-z0-9-]{0,30}$/.test(agent)) throw new HttpError(400, "agent must match ^[a-z0-9][a-z0-9-]{0,30}$");
-      return json(await stub.createFork(agent), 201);
+      return json(await startFork(env, baseline, agent), 201);
     },
   ],
   ["DELETE", /^\/forks\/([^/]+)$/, async (stub, _r, url) => (await stub.abandonFork(decodeURIComponent(url.pathname.split("/").pop() ?? "")), json({ ok: true }))],
@@ -65,7 +66,7 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   const stub = env.COORDINATOR.getByName(baseline);
   try {
     await stub.ensure(baseline);
-    return await route[2](stub, request, new URL(rest + url.search, url));
+    return await route[2](stub, request, new URL(rest + url.search, url), { env, baseline });
   } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message }, err.status);
     return json({ error: (err as Error).message }, 500);

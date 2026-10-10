@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { baselineOf } from "./artifacts";
+import { startFork } from "./forks";
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
 
@@ -29,7 +30,7 @@ function createServer(env: Env) {
         agent: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/).describe("Short unique agent id, e.g. 'alice'"),
       }),
     },
-    async ({ repo, agent }) => text(await (await coordinatorFor(env, repo)).createFork(agent)),
+    async ({ repo, agent }) => text(await startFork(env, repo, agent)),
   );
 
   server.registerTool(

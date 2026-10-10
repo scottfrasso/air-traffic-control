@@ -1,12 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
-import { createPushSubscription, deletePushSubscription } from "./subscriptions";
+import { deletePushSubscription } from "./subscriptions";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
 import type { CoordinatorState, ForkCredentials, ForkRow, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
+/** Stop polling after this long without a push or API activity, so idle DOs hibernate (and pick up new deploys). */
+const RECONCILE_IDLE_MS = 10 * 60_000;
 
 /**
  * One Coordinator per baseline repo (addressed by baseline name). Holds the in-flight index:
@@ -39,6 +41,8 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Idempotent: records the baseline name and its current head. */
   async ensure(baseline: string): Promise<void> {
+    this.touch();
+    await this.scheduleReconcile();
     if (this.meta("baseline") === baseline) return;
     this.setMeta("baseline", baseline);
     const head = await headOf(this.env, baseline);
@@ -72,12 +76,7 @@ export class Coordinator extends DurableObject<Env> {
     const forked = await base.fork(name, { description: `agentmesh fork for ${agent}`, defaultBranchOnly: true });
     const baselineRead = await base.createToken("read", 6 * 3600);
 
-    let subscriptionId: string | null = null;
-    try {
-      subscriptionId = await createPushSubscription(this.env, name);
-    } catch (err) {
-      this.log("subscription.failed", { error: (err as Error).message }, name);
-    }
+    const subscriptionId: string | null = null; // attached by the Worker via attachSubscription (ADR-0009)
 
     const now = Date.now();
     this.sql.exec(
@@ -102,6 +101,14 @@ export class Coordinator extends DurableObject<Env> {
       baselineToken: baselineRead.plaintext,
       baseSha: baseHead.hash,
     };
+  }
+
+  /** Record (or log the failure of) the fork's push subscription, created by the stateless Worker. */
+  async attachSubscription(fork: string, subscriptionId: string | null, error?: string): Promise<void> {
+    if (subscriptionId) {
+      this.sql.exec("UPDATE forks SET subscription_id = ? WHERE name = ?", subscriptionId, fork);
+      this.log("subscription.created", { subscriptionId }, fork);
+    } else this.log("subscription.failed", { error: error ?? "unknown" }, fork);
   }
 
   // ── pushes ──────────────────────────────────────────────────────────────
@@ -304,6 +311,7 @@ export class Coordinator extends DurableObject<Env> {
   // ── reconcile (ADR-0006) ────────────────────────────────────────────────
 
   private async scheduleReconcile() {
+    if (this.activeForks().length === 0) return;
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
   }
 
@@ -326,9 +334,16 @@ export class Coordinator extends DurableObject<Env> {
     return found;
   }
 
+  /** Mark activity so the reconcile alarm keeps running; called on every API call and push. */
+  touch() {
+    this.setMeta("last_activity", String(Date.now()));
+  }
+
   override async alarm(): Promise<void> {
-    await this.reconcile();
-    if (this.activeForks().length > 0) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    if (await this.reconcile()) this.touch();
+    const idle = Date.now() - Number(this.meta("last_activity") ?? 0);
+    if (this.activeForks().length > 0 && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    else this.log("reconcile.paused", { idleMs: idle });
   }
 
   // ── teardown ────────────────────────────────────────────────────────────

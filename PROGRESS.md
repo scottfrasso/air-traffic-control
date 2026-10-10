@@ -1,12 +1,8 @@
 # PROGRESS
 
-## Blocked (soft; not stopping work)
+## Blocked
 
-- **Worker can't create push subscriptions:** the main token appears IP-restricted. A browser-bot prompt for a Queues-only token is in
-  `handover/01-create-subscriptions-token.md`. Until then, pushes are detected by the reconcile fallback (about 5 s).
-
-Previously: nothing. Workers Paid is active (2026-10-10), and the token reaches Artifacts, Containers, Queues, Workflows and Event Subscriptions.
-Note that the API token expires 2026-10-15 21:59 UTC.
+Nothing. The Worker subscription token was added 2026-10-10, and per-fork push subscriptions are verified working.
 
 ## Done
 
@@ -38,4 +34,4 @@ Note that the API token expires 2026-10-15 21:59 UTC.
 ## Stubbed / cut / known gaps
 
 - One shared API key; agent identity is not authenticated (ADR-0005).
-- Spike resources (`spike-base*` repos, their subscriptions) still exist in namespace `agentmesh`. They'll be deleted once M2 has its own setup script.
+- `demo/src/teardown.ts [--keep <baseline>]` cleans up old runs (repos, forks, subscriptions).
