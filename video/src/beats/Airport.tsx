@@ -36,10 +36,6 @@ export function Airport({ t }: { t: number }) {
   const closing = t >= T.closeStart;
   return (
     <Stage scene={scene}>
-      {!closing &&
-        traffic.map((x) => x.l.phase === "approach" && (
-          <At key={x.id} x={x.plane.x} y={x.plane.y - 8} align="edge"><Tag text={x.pr} light={{ color: C.green, text: "ATC" }} /></At>
-        ))}
       {!closing && (
         <>
           {HANGARS.map((hx, i) => (
@@ -49,7 +45,7 @@ export function Airport({ t }: { t: number }) {
           ))}
           <Callout x={HANGARS[1]! + 22} y={200} rise={34} title="ARTIFACTS" sub="a Git fork per agent" opacity={show(0.2)} />
           <Callout x={TOWER.x - 8} y={TOWER.top - 8} rise={64} title="DURABLE OBJECT" sub="push events · open forks · sequence" opacity={show(2.8)} color={C.cyan} />
-          <Callout x={CHECK.x + 30} y={CHECK.y - 12} rise={110} title="SANDBOX" sub="merge + type check" opacity={show(6.6)} color={C.green} />
+          <Callout x={CHECK.x + 30} y={CHECK.y - 12} rise={110} title="SANDBOX" sub="test merges + builds" opacity={show(6.6)} color={C.green} />
         </>
       )}
       {closing && <Close t={t} />}

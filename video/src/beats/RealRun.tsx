@@ -6,7 +6,7 @@
 import type { ReactNode } from "react";
 import type { Scene } from "../scene/draw";
 import { CHECK, clamp, GATES, glide, GROUND, landing, lerp, LIVERY, RUNWAY, SCALE, smooth, type Plane, type Pt } from "../scene/geometry";
-import { At, C, PIXEL, Popup, Stage, Tag, TERM } from "../scene/Stage";
+import { At, C, Caption, PIXEL, Popup, Stage, Tag, TERM } from "../scene/Stage";
 import { ERROR, LANDS, PAIRS, REAL, RUN, SEQ1, SEQ2, T, realToVideo, videoToReal, voSeconds } from "../timeline";
 
 const WORD: Record<string, string> = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD" };
@@ -16,14 +16,13 @@ export const LIV: Record<string, string> = { PR1: LIVERY.a, PR2: LIVERY.b, PR3: 
 const SHORT: Record<string, string> = {
   [RUN.a]: "changes a function",
   [RUN.b]: "calls it the old way",
-  ...Object.fromEntries(RUN.traffic.map((x) => [x.pr, x.title.toLowerCase().replace(/^(add|document) /, "")])),
 };
 const DIFF: Record<string, number> = Object.fromEntries(RUN.forks.map((f) => [f.pr, f.diff]));
 const SLOTS = [0.92, 0.765, 0.61, 0.455, 0.3];
 
 const order = (seq: Array<{ pr: string }>) => seq.map((x) => x.pr);
 const at = (k: number) => T.orderVo + k * voSeconds("order"); // a moment in the "order" line
-const SWAP = at(0.86); // planes re-sequence into ATC's order as the line reaches "the smaller change goes first"
+const SWAP = at(0.36); // planes re-sequence into ATC's order as the line reaches "ATC picks the order"
 const LAND_V = new Map(LANDS.map((l) => [l.pr, realToVideo(l.t)]));
 const FINAL = 1.8; // seconds from the first slot to touchdown
 
@@ -75,6 +74,11 @@ export function RealRun({ t }: { t: number }) {
     const pl = byPr.get(p.pr);
     if (pl && t >= p.v && t < p.v + 1.3) beams.push({ from: pl.p, to: [CHECK.x, CHECK.y - 4], color: C.cyan, progress: clamp((t - p.v) / 0.9) });
   }
+  // Each pair check, drawn as a line between the two planes when it finishes (green), the failing one stays red.
+  for (const pc of PAIRS) {
+    const v = realToVideo(pc.t), pa = byPr.get(pc.a), pb = byPr.get(pc.b);
+    if (pa && pb && pc.status !== "semantic_conflict" && t >= v && t < v + 1.4) beams.push({ from: pa.p, to: pb.p, color: C.green });
+  }
   const scene: Scene = {
     t,
     planes,
@@ -87,41 +91,42 @@ export function RealRun({ t }: { t: number }) {
   const shown = t >= SWAP;
   const seq = shown ? ([...RUN.sequences].reverse().find((s) => s.t <= Math.max(r, REAL.settled))?.sequence ?? []) : [];
   const clr = new Map(seq.map((x) => [x.pr, x.clearance]));
+  const caption =
+    t < T.flag ? "ATC analyzes each push against every other open PR"
+    : t < T.orderVo ? null
+    : t < SWAP ? "A merge train lands them in the order they arrived"
+    : t < T.holdVo + 0.5 ? "ATC: smaller changes first. The bigger of the two waits."
+    : t >= T.lastLand - 0.5 ? "All five landed in order. Nobody rebased." : null;
+  const captionFrom = t < T.flag ? T.b4 + 0.4 : t < SWAP ? T.orderVo : t < T.holdVo + 0.5 ? SWAP : T.lastLand - 0.5;
   return (
     <Stage scene={scene}>
       {ps.map((x) => {
-        if (!x.flying || t >= (LAND_V.get(x.pr) ?? Infinity) - FINAL) return null;
+        if (!x.flying || !SHORT[x.pr] || t >= (LAND_V.get(x.pr) ?? Infinity) - FINAL || t < T.flag) return null;
         const c = clr.get(x.pr);
-        const red = flagged && (x.pr === RUN.a || x.pr === RUN.b);
-        const below = x.slot % 2 === 1;
-        const text = x.pr === RUN.a && t >= T.fix ? `${x.pr} · merged ${RUN.b}, fixed the call` : `${x.pr} · ${SHORT[x.pr]}`;
+        const red = flagged;
+        const below = x.pr === RUN.b;
+        const text = x.pr === RUN.a && t >= T.fix ? "fixed the call" : SHORT[x.pr]!;
+        const light = x.pr === RUN.a && c === "hold" ? { color: C.amber, text: "WAITS" } : undefined;
         return (
           <At key={x.pr} x={x.p[0]} y={below ? x.p[1] + 9 : x.p[1] - 8} anchor={below ? "top" : "bottom"} align="edge">
-            <Tag text={text} below={below} bg={red ? "#8a1f1f" : undefined} light={c ? { color: CLR[c] ?? C.text, text: WORD[c] ?? c.toUpperCase() } : undefined} />
+            <Tag text={text} below={below} bg={red ? "#8a1f1f" : undefined} light={light} />
           </At>
         );
       })}
       {ps.map((x) => {
-        const push = pushes.find((p) => p.pr === x.pr && t >= p.v && t < p.v + 2);
         const land = LAND_V.get(x.pr);
-        const pop = flagged && (x.pr === RUN.a || x.pr === RUN.b) ? { text: "CONFLICT!", color: C.red, age: (t - T.flag) / 2.4 }
-          : land !== undefined && t >= land ? { text: "LANDED", color: C.green, age: (t - land) / 2.2 }
-          : push ? { text: x.pr === RUN.a && push.v > T.v0 + 5 ? "PUSH FIX" : "PUSH", color: "#fff", age: (t - push.v) / 2 } : null;
+        const pop = flagged && (x.pr === RUN.a || x.pr === RUN.b) ? { text: "CONFLICT", color: C.red, age: (t - T.flag) / 2.4 }
+          : land !== undefined && t >= land ? { text: "LANDED", color: C.green, age: (t - land) / 2.2 } : null;
         return pop ? <At key={x.pr} x={x.p[0]} y={x.p[1]}><Popup {...pop} /></At> : null;
       })}
-
       <Clock r={r} />
-      {t < at(0.2) && <PairGrid t={t} />}
-      {t >= at(0.2) && t < T.landVo && <Rules t={t} />}
-      {shown && t < T.landVo + 1 && <Board seq={seq} />}
-      {t >= T.flag && t < T.orderVo && <NotYet x={byPr.get(RUN.b)!.p[0]} opacity={clamp((t - T.flag - 0.8) / 0.4)} />}
-      {t >= T.landVo && (
-        <Panel x={970} y={28} w={900} border={C.green}>
-          <div style={{ font: `22px/1.5 ${PIXEL}`, color: C.green }}>LANDED IN ORDER</div>
-          <div style={{ font: `40px/1.2 ${TERM}`, color: C.text, marginTop: 6 }}>{LANDS.filter((l) => t >= (LAND_V.get(l.pr) ?? 0)).map((l) => l.pr).join(" → ") || "…"}</div>
-          <div style={{ font: `34px/1.2 ${TERM}`, color: C.dim, marginTop: 8 }}>Told to rebase: <span style={{ color: C.text }}>{RUN.rebased.length ? RUN.rebased.join(", ") : "nobody"}</span></div>
+      {t >= T.flag && t < T.orderVo && (
+        <Panel x={560} y={60} w={800} border={C.red}>
+          <div style={{ font: `20px/1.4 ${PIXEL}`, color: C.red }}>BREAKS ONLY WHEN COMBINED</div>
+          <div style={{ font: `36px/1.2 ${TERM}`, color: C.text, marginTop: 6 }}>{ERROR.replace(/^(\S+) (TS\d+) /, "$1  ")}</div>
         </Panel>
       )}
+      {caption && <Caption opacity={clamp((t - captionFrom) / 0.4)}>{caption}</Caption>}
     </Stage>
   );
 }
@@ -132,97 +137,15 @@ function Panel({ x, y, w, children, border = C.edge }: { x: number; y: number; w
 
 function Clock({ r }: { r: number }) {
   return (
-    <Panel x={48} y={28} w={880}>
+    <Panel x={48} y={28} w={520}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 22 }}>
-        <span style={{ font: `20px/1 ${PIXEL}`, color: C.red }}>● REAL RUN</span>
-        <span style={{ font: `30px/1 ${TERM}`, color: C.dim }}>{RUN.baseline} on Cloudflare</span>
-        <span style={{ font: `26px/1 ${PIXEL}`, color: C.text, marginLeft: "auto" }}>T+{Math.max(0, r).toFixed(1).padStart(4, "0")}s</span>
+        <span style={{ font: `20px/1 ${PIXEL}`, color: C.red, whiteSpace: "nowrap" }}>● RECORDED RUN</span>
+        <span style={{ font: `26px/1 ${PIXEL}`, color: C.text, marginLeft: "auto" }}>{Math.max(0, r).toFixed(1)}s</span>
       </div>
     </Panel>
   );
 }
 
-/** The ten pairs, filling in as the real checks finish. */
-function PairGrid({ t }: { t: number }) {
-  const done = PAIRS.filter((p) => realToVideo(p.t) <= t);
-  const cell = (a: string, b: string) => done.find((p) => p.a === a && p.b === b);
-  const bad = done.find((p) => p.status === "semantic_conflict");
-  return (
-    <Panel x={970} y={28} w={900} border={bad ? C.red : C.edge}>
-      <div style={{ font: `20px/1.4 ${PIXEL}`, color: C.cyan }}>EVERY PAIR, MERGED + TYPE CHECKED · {done.length}/{PAIRS.length}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "90px repeat(4, 110px)", gap: 6, marginTop: 14, alignItems: "center" }}>
-        <span />
-        {PRS.slice(1).map((p) => <span key={p} style={{ font: `18px/1 ${PIXEL}`, color: C.dim, textAlign: "center" }}>{p}</span>)}
-        {PRS.slice(0, 4).flatMap((a, i) => [
-          <span key={a} style={{ font: `18px/1 ${PIXEL}`, color: C.dim }}>{a}</span>,
-          ...PRS.slice(1).map((b, j) => {
-            if (j < i) return <span key={a + b} />;
-            const c = cell(a, b);
-            const red = c?.status === "semantic_conflict";
-            return <span key={a + b} style={{ height: 40, display: "flex", alignItems: "center", justifyContent: "center", background: c ? (red ? "#8a1f1f" : "#1f5a33") : "#232c52", font: `22px/1 ${PIXEL}`, color: c ? (red ? C.red : C.green) : C.dim }}>{c ? (red ? "✗" : "✓") : "·"}</span>;
-          }),
-        ])}
-      </div>
-      {bad && (
-        <div style={{ marginTop: 14 }}>
-          <div style={{ font: `30px/1.15 ${TERM}`, color: C.text }}><span style={{ color: C.red }}>{bad.a} + {bad.b}:</span> <span style={{ color: C.amber }}>{ERROR.split(" ")[0]}</span> {ERROR.split(" ").slice(1).join(" ")}</div>
-          <div style={{ font: `30px/1.15 ${TERM}`, color: C.dim }}>Each passes on its own. Both agents get this signal.</div>
-        </div>
-      )}
-    </Panel>
-  );
-}
 
-/** How ATC picks the order: arrival order vs. ATC's rules, with the real inputs. */
-function Rules({ t }: { t: number }) {
-  const show = (k: number) => clamp((t - at(k)) / 0.35);
-  const atcOrder = order(SEQ1.sequence);
-  const line = (k: number, children: ReactNode, color: string = C.text) => <div style={{ font: `30px/1.25 ${TERM}`, color, opacity: show(k) }}>{children}</div>;
-  const n = (x: number) => <span style={{ font: `16px/1 ${PIXEL}`, color: C.amber, marginRight: 10 }}>{x}.</span>;
-  return (
-    <Panel x={970} y={28} w={900} border={C.cyan}>
-      <div style={{ font: `20px/1.4 ${PIXEL}`, color: C.cyan }}>HOW ATC PICKS THE LANDING ORDER</div>
-      {line(0.08, <>Merge train, arrival order: <span style={{ textDecoration: t >= SWAP ? "line-through" : "none" }}>{PRS.join(" → ")}</span></>, C.dim)}
-      {line(0.25, "ATC reads the code: which functions each PR changes, which pairs break.")}
-      <div style={{ height: 8 }} />
-      {line(0.62, <>{n(1)}Asked to land first? <span style={{ color: C.dim }}>none had yet</span></>)}
-      {line(0.72, <>{n(2)}Passes on the current main? <span style={{ color: C.green }}>all five do</span></>)}
-      {line(0.82, <>{n(3)}Smaller change first: <span style={{ color: C.amber }}>{atcOrder.map((p) => `${p} ${DIFF[p]}`).join(" · ")}</span> lines</>)}
-      {line(0.9, <>{n(4)}Conflicts with a PR ahead of it? <span style={{ color: C.amber }}>{RUN.a} holds behind {RUN.b}</span></>)}
-      <div style={{ font: `30px/1.3 ${TERM}`, color: C.text, marginTop: 8, opacity: show(0.95) }}>
-        ATC order: <span style={{ color: C.green }}>{atcOrder.join(" → ")}</span>
-      </div>
-    </Panel>
-  );
-}
 
-/** Nobody has asked to land when the conflict is found. */
-function NotYet({ x, opacity }: { x: number; opacity: number }) {
-  const left = x * SCALE, right = RUNWAY.x * SCALE, y = (GROUND + 14) * SCALE;
-  return (
-    <div style={{ position: "absolute", left, top: y, width: right - left, opacity }}>
-      <div style={{ position: "absolute", left: 0, right: 0, top: 18, height: 8, background: C.orange }} />
-      <div style={{ position: "absolute", left: -4, top: 0, width: 8, height: 44, background: C.orange }} />
-      <div style={{ position: "absolute", right: -4, top: 0, width: 8, height: 44, background: C.orange }} />
-      <div style={{ position: "absolute", left: "50%", top: 40, transform: "translateX(-50%)", padding: "10px 18px 6px", background: "rgba(15,21,48,0.92)", color: C.orange, font: `22px/1 ${PIXEL}`, whiteSpace: "nowrap" }}>FOUND BEFORE ANY PR ASKED TO LAND</div>
-    </div>
-  );
-}
 
-function Board({ seq }: { seq: Array<{ pr: string; clearance: string; reason: string }> }) {
-  return (
-    <Panel x={48} y={118} w={880}>
-      <div style={{ font: `18px/1 ${PIXEL}`, color: C.cyan, marginBottom: 10 }}>LANDING SEQUENCE, IN ATC'S WORDS</div>
-      {seq.map((e, i) => (
-        <div key={e.pr} style={{ display: "grid", gridTemplateColumns: "44px 80px 1fr", alignItems: "baseline", padding: "3px 0" }}>
-          <span style={{ font: `28px/1 ${TERM}`, color: C.dim }}>#{i + 1}</span>
-          <span style={{ font: `16px/1 ${PIXEL}`, color: C.text }}>{e.pr}</span>
-          <span style={{ font: `28px/1.05 ${TERM}`, color: C.dim }}>
-            <span style={{ font: `16px/1 ${PIXEL}`, color: CLR[e.clearance] ?? C.text, marginRight: 10 }}>{WORD[e.clearance] ?? e.clearance.toUpperCase()}</span>
-            {e.reason}
-          </span>
-        </div>
-      ))}
-    </Panel>
-  );
-}

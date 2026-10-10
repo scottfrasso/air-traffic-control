@@ -84,7 +84,7 @@ Nothing.
 - `demo/src/tools/scene.ts [conflict|landed]` + `screenshot.ts <baseline> <out.png>` produce dashboard stills.
 
 ## 2026-10-10: submission video
-- Done: `video/` (Remotion) renders `video/out/atc.mp4`, 2:29 at 1080p30, with ElevenLabs voice-over: the metaphor
+- Done: `video/` (Remotion) renders `video/out/atc.mp4`, 2:17 at 1080p30, with ElevenLabs voice-over: the metaphor
   (PRs are planes, GitHub has no controller), today's go-around (rebase onto main, then land late), then a real
   five-PR run (`booking-261010213346`). In that run all 10 pairs are merged and type checked, only PR1 + PR2 fails,
   and ATC orders PR4 → PR5 → PR2 → PR1 → PR3 by its rules. PR1 holds behind PR2 and fixes the call in flight;
