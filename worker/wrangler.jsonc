@@ -7,11 +7,22 @@
   "observability": { "enabled": true },
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "agentmesh" }],
   "durable_objects": {
-    "bindings": [{ "name": "COORDINATOR", "class_name": "Coordinator" }]
+    "bindings": [
+      { "name": "COORDINATOR", "class_name": "Coordinator" },
+      { "name": "CHECKER", "class_name": "Checker" }
+    ]
   },
   "exports": {
-    "Coordinator": { "type": "durable-object", "storage": "sqlite" }
+    "Coordinator": { "type": "durable-object", "storage": "sqlite" },
+    "Checker": { "type": "durable-object", "storage": "sqlite" }
   },
+  "containers": [
+    {
+      "class_name": "Checker",
+      "scheduling_policy": "durable_object",
+      "images": { "checker": { "dockerfile": "./container/Dockerfile" } }
+    }
+  ],
   "queues": {
     "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3 }]
   },

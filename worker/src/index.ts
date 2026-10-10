@@ -7,6 +7,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 
 export { Coordinator } from "./coordinator";
 export { PushPipeline } from "./pipeline";
+export { Checker } from "./checker";
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {

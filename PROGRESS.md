@@ -27,9 +27,15 @@ Nothing. The Worker subscription token was added 2026-10-10, and per-fork push s
     file overlaps; intent overlaps. Signals refresh in place and resolve when they stop holding.
   - MCP server at `/mcp` (stateless), with tools `start_work`, `declare_intent`, `get_signals`.
 
+- **Milestone 4: Speculative merges** ✅ (`demo/src/checks/m4-speculative.ts` passes)
+  - Plain git merges A and B cleanly; the container finds `src/checkout.ts:6 TS2345` only in the merge.
+  - Both agents get a `semantic_conflict` signal naming `applyDiscount` and the other fork about 21 s after push, before any landing.
+- Repo: private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog secret scan on every PR.
+
 ## Next
 
-- Milestone 4: speculative merges + typecheck in a Sandbox container, run from the Workflow.
+- Milestone 5: `request_land` landing gate + arbitration + rebase-required.
+- Then: `demo/run.sh`, the 8-bit runway dashboard (see memory/user request), README, DEMO_SCRIPT.
 
 ## Stubbed / cut / known gaps
 

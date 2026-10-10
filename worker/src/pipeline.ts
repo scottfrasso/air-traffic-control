@@ -1,5 +1,6 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
 import { indexFork } from "./artifacts";
+import type { RepoRef } from "./checker";
 
 export interface PipelineParams {
   baseline: string;
@@ -23,6 +24,32 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
 
     await step.do("apply index", () => coordinator.applyIndex(index));
 
-    return { fork, sha, files: index.files.length, diffLines: index.diffLines };
+    // Milestone 4: speculative merge + typecheck against every other active fork, in the Sandbox.
+    const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
+    if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
+    const checker = this.env.CHECKER.getByName(`checker-${baseline}`);
+    const slow: WorkflowStepConfig = { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" };
+
+    if (plan.others.length === 0) {
+      await step.do("typecheck fork alone", slow, async () => {
+        // Tokens are minted inside the step so they never land in Workflow state.
+        await coordinator.applySingle(await checker.run({ mode: "single", repo: await readRef(this.env, fork) }));
+      });
+    }
+    const results: Record<string, string> = {};
+    for (const other of plan.others) {
+      results[other] = await step.do(`speculative merge with ${other}`, slow, async () => {
+        const out = await checker.run({ mode: "pair", a: await readRef(this.env, fork), b: await readRef(this.env, other) });
+        return (await coordinator.applyPair(out)).status;
+      });
+    }
+    return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
   }
+}
+
+/** Short-lived read token + remote for a repo, for the checker container. */
+async function readRef(env: Env, repo: string): Promise<RepoRef> {
+  using handle = await env.ARTIFACTS.get(repo);
+  const [token, info] = await Promise.all([handle.createToken("read", 900), handle.info()]);
+  return { name: repo, remote: info.remote, token: token.plaintext };
 }

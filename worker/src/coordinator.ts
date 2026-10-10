@@ -2,6 +2,8 @@ import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
+import type { PairResult, SingleResult } from "./checker";
+import { analyzePair, describeError } from "./conflicts";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
 import type { CoordinatorState, ForkCredentials, ForkRow, Overlap, PushSource, SignalData, SignalRow } from "./types";
@@ -269,6 +271,88 @@ export class Coordinator extends DurableObject<Env> {
       )
       .toArray()
       .map((r) => ({ ...r, data: JSON.parse(r.data) as SignalData }));
+  }
+
+  // ── speculative checks (milestone 4) ───────────────────────────────────
+
+  /** What the pipeline should check for a push: the other active forks to merge with. */
+  async checkPlan(fork: string, sha: string): Promise<{ current: boolean; others: string[] }> {
+    const row = this.fork(fork);
+    if (!row || row.status !== "active" || row.head_sha !== sha) return { current: false, others: [] };
+    return { current: true, others: this.activeForks().filter((f) => f.name !== fork && f.head_sha !== f.base_sha).map((f) => f.name) };
+  }
+
+  private setCheck(fork: string, sha: string, ok: boolean, detail: string) {
+    const row = this.fork(fork);
+    if (!row || row.head_sha !== sha) return; // stale result; a newer push is being checked
+    this.sql.exec("UPDATE forks SET check_status = ?, check_sha = ?, check_detail = ? WHERE name = ?", ok ? "green" : "red", sha, detail, fork);
+  }
+
+  async applySingle(json: string): Promise<void> {
+    const r = JSON.parse(json) as SingleResult;
+    const detail = r.result.ok ? "typechecks" : r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
+    this.setCheck(r.repo, r.result.sha, r.result.ok, detail);
+    this.log("check.single", { sha: r.result.sha, ok: r.result.ok, errors: r.result.errors.length }, r.repo);
+  }
+
+  /** Store a pair result; a merge-only typecheck failure becomes a semantic-conflict signal to both forks. */
+  async applyPair(json: string): Promise<{ status: string }> {
+    const r = JSON.parse(json) as PairResult;
+    this.setCheck(r.a, r.aloneA.sha, r.aloneA.ok, r.aloneA.ok ? "typechecks" : r.aloneA.errors.map(describeError).join("\n"));
+    this.setCheck(r.b, r.aloneB.sha, r.aloneB.ok, r.aloneB.ok ? "typechecks" : r.aloneB.errors.map(describeError).join("\n"));
+
+    const a = this.fork(r.a);
+    const b = this.fork(r.b);
+    const fresh = a?.head_sha === r.aloneA.sha && b?.head_sha === r.aloneB.sha;
+    const breaking: Record<string, string[]> = {};
+    for (const row of this.sql
+      .exec<{ fork: string; name: string }>("SELECT fork, name FROM symbol_changes WHERE change IN ('signature_changed', 'removed') AND fork IN (?, ?)", r.a, r.b)
+      .toArray())
+      breaking[row.fork] = [...(breaking[row.fork] ?? []), row.name];
+    const v = analyzePair(r, breaking);
+
+    const [x, y] = [r.a, r.b].sort() as [string, string];
+    this.sql.exec(
+      `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, status = excluded.status, detail = excluded.detail, checked_at = excluded.checked_at`,
+      x, y, x === r.a ? r.aloneA.sha : r.aloneB.sha, x === r.a ? r.aloneB.sha : r.aloneA.sha, v.status,
+      JSON.stringify({ newErrors: v.newErrors, symbol: v.symbol, changer: v.changer, conflicts: v.conflicts }), Date.now(),
+    );
+    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError) }, null);
+    if (!fresh) return { status: `${v.status} (stale)` };
+
+    if (v.status === "clean" || v.status === "inherited_failure") {
+      for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const) {
+        this.resolveSignals({ fork: me, kind: "semantic_conflict", about_fork: other });
+        this.resolveSignals({ fork: me, kind: "merge_conflict", about_fork: other });
+      }
+    } else if (v.status === "textual_conflict") {
+      for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const)
+        this.emitSignal({
+          fork: me, kind: "merge_conflict", about_fork: other, symbol: null,
+          message: `Your fork and ${other} conflict textually in ${v.conflicts.join(", ")}.`,
+          data: { files: v.conflicts }, dedupe_key: `merge:${me}:${other}:${v.conflicts.join(",")}`,
+        });
+    } else {
+      const first = v.newErrors[0];
+      const where = first ? describeError(first) : "typecheck fails";
+      const errorKey = v.newErrors.map((e) => `${e.file}:${e.code}`).join(",");
+      for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const) {
+        let why = "";
+        if (v.symbol && v.changer && v.user) {
+          why = me === v.user
+            ? ` ${other} changed ${v.symbol}, and your ${first?.file ?? "code"} still uses the old shape.`
+            : ` ${other} uses ${v.symbol}, which you changed, in ${first?.file ?? "its code"}.`;
+        }
+        this.emitSignal({
+          fork: me, kind: "semantic_conflict", about_fork: other, symbol: v.symbol,
+          message: `Speculative merge with ${other} merges cleanly but fails typecheck: ${where}.${why} Neither fork fails alone.`,
+          data: { errors: v.newErrors.map(describeError), changer: v.changer, user: v.user },
+          dedupe_key: `semantic:${me}:${other}:${v.symbol ?? ""}:${errorKey}`,
+        });
+      }
+    }
+    return { status: v.status };
   }
 
   // ── overlaps ────────────────────────────────────────────────────────────

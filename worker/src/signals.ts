@@ -6,7 +6,7 @@ import type { SignalData } from "./types";
  * Pure function so it can be unit-tested; the Coordinator persists and de-duplicates.
  */
 
-export type SignalKind = "overlap" | "signature_change" | "intent_overlap" | "semantic_conflict" | "rebase_required" | "landed" | "land_blocked";
+export type SignalKind = "overlap" | "signature_change" | "intent_overlap" | "semantic_conflict" | "merge_conflict" | "rebase_required" | "landed" | "land_blocked";
 
 export interface DesiredSignal {
   fork: string;

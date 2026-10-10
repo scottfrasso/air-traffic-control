@@ -16,6 +16,7 @@ the raw spike findings (milestone 1).
 | [0007](docs/adr/0007-lightweight-symbol-extraction.md) | Scan-based symbol extraction; tsc is the source of truth | Accepted |
 | [0008](docs/adr/0008-baseline-per-run-and-dashboard-polling.md) | Fresh baseline per run; dashboard polls | Accepted |
 | [0009](docs/adr/0009-stateless-mcp-and-token-split.md) | Stateless MCP; separate subscription token | Accepted |
+| [0010](docs/adr/0010-checker-container.md) | Speculative merges in a container-backed Checker DO | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
