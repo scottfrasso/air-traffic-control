@@ -22,5 +22,15 @@ const rb = Repo.clone(b.remote, b.token, join(work, "b"), { name: "bob", email: 
 agentBAddCaller(rb.dir);
 rb.commitAll("Member pricing at checkout");
 rb.push(b.remote);
-await waitFor("signals", async () => ((await mesh.state()).signals ?? []).some((s) => s.kind === "signature_change" && s.fork === b.fork && /checkout/.test(s.message)));
+// Phase "conflict": stop once the speculative merge has flagged both planes.
+await waitFor("semantic conflict", async () => ((await mesh.state()).signals ?? []).filter((s) => s.kind === "semantic_conflict" && !s.resolved_at).length >= 2, 240_000, 2000);
+if (process.argv[2] === "landed") {
+  // Phase "landed": alice lands; bob is sent to hold (rebase required).
+  for (;;) {
+    const r = await mesh.call<{ landed: boolean; retry?: boolean }>("POST", "/land", { fork: a.fork });
+    if (!r.retry) break;
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+  await mesh.call("POST", "/land", { fork: b.fork });
+}
 console.log(baseline);

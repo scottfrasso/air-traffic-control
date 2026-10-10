@@ -3,260 +3,388 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentmesh strip bay</title>
+<title>Air Traffic Control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
 <style>
   :root {
-    --console: #d9dee2;
-    --console-deep: #c5ccd2;
-    --ink: #18242f;
-    --ink-soft: #4b5a67;
-    --buff: #f2e6a7;
-    --blue: #cfe0ee;
-    --red: #c4122f;
-    --green: #1f7a4d;
-    --amber: #a86a00;
-    --rule: rgba(24, 36, 47, 0.28);
+    --night: #10162a;
+    --panel: #18213d;
+    --panel-edge: #2c3a66;
+    --text: #e9eefc;
+    --dim: #8c9bc9;
+    --orange: #f38020;
+    --amber: #faae40;
+    --red: #ff4d4d;
+    --green: #5ee07a;
+    --cyan: #6fd6ff;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--console);
-    color: var(--ink);
-    font: 15px/1.45 "Barlow", system-ui, sans-serif;
-  }
+  html, body { margin: 0; background: var(--night); color: var(--text); }
+  body { font: 20px/1.15 "VT323", ui-monospace, monospace; }
   header {
-    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 24px;
-    padding: 18px 24px 14px;
-    border-bottom: 2px solid var(--ink);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
+    padding: 14px 20px; border-bottom: 4px solid var(--panel-edge);
   }
-  h1 {
-    margin: 0;
-    font: 700 26px/1 "Barlow Condensed", sans-serif;
-    letter-spacing: 0.01em;
-  }
-  .baseline { color: var(--ink-soft); }
-  .baseline b { color: var(--ink); font-weight: 600; }
-  .live { margin-left: auto; font-size: 13px; color: var(--ink-soft); }
-  .live::before {
-    content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px;
-    border-radius: 50%; background: var(--green); vertical-align: 1px;
-  }
-  .live.stale::before { background: var(--red); }
+  h1 { margin: 0; font: 16px/1.4 "Press Start 2P", monospace; color: var(--amber); }
+  .baseline { color: var(--dim); }
+  .baseline b { color: var(--text); font-weight: normal; }
+  .live { margin-left: auto; color: var(--green); }
+  .live.stale { color: var(--red); }
 
   main {
-    display: grid;
-    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-    gap: 24px;
-    padding: 20px 24px 40px;
+    display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 20px;
+    padding: 20px; max-width: 1600px; margin: 0 auto;
   }
-  h2 {
-    margin: 0 0 10px;
-    font: 600 18px/1.2 "Barlow Condensed", sans-serif;
+  .scope {
+    position: relative; background: #2b5a22;
+    border: 4px solid var(--panel-edge); box-shadow: 0 0 0 4px var(--night), 0 0 0 8px var(--panel-edge);
   }
+  canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges; }
 
-  /* The strip bay: the one bold element. */
-  .bay {
-    background: var(--console-deep);
-    padding: 10px;
-    border-radius: 3px;
-    box-shadow: inset 0 2px 0 rgba(0, 0, 0, 0.08);
-  }
-  .strip {
-    display: grid;
-    grid-template-columns: 10px 150px minmax(0, 1fr) 92px 92px 80px;
-    min-height: 74px;
-    margin-bottom: 8px;
-    background: var(--buff);
-    border: 1px solid var(--rule);
-    border-radius: 2px;
-  }
-  .strip:last-child { margin-bottom: 0; }
-  .strip.landed { background: var(--blue); }
-  .strip.abandoned { opacity: 0.5; }
-  .strip > div { padding: 8px 10px; border-left: 1px solid var(--rule); }
-  .strip > .marker { padding: 0; border-left: 0; }
-  .strip.conflict > .marker { background: var(--red); }
-  .strip.overlap > .marker { background: var(--amber); }
-  .callsign { font: 700 24px/1 "Barlow Condensed", sans-serif; }
-  .forkname { margin-top: 4px; font-size: 12px; color: var(--ink-soft); word-break: break-all; }
-  .route { font-size: 13px; }
-  .route .file { display: block; }
-  .route .file .chg { color: var(--ink-soft); }
-  .route .sym { display: block; margin-left: 12px; color: var(--ink-soft); }
-  .route .sym.sig { color: var(--red); }
-  .cell-label { font-size: 11px; color: var(--ink-soft); }
-  .cell-value { font: 600 17px/1.2 "Barlow Condensed", sans-serif; }
-  .ok { color: var(--green); }
-  .bad { color: var(--red); }
-  .warn { color: var(--amber); }
+  aside { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  section { background: var(--panel); border: 4px solid var(--panel-edge); padding: 12px 14px; }
+  h2 { margin: 0 0 10px; font: 10px/1.6 "Press Start 2P", monospace; color: var(--cyan); }
 
-  .empty {
-    padding: 28px 16px; text-align: center; color: var(--ink-soft);
-    border: 1px dashed var(--rule); border-radius: 2px;
-  }
+  .board { width: 100%; border-collapse: collapse; }
+  .board th { text-align: left; color: var(--dim); font-weight: normal; padding: 0 6px 4px 0; }
+  .board td { padding: 3px 6px 3px 0; vertical-align: top; }
+  .board .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; }
+  .s-final { color: var(--green); }
+  .s-approach { color: var(--text); }
+  .s-holding { color: var(--amber); }
+  .s-conflict { color: var(--red); }
+  .s-landed { color: var(--dim); }
 
-  section + section { margin-top: 24px; }
-  .conflicts .item {
-    padding: 10px 12px; margin-bottom: 8px;
-    background: #fff; border-left: 4px solid var(--amber);
-  }
-  .conflicts .item.semantic, .conflicts .item.rebase { border-left-color: var(--red); }
-  .conflicts .item.landed { border-left-color: var(--green); }
-  .conflicts .who { font: 600 15px/1.2 "Barlow Condensed", sans-serif; }
-  .conflicts .what { font-size: 14px; }
+  .radio { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+  .radio li { padding: 6px 0; border-bottom: 2px dashed var(--panel-edge); }
+  .radio li:last-child { border-bottom: 0; }
+  .radio .who { color: var(--amber); }
+  .radio .k-semantic_conflict .who, .radio .k-merge_conflict .who, .radio .k-rebase_required .who { color: var(--red); }
+  .radio .k-landed .who { color: var(--green); }
+  .radio time { color: var(--dim); margin-right: 6px; }
+  .empty { color: var(--dim); }
 
-  .log { list-style: none; margin: 0; padding: 0; font-size: 13px; }
-  .log li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--rule); }
-  .log time { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
-  .log .kind { font-weight: 600; }
+  form.key { max-width: 460px; margin: 12vh auto; padding: 24px; background: var(--panel); border: 4px solid var(--panel-edge); }
+  form.key label { display: block; margin-bottom: 10px; font: 10px/1.6 "Press Start 2P", monospace; color: var(--amber); }
+  form.key input { width: 100%; padding: 8px 10px; font: inherit; color: var(--text); background: var(--night); border: 2px solid var(--panel-edge); }
+  form.key button { margin-top: 12px; padding: 10px 14px; font: 10px "Press Start 2P", monospace; color: var(--night); background: var(--amber); border: 0; cursor: pointer; }
+  :focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
 
-  form.key {
-    max-width: 420px; margin: 12vh auto; padding: 24px;
-    background: var(--buff); border: 1px solid var(--rule);
-  }
-  form.key label { display: block; font-weight: 600; margin-bottom: 8px; }
-  form.key input { width: 100%; padding: 8px 10px; font: inherit; border: 1px solid var(--ink); background: #fff; }
-  form.key button {
-    margin-top: 12px; padding: 8px 16px; font: 600 15px "Barlow", sans-serif;
-    color: #fff; background: var(--ink); border: 0; cursor: pointer;
-  }
-  :focus-visible { outline: 3px solid var(--red); outline-offset: 2px; }
-
-  @media (max-width: 900px) {
-    main { grid-template-columns: 1fr; padding: 16px; }
-    header { padding: 14px 16px; }
-    .strip { grid-template-columns: 8px minmax(0, 1fr) 76px 76px; }
-    .strip > .route { grid-column: 2 / -1; grid-row: 2; border-left: 0; border-top: 1px solid var(--rule); }
-    .strip > .diff { display: none; }
+  @media (max-width: 1000px) {
+    main { grid-template-columns: 1fr; padding: 12px; }
+    header { padding: 12px 16px; }
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>agentmesh</h1>
+  <h1>AIR TRAFFIC CONTROL</h1>
   <span class="baseline" id="baseline">No repo selected</span>
-  <span class="live" id="live" hidden>Live</span>
+  <span class="live" id="live" hidden>● LIVE</span>
 </header>
 <div id="app"></div>
 <script>
 (() => {
+  // ── config & helpers ───────────────────────────────────────────────────
+  const W = 384, H = 216;                       // logical pixel resolution
+  const RUNWAY = { x: 150, y: 150, w: 214, h: 18 };
+  const THRESHOLD = { x: RUNWAY.x + 6, y: RUNWAY.y + RUNWAY.h / 2 };
+  const HOLD = { x: 86, y: 58, rx: 44, ry: 24 }; // holding pattern oval
+  const APRON = { x: 214, y: 112 };              // where landed planes park
+  const PLANE_COLORS = ["#ffd23f", "#6fd6ff", "#ff7ad9", "#9dff6a", "#ffffff", "#c79bff", "#ff9f43"];
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
   const app = document.getElementById("app");
   const live = document.getElementById("live");
   const baselineEl = document.getElementById("baseline");
   const repo = decodeURIComponent((location.pathname.match(/^\/r\/([^/]+)/) || [])[1] || new URLSearchParams(location.search).get("repo") || "");
   let key = "";
   try { key = localStorage.getItem("agentmesh-key") || ""; } catch (_) {}
-
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  const short = (sha) => (sha ? sha.slice(0, 7) : "none");
-  const agentOf = (fork) => fork.split("--").slice(1).join("--") || fork;
-  const time = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false });
+  const callsign = (fork) => (fork || "").split("--").slice(1).join("--").toUpperCase() || fork;
+  const hhmmss = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false });
 
+  // ── key / repo prompts ─────────────────────────────────────────────────
   function askForKey(message) {
     app.innerHTML = `<form class="key"><label for="k">${esc(message)}</label>
-      <input id="k" type="password" autocomplete="off" placeholder="am_…"><button type="submit">Open dashboard</button></form>`;
+      <input id="k" type="password" autocomplete="off" placeholder="am_…"><button type="submit">CONTACT TOWER</button></form>`;
     app.querySelector("form").addEventListener("submit", (e) => {
       e.preventDefault();
       key = app.querySelector("input").value.trim();
       try { localStorage.setItem("agentmesh-key", key); } catch (_) {}
-      poll();
+      boot();
     });
     app.querySelector("input").focus();
   }
-
   function askForRepo() {
-    app.innerHTML = `<form class="key"><label for="r">Baseline repo name</label>
-      <input id="r" placeholder="shop"><button type="submit">Watch repo</button></form>`;
+    app.innerHTML = `<form class="key"><label for="r">BASELINE REPO</label>
+      <input id="r" placeholder="shop-…"><button type="submit">WATCH AIRSPACE</button></form>`;
     app.querySelector("form").addEventListener("submit", (e) => {
       e.preventDefault();
       location.href = "/r/" + encodeURIComponent(app.querySelector("input").value.trim());
     });
   }
 
-  function stripClass(fork, state) {
-    const mine = (state.signals || []).filter((s) => s.fork === fork.name && !s.resolved_at);
-    if (mine.some((s) => s.kind === "semantic_conflict" || s.kind === "rebase_required")) return "conflict";
-    if (state.overlaps.some((o) => o.forks.includes(fork.name))) return "overlap";
-    return "";
+  // ── scene state ────────────────────────────────────────────────────────
+  let state = null;
+  const planes = new Map();     // fork → { x, y, heading, color, mode, orbit, landedAt }
+  let colorIndex = 0;
+  const clouds = Array.from({ length: 6 }, (_, i) => ({ x: (i * 83) % W, y: 14 + ((i * 47) % 120), s: 1 + (i % 3), v: 0.06 + (i % 3) * 0.03 }));
+
+  function planeMode(fork) {
+    if (fork.status === "landed") return "landed";
+    const open = (state.signals || []).filter((s) => s.fork === fork.name && !s.resolved_at);
+    if (open.some((s) => s.kind === "rebase_required" || s.kind === "land_blocked")) return "holding";
+    return "approach";
   }
 
-  function checkCell(f) {
-    const map = { green: ["Green", "ok"], red: ["Red", "bad"], pending: ["Checking", "warn"], unknown: ["No push yet", ""] };
-    const [label, cls] = map[f.check_status] || [f.check_status, ""];
-    return `<div class="cell-label">Typecheck</div><div class="cell-value ${cls}">${esc(label)}</div>`;
+  /** Target position for each plane: queue slots on final approach, an orbit when holding, the apron when landed. */
+  function targets() {
+    const out = new Map();
+    const approach = (state.approach || []).filter((n) => {
+      const f = state.forks.find((x) => x.name === n);
+      return f && planeMode(f) === "approach";
+    });
+    approach.forEach((name, i) => {
+      // Slot 0 sits just short of the threshold; later slots extend back along the glide path.
+      const d = 34 + i * 52;
+      out.set(name, { x: THRESHOLD.x - d, y: THRESHOLD.y - d * 0.42, heading: 0.4, mode: "approach", slot: i });
+    });
+    const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at).slice(-5);
+    landed.forEach((f, i) => out.set(f.name, { x: APRON.x + i * 34, y: APRON.y, heading: -Math.PI / 2, mode: "landed" }));
+    for (const f of state.forks) if (f.status === "active" && planeMode(f) === "holding") out.set(f.name, { mode: "holding" });
+    return out;
   }
 
-  function render(state) {
-    baselineEl.innerHTML = `Baseline <b>${esc(state.baseline)}</b> at <b>${short(state.baselineHead)}</b>`;
+  function syncPlanes() {
+    for (const f of state.forks) {
+      if (f.status === "abandoned") { planes.delete(f.name); continue; }
+      if (!planes.has(f.name)) {
+        planes.set(f.name, { x: -20, y: 20 + (colorIndex * 37) % 120, heading: 0.3, color: PLANE_COLORS[colorIndex++ % PLANE_COLORS.length], orbit: Math.random() * Math.PI * 2, rollout: 0 });
+      }
+    }
+  }
+
+  // ── drawing ────────────────────────────────────────────────────────────
+  let canvas, ctx;
+  function px(x, y, w, h, color) { ctx.fillStyle = color; ctx.fillRect(Math.round(x), Math.round(y), w, h); }
+
+  function drawGround(t) {
+    // Grass in two tones, checker-ish rows.
+    px(0, 0, W, H, "#2f6b27");
+    for (let y = 0; y < H; y += 8) for (let x = (y / 8) % 2 ? 0 : 8; x < W; x += 16) px(x, y, 8, 8, "#357530");
+    // Taxiway to apron.
+    px(APRON.x - 12, APRON.y - 10, 150, 20, "#4a4f5a");
+    px(APRON.x + 110, APRON.y + 8, 14, RUNWAY.y - APRON.y - 8, "#4a4f5a");
+    // Runway with threshold bars, centre line, numbers.
+    px(RUNWAY.x, RUNWAY.y, RUNWAY.w, RUNWAY.h, "#555b66");
+    px(RUNWAY.x, RUNWAY.y, RUNWAY.w, 1, "#6c7380"); px(RUNWAY.x, RUNWAY.y + RUNWAY.h - 1, RUNWAY.w, 1, "#3f444d");
+    for (let i = 0; i < 4; i++) px(RUNWAY.x + 3, RUNWAY.y + 2 + i * 4, 8, 2, "#f4f4f4");
+    for (let x = RUNWAY.x + 26; x < RUNWAY.x + RUNWAY.w - 10; x += 16) px(x, RUNWAY.y + RUNWAY.h / 2 - 1, 8, 2, "#f4f4f4");
+    ctx.fillStyle = "#f4f4f4"; ctx.font = "8px 'Press Start 2P'"; ctx.fillText("09", RUNWAY.x + 14, RUNWAY.y + 13);
+    // Approach lights blinking toward the threshold.
+    const k = Math.floor(t / 120) % 6;
+    for (let i = 0; i < 6; i++) px(RUNWAY.x - 8 - i * 8, THRESHOLD.y - 1, 3, 3, i === 5 - k ? "#ffffff" : "#c9a227");
+    // Tower.
+    px(130, 104, 10, 10, "#9aa3b5"); px(128, 100, 14, 5, "#6fd6ff"); px(127, 98, 16, 2, "#2c3a66");
+  }
+
+  function drawCloud(x, y, s, alpha) {
+    ctx.globalAlpha = alpha;
+    const c = "#ffffff", sh = "#d7e3f4";
+    px(x + 4 * s, y, 10 * s, 4 * s, c);
+    px(x, y + 3 * s, 20 * s, 5 * s, c);
+    px(x + 2 * s, y + 7 * s, 16 * s, 2 * s, sh);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawClouds(dt) {
+    for (const c of clouds) {
+      if (!reduceMotion) c.x -= c.v * dt / 16;
+      if (c.x < -24 * c.s) c.x = W + 4;
+      // Shadow on the ground first, offset down-right.
+      ctx.globalAlpha = 0.18; px(c.x + 10, c.y + 14, 20 * c.s, 6 * c.s, "#000000"); ctx.globalAlpha = 1;
+      drawCloud(c.x, c.y, c.s, 0.85);
+    }
+    // Fixed hero cloud, top right: reserved for the Cloudflare logo.
+    drawCloud(W - 76, 6, 3, 0.95);
+  }
+
+  /** 13×13 top-down plane sprite, rotated to `heading`. */
+  function drawPlane(p, label, flags) {
+    ctx.save();
+    ctx.translate(Math.round(p.x), Math.round(p.y));
+    ctx.rotate(p.heading);
+    ctx.scale(2, 2);
+    const body = p.color, dark = "#1b2236";
+    // Shadow.
+    if (p.mode !== "landed" && !flags.onGround) { ctx.globalAlpha = 0.25; ctx.fillStyle = "#000"; ctx.fillRect(-4, 6, 12, 3); ctx.globalAlpha = 1; }
+    ctx.fillStyle = body;
+    ctx.fillRect(-6, -1, 13, 3);          // fuselage
+    ctx.fillRect(-1, -6, 4, 13);          // wings
+    ctx.fillRect(-6, -3, 2, 7);           // tail
+    ctx.fillStyle = dark;
+    ctx.fillRect(5, 0, 2, 1);             // cockpit
+    ctx.restore();
+    // Conflict ring (blinks).
+    if (flags.conflict && Math.floor(performance.now() / 300) % 2 === 0) {
+      ctx.strokeStyle = "#ff4d4d"; ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(p.x) - 16.5, Math.round(p.y) - 16.5, 33, 33);
+    }
+    if (flags.green) px(p.x + 13, p.y - 16, 4, 4, "#5ee07a");
+    ctx.font = "8px 'Press Start 2P'";
+    const w = ctx.measureText(label).width;
+    px(p.x - w / 2 - 2, p.y + 17, w + 4, 10, "rgba(16,22,42,0.8)");
+    ctx.fillStyle = flags.conflict ? "#ff4d4d" : "#ffffff";
+    ctx.fillText(label, Math.round(p.x - w / 2), Math.round(p.y + 25));
+  }
+
+  function conflictPairs() {
+    const pairs = new Set();
+    for (const s of state.signals || []) {
+      if (s.resolved_at || (s.kind !== "semantic_conflict" && s.kind !== "merge_conflict") || !s.about_fork) continue;
+      pairs.add([s.fork, s.about_fork].sort().join("|"));
+    }
+    return [...pairs].map((p) => p.split("|"));
+  }
+
+  function step(dt, t) {
+    const tg = targets();
+    for (const [name, p] of planes) {
+      const target = tg.get(name);
+      if (!target) continue;
+      p.mode = target.mode;
+      if (target.mode === "holding") {
+        if (!reduceMotion) p.orbit += dt * 0.0012;
+        const tx = HOLD.x + Math.cos(p.orbit) * HOLD.rx, ty = HOLD.y + Math.sin(p.orbit) * HOLD.ry;
+        p.x += (tx - p.x) * Math.min(1, dt * 0.004); p.y += (ty - p.y) * Math.min(1, dt * 0.004);
+        p.heading = p.orbit + Math.PI / 2;
+      } else if (target.mode === "landed" && p.landedPhase !== "parked") {
+        // Touch down on the runway, roll out, then taxi to the apron.
+        if (!p.landedPhase) { p.landedPhase = "rollout"; p.x = THRESHOLD.x; p.y = THRESHOLD.y; p.heading = 0; }
+        if (p.landedPhase === "rollout") {
+          p.x += dt * 0.08; p.y += (THRESHOLD.y - p.y) * 0.2; p.heading = 0;
+          if (p.x > APRON.x + 116) { p.landedPhase = "taxi"; }
+        } else if (p.landedPhase === "taxi") {
+          p.heading = -Math.PI / 2;
+          p.y -= dt * 0.04; if (p.y <= APRON.y + 2) { p.landedPhase = "apron"; }
+        } else {
+          p.heading = Math.PI; p.x += (target.x - p.x) * Math.min(1, dt * 0.004); p.y += (target.y - p.y) * Math.min(1, dt * 0.004);
+          if (Math.abs(target.x - p.x) < 0.5) { p.landedPhase = "parked"; p.heading = -Math.PI / 2; }
+        }
+        if (reduceMotion) { p.landedPhase = "parked"; p.x = target.x; p.y = target.y; p.heading = -Math.PI / 2; }
+      } else if (target.mode === "landed") {
+        p.x = target.x; p.y = target.y;
+      } else {
+        const k = reduceMotion ? 1 : Math.min(1, dt * 0.003);
+        p.x += (target.x - p.x) * k; p.y += (target.y - p.y) * k;
+        p.heading += (target.heading - p.heading) * k;
+      }
+    }
+  }
+
+  let last = performance.now();
+  function frame(t) {
+    const dt = Math.min(64, t - last); last = t;
+    if (state) {
+      step(dt, t);
+      drawGround(t);
+      // Conflict link between planes: dashed red line.
+      ctx.fillStyle = "#ff4d4d";
+      for (const [a, b] of conflictPairs()) {
+        const pa = planes.get(a), pb = planes.get(b);
+        if (!pa || !pb) continue;
+        const n = Math.max(1, Math.floor(Math.hypot(pb.x - pa.x, pb.y - pa.y) / 4));
+        for (let i = 0; i < n; i += 2) ctx.fillRect(Math.round(pa.x + (pb.x - pa.x) * i / n), Math.round(pa.y + (pb.y - pa.y) * i / n), 2, 2);
+      }
+      const inConflict = new Set(conflictPairs().flat());
+      for (const f of state.forks) {
+        const p = planes.get(f.name);
+        if (!p) continue;
+        const green = f.check_status === "green" && f.check_sha === f.head_sha;
+        drawPlane(p, callsign(f.name), { conflict: inConflict.has(f.name), green: green && f.status === "active", onGround: f.status === "landed" });
+      }
+      drawClouds(dt);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ── side panel ─────────────────────────────────────────────────────────
+  function boardStatus(f) {
+    const mode = planeMode(f);
+    if (mode === "landed") return ["LANDED", "s-landed"];
+    if (mode === "holding") return ["HOLDING", "s-holding"];
+    const conflict = (state.signals || []).some((s) => s.fork === f.name && !s.resolved_at && (s.kind === "semantic_conflict" || s.kind === "merge_conflict"));
+    if (conflict) return ["CONFLICT", "s-conflict"];
+    const slot = (state.approach || []).indexOf(f.name);
+    return slot === 0 ? ["FINAL", "s-final"] : [`APPROACH ${slot + 1}`, "s-approach"];
+  }
+
+  /** Fork names → callsigns in tower messages ("shop-123--b changed …" → "B changed …"). */
+  function radioText(message) {
+    let out = message;
+    for (const f of state.forks) out = out.split(f.name).join(callsign(f.name));
+    return out;
+  }
+
+  function renderPanel() {
+    baselineEl.innerHTML = `Runway <b>${esc(state.baseline)}</b>, baseline at <b>${esc((state.baselineHead || "").slice(0, 7))}</b>`;
     const forks = state.forks.filter((f) => f.status !== "abandoned");
-    const strips = forks.length
-      ? forks.map((f) => {
-          const current = f.base_sha === state.baselineHead;
-          const route = f.files.length
-            ? f.files.map((file) => {
-                const syms = f.symbols.filter((s) => s.path === file.path).map((s) =>
-                  `<span class="sym ${s.change === "signature_changed" || s.change === "removed" ? "sig" : ""}">${esc(s.name)}: ${esc(s.change.replace("_", " "))}</span>`).join("");
-                return `<span class="file">${esc(file.path)} <span class="chg">${esc(file.change)}</span></span>${syms}`;
-              }).join("")
-            : `<span class="cell-label">No changes pushed yet</span>`;
-          const status = f.status === "landed"
-            ? `<div class="cell-label">Status</div><div class="cell-value ok">Landed</div>`
-            : `<div class="cell-label">Base</div><div class="cell-value ${current ? "ok" : "warn"}">${current ? "Current" : "Behind"}</div>`;
-          return `<article class="strip ${f.status} ${stripClass(f, state)}">
-            <div class="marker"></div>
-            <div><div class="callsign">${esc(agentOf(f.name))}</div><div class="forkname">${esc(f.name)} @ ${short(f.head_sha)}</div></div>
-            <div class="route">${route}</div>
-            <div>${status}</div>
-            <div>${checkCell(f)}</div>
-            <div class="diff"><div class="cell-label">Diff</div><div class="cell-value">${f.diff_lines} lines</div></div>
-          </article>`;
-        }).join("")
-      : `<div class="empty">No forks yet. Agents appear here when they fork ${esc(state.baseline)}.</div>`;
-
-    const signals = (state.signals || []).filter((s) => !s.resolved_at);
-    const kindClass = { semantic_conflict: "semantic", rebase_required: "rebase", landed: "landed" };
-    const conflictItems = [
-      ...signals.map((s) => `<div class="item ${kindClass[s.kind] || ""}"><div class="who">To ${esc(agentOf(s.fork))}: ${esc(s.kind.replace("_", " "))}</div><div class="what">${esc(s.message)}</div></div>`),
-      ...(signals.length ? [] : state.overlaps.map((o) => `<div class="item"><div class="who">${esc(agentOf(o.forks[0]))} and ${esc(agentOf(o.forks[1]))}</div><div class="what">${esc(o.detail)}</div></div>`)),
-    ].join("") || `<div class="empty">No overlaps between in-flight forks.</div>`;
-
-    const log = state.events.slice(0, 25).map((e) =>
-      `<li><time>${time(e.at)}</time><span><span class="kind">${esc(e.kind)}</span> ${e.fork ? esc(agentOf(e.fork)) : ""}</span></li>`).join("");
-
-    app.innerHTML = `<main>
-      <section><h2>Forks in flight</h2><div class="bay">${strips}</div></section>
-      <div>
-        <section class="conflicts"><h2>Signals and overlaps</h2>${conflictItems}</section>
-        <section><h2>Event log</h2><ul class="log">${log}</ul></section>
-      </div>
-    </main>`;
+    const rows = forks.map((f) => {
+      const [label, cls] = boardStatus(f);
+      const p = planes.get(f.name);
+      const check = f.check_status === "green" ? "GREEN" : f.check_status === "red" ? "RED" : f.check_status === "pending" ? "CHECKING" : "—";
+      return `<tr><td><span class="swatch" style="background:${p ? p.color : "#fff"}"></span>${esc(callsign(f.name))}</td>
+        <td class="${cls}">${label}</td><td>${check}</td><td>${f.diff_lines}</td></tr>`;
+    }).join("");
+    const radio = (state.signals || []).slice(0, 30).map((s) =>
+      `<li class="k-${esc(s.kind)}"><time>${hhmmss(s.created_at)}</time><span class="who">TOWER → ${esc(callsign(s.fork))}</span>
+       ${s.resolved_at ? "<s>" : ""}${esc(radioText(s.message))}${s.resolved_at ? "</s>" : ""}</li>`).join("");
+    document.getElementById("board").innerHTML = forks.length
+      ? `<table class="board"><thead><tr><th>FLIGHT</th><th>STATUS</th><th>CHECK</th><th>DIFF</th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<p class="empty">No aircraft yet. Agents appear when they fork ${esc(state.baseline)}.</p>`;
+    document.getElementById("radio").innerHTML = radio || `<li class="empty">Frequency quiet.</li>`;
   }
 
+  // ── polling ────────────────────────────────────────────────────────────
   let timer = 0;
   async function poll() {
     clearTimeout(timer);
-    if (!repo) return askForRepo();
-    if (!key) return askForKey("API key for this agentmesh deployment");
     try {
       const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/state`, { headers: { authorization: `Bearer ${key}` } });
-      if (res.status === 401) { key = ""; return askForKey("That key was rejected. Paste the AGENTMESH_API_KEY value."); }
-      const state = await res.json();
-      if (!res.ok) throw new Error(state.error || res.statusText);
-      render(state);
-      live.hidden = false;
-      live.classList.remove("stale");
-      live.textContent = "Live";
-    } catch (err) {
-      live.hidden = false;
-      live.classList.add("stale");
-      live.textContent = "Reconnecting";
+      if (res.status === 401) { key = ""; return askForKey("THAT KEY WAS REJECTED. PASTE AGENTMESH_API_KEY."); }
+      const next = await res.json();
+      if (!res.ok) throw new Error(next.error || res.statusText);
+      state = next;
+      syncPlanes();
+      renderPanel();
+      live.hidden = false; live.classList.remove("stale"); live.textContent = "● LIVE";
+    } catch (_) {
+      live.hidden = false; live.classList.add("stale"); live.textContent = "● RECONNECTING";
     }
     timer = setTimeout(poll, 1000);
   }
-  poll();
+
+  async function boot() {
+    if (!repo) return askForRepo();
+    if (!key) return askForKey("TOWER ACCESS KEY");
+    app.innerHTML = `<main>
+      <div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Top-down airfield: agents are planes approaching the runway in landing order"></canvas></div>
+      <aside>
+        <section><h2>FLIGHT BOARD</h2><div id="board"></div></section>
+        <section><h2>TOWER RADIO</h2><ul class="radio" id="radio"></ul></section>
+      </aside>
+    </main>`;
+    canvas = document.getElementById("scene");
+    ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    try { await document.fonts.load("8px 'Press Start 2P'"); } catch (_) {}
+    poll();
+    requestAnimationFrame(frame);
+  }
+  boot();
 })();
 </script>
 </body>
