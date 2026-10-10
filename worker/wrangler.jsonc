@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agentmesh",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "agentmesh" }],
+  "durable_objects": {
+    "bindings": [{ "name": "COORDINATOR", "class_name": "Coordinator" }]
+  },
+  "exports": {
+    "Coordinator": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "queues": {
+    "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3 }]
+  },
+  "vars": { "ARTIFACTS_NAMESPACE": "agentmesh" }
+}

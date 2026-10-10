@@ -1,0 +1,9 @@
+{
+  "name": "agentmesh",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r --filter=!shop-core typecheck"
+  },
+  "packageManager": "pnpm@10.13.1"
+}
