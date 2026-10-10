@@ -13,6 +13,8 @@ the raw spike findings (milestone 1).
 | [0004](docs/adr/0004-real-artifacts-only.md) | Real Artifacts only, no simulator | Accepted |
 | [0005](docs/adr/0005-shared-api-key.md) | Shared API key on all routes | Accepted |
 | [0006](docs/adr/0006-reconcile-fork-heads.md) | Push events + head-reconcile fallback | Accepted |
+| [0007](docs/adr/0007-lightweight-symbol-extraction.md) | Scan-based symbol extraction; tsc is the source of truth | Accepted |
+| [0008](docs/adr/0008-baseline-per-run-and-dashboard-polling.md) | Fresh baseline per run; dashboard polls | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
@@ -34,3 +36,5 @@ API references: `docs/cf-api-notes.md` (Workers/DO/Workflows/Containers/MCP/Queu
 - **Artifacts has no local simulator** (`"DO-NOT-USE-this-resource-will-never-have-a-local-simulator"` in wrangler).
 - **Sandbox SDK 1.0** removed the `Sandbox` class. We'll use a DO with `ctx.container` and our own Dockerfile.
 - **MCP:** `McpAgent` is deprecated. We'll use the stateless `createMcpHandler` (agents 0.28 + `@modelcontextprotocol/server@2.0.0`).
+- **No namespace-wide push source:** `POST event_subscriptions` with `artifacts.repo` and no `repo_name` → `Validation error: Required at "source.repo_name"`.
+  `--source artifacts` + `pushed` → `Unrecognized event types`. So it's one subscription per fork, created by the Worker.

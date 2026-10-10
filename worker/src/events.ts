@@ -23,3 +23,7 @@ export interface PushedEvent {
 
 /** Any Artifacts event; we only act on `pushed` but log everything we receive. */
 export type ArtifactsEvent = PushedEvent | { type: string; source: { namespace: string; repoName: string }; payload: unknown };
+
+export function isPushed(event: ArtifactsEvent | undefined): event is PushedEvent {
+  return event?.type === "cf.artifacts.repo.pushed" && typeof (event.payload as { after?: unknown } | null)?.after === "string";
+}

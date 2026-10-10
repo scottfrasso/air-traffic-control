@@ -15,5 +15,10 @@
   "queues": {
     "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3 }]
   },
-  "vars": { "ARTIFACTS_NAMESPACE": "agentmesh" }
+  "workflows": [{ "name": "agentmesh-push-pipeline", "binding": "PUSH_PIPELINE", "class_name": "PushPipeline" }],
+  "vars": {
+    "ARTIFACTS_NAMESPACE": "agentmesh",
+    "CF_ACCOUNT_ID": "cd5005b633a7bdac0f47d9f93c3ad45c",
+    "PUSH_QUEUE_ID": "9d2beda0c8d84a39a41c90fa5d59fd9f"
+  }
 }

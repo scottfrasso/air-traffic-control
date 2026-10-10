@@ -1,0 +1,13 @@
+{
+  "name": "agentmesh-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,63 @@
+/** Coordinator DO SQLite schema. Idempotent; runs in the constructor. */
+export const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS forks(
+  name TEXT PRIMARY KEY,
+  agent TEXT NOT NULL,
+  status TEXT NOT NULL,              -- active | landed | abandoned
+  created_at INTEGER NOT NULL,
+  base_sha TEXT NOT NULL,            -- baseline commit the fork's work sits on
+  head_sha TEXT NOT NULL,            -- latest pushed sha
+  processed_sha TEXT NOT NULL,       -- latest sha whose index has been applied
+  diff_lines INTEGER NOT NULL DEFAULT 0,
+  subscription_id TEXT,
+  remote TEXT NOT NULL,
+  land_requested_at INTEGER,
+  landed_at INTEGER,
+  check_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown | pending | green | red
+  check_sha TEXT,
+  check_detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS touched(
+  fork TEXT NOT NULL, path TEXT NOT NULL, change TEXT NOT NULL, lines INTEGER NOT NULL,
+  PRIMARY KEY(fork, path));
+
+CREATE TABLE IF NOT EXISTS symbol_changes(
+  fork TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+  change TEXT NOT NULL, before_sig TEXT, after_sig TEXT,
+  PRIMARY KEY(fork, path, name));
+
+CREATE TABLE IF NOT EXISTS uses(
+  fork TEXT NOT NULL, path TEXT NOT NULL, symbol TEXT NOT NULL, from_path TEXT NOT NULL,
+  PRIMARY KEY(fork, path, symbol, from_path));
+
+CREATE TABLE IF NOT EXISTS intents(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fork TEXT NOT NULL, description TEXT NOT NULL,
+  files TEXT NOT NULL, symbols TEXT NOT NULL,   -- JSON arrays
+  created_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS signals(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fork TEXT NOT NULL,                -- recipient
+  kind TEXT NOT NULL,                -- overlap | signature_change | semantic_conflict | rebase_required | landed | info
+  about_fork TEXT,
+  symbol TEXT,
+  message TEXT NOT NULL,
+  data TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER);
+
+CREATE TABLE IF NOT EXISTS pair_checks(
+  fork_a TEXT NOT NULL, fork_b TEXT NOT NULL, sha_a TEXT NOT NULL, sha_b TEXT NOT NULL,
+  status TEXT NOT NULL,              -- clean | textual_conflict | semantic_conflict | error
+  detail TEXT NOT NULL, checked_at INTEGER NOT NULL,
+  PRIMARY KEY(fork_a, fork_b));
+
+CREATE TABLE IF NOT EXISTS event_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL, kind TEXT NOT NULL, fork TEXT, detail TEXT NOT NULL);
+`;

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentmesh strip bay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --console: #d9dee2;
+    --console-deep: #c5ccd2;
+    --ink: #18242f;
+    --ink-soft: #4b5a67;
+    --buff: #f2e6a7;
+    --blue: #cfe0ee;
+    --red: #c4122f;
+    --green: #1f7a4d;
+    --amber: #a86a00;
+    --rule: rgba(24, 36, 47, 0.28);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--console);
+    color: var(--ink);
+    font: 15px/1.45 "Barlow", system-ui, sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 24px;
+    padding: 18px 24px 14px;
+    border-bottom: 2px solid var(--ink);
+  }
+  h1 {
+    margin: 0;
+    font: 700 26px/1 "Barlow Condensed", sans-serif;
+    letter-spacing: 0.01em;
+  }
+  .baseline { color: var(--ink-soft); }
+  .baseline b { color: var(--ink); font-weight: 600; }
+  .live { margin-left: auto; font-size: 13px; color: var(--ink-soft); }
+  .live::before {
+    content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+    border-radius: 50%; background: var(--green); vertical-align: 1px;
+  }
+  .live.stale::before { background: var(--red); }
+
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: 24px;
+    padding: 20px 24px 40px;
+  }
+  h2 {
+    margin: 0 0 10px;
+    font: 600 18px/1.2 "Barlow Condensed", sans-serif;
+  }
+
+  /* The strip bay: the one bold element. */
+  .bay {
+    background: var(--console-deep);
+    padding: 10px;
+    border-radius: 3px;
+    box-shadow: inset 0 2px 0 rgba(0, 0, 0, 0.08);
+  }
+  .strip {
+    display: grid;
+    grid-template-columns: 10px 150px minmax(0, 1fr) 92px 92px 80px;
+    min-height: 74px;
+    margin-bottom: 8px;
+    background: var(--buff);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+  }
+  .strip:last-child { margin-bottom: 0; }
+  .strip.landed { background: var(--blue); }
+  .strip.abandoned { opacity: 0.5; }
+  .strip > div { padding: 8px 10px; border-left: 1px solid var(--rule); }
+  .strip > .marker { padding: 0; border-left: 0; }
+  .strip.conflict > .marker { background: var(--red); }
+  .strip.overlap > .marker { background: var(--amber); }
+  .callsign { font: 700 24px/1 "Barlow Condensed", sans-serif; }
+  .forkname { margin-top: 4px; font-size: 12px; color: var(--ink-soft); word-break: break-all; }
+  .route { font-size: 13px; }
+  .route .file { display: block; }
+  .route .file .chg { color: var(--ink-soft); }
+  .route .sym { display: block; margin-left: 12px; color: var(--ink-soft); }
+  .route .sym.sig { color: var(--red); }
+  .cell-label { font-size: 11px; color: var(--ink-soft); }
+  .cell-value { font: 600 17px/1.2 "Barlow Condensed", sans-serif; }
+  .ok { color: var(--green); }
+  .bad { color: var(--red); }
+  .warn { color: var(--amber); }
+
+  .empty {
+    padding: 28px 16px; text-align: center; color: var(--ink-soft);
+    border: 1px dashed var(--rule); border-radius: 2px;
+  }
+
+  section + section { margin-top: 24px; }
+  .conflicts .item {
+    padding: 10px 12px; margin-bottom: 8px;
+    background: #fff; border-left: 4px solid var(--amber);
+  }
+  .conflicts .item.semantic, .conflicts .item.rebase { border-left-color: var(--red); }
+  .conflicts .item.landed { border-left-color: var(--green); }
+  .conflicts .who { font: 600 15px/1.2 "Barlow Condensed", sans-serif; }
+  .conflicts .what { font-size: 14px; }
+
+  .log { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .log li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--rule); }
+  .log time { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .log .kind { font-weight: 600; }
+
+  form.key {
+    max-width: 420px; margin: 12vh auto; padding: 24px;
+    background: var(--buff); border: 1px solid var(--rule);
+  }
+  form.key label { display: block; font-weight: 600; margin-bottom: 8px; }
+  form.key input { width: 100%; padding: 8px 10px; font: inherit; border: 1px solid var(--ink); background: #fff; }
+  form.key button {
+    margin-top: 12px; padding: 8px 16px; font: 600 15px "Barlow", sans-serif;
+    color: #fff; background: var(--ink); border: 0; cursor: pointer;
+  }
+  :focus-visible { outline: 3px solid var(--red); outline-offset: 2px; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; padding: 16px; }
+    header { padding: 14px 16px; }
+    .strip { grid-template-columns: 8px minmax(0, 1fr) 76px 76px; }
+    .strip > .route { grid-column: 2 / -1; grid-row: 2; border-left: 0; border-top: 1px solid var(--rule); }
+    .strip > .diff { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>agentmesh</h1>
+  <span class="baseline" id="baseline">No repo selected</span>
+  <span class="live" id="live" hidden>Live</span>
+</header>
+<div id="app"></div>
+<script>
+(() => {
+  const app = document.getElementById("app");
+  const live = document.getElementById("live");
+  const baselineEl = document.getElementById("baseline");
+  const repo = decodeURIComponent((location.pathname.match(/^\/r\/([^/]+)/) || [])[1] || new URLSearchParams(location.search).get("repo") || "");
+  let key = "";
+  try { key = localStorage.getItem("agentmesh-key") || ""; } catch (_) {}
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const short = (sha) => (sha ? sha.slice(0, 7) : "none");
+  const agentOf = (fork) => fork.split("--").slice(1).join("--") || fork;
+  const time = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false });
+
+  function askForKey(message) {
+    app.innerHTML = `<form class="key"><label for="k">${esc(message)}</label>
+      <input id="k" type="password" autocomplete="off" placeholder="am_…"><button type="submit">Open dashboard</button></form>`;
+    app.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      key = app.querySelector("input").value.trim();
+      try { localStorage.setItem("agentmesh-key", key); } catch (_) {}
+      poll();
+    });
+    app.querySelector("input").focus();
+  }
+
+  function askForRepo() {
+    app.innerHTML = `<form class="key"><label for="r">Baseline repo name</label>
+      <input id="r" placeholder="shop"><button type="submit">Watch repo</button></form>`;
+    app.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      location.href = "/r/" + encodeURIComponent(app.querySelector("input").value.trim());
+    });
+  }
+
+  function stripClass(fork, state) {
+    const mine = (state.signals || []).filter((s) => s.fork === fork.name && !s.resolved_at);
+    if (mine.some((s) => s.kind === "semantic_conflict" || s.kind === "rebase_required")) return "conflict";
+    if (state.overlaps.some((o) => o.forks.includes(fork.name))) return "overlap";
+    return "";
+  }
+
+  function checkCell(f) {
+    const map = { green: ["Green", "ok"], red: ["Red", "bad"], pending: ["Checking", "warn"], unknown: ["No push yet", ""] };
+    const [label, cls] = map[f.check_status] || [f.check_status, ""];
+    return `<div class="cell-label">Typecheck</div><div class="cell-value ${cls}">${esc(label)}</div>`;
+  }
+
+  function render(state) {
+    baselineEl.innerHTML = `Baseline <b>${esc(state.baseline)}</b> at <b>${short(state.baselineHead)}</b>`;
+    const forks = state.forks.filter((f) => f.status !== "abandoned");
+    const strips = forks.length
+      ? forks.map((f) => {
+          const current = f.base_sha === state.baselineHead;
+          const route = f.files.length
+            ? f.files.map((file) => {
+                const syms = f.symbols.filter((s) => s.path === file.path).map((s) =>
+                  `<span class="sym ${s.change === "signature_changed" || s.change === "removed" ? "sig" : ""}">${esc(s.name)}: ${esc(s.change.replace("_", " "))}</span>`).join("");
+                return `<span class="file">${esc(file.path)} <span class="chg">${esc(file.change)}</span></span>${syms}`;
+              }).join("")
+            : `<span class="cell-label">No changes pushed yet</span>`;
+          const status = f.status === "landed"
+            ? `<div class="cell-label">Status</div><div class="cell-value ok">Landed</div>`
+            : `<div class="cell-label">Base</div><div class="cell-value ${current ? "ok" : "warn"}">${current ? "Current" : "Behind"}</div>`;
+          return `<article class="strip ${f.status} ${stripClass(f, state)}">
+            <div class="marker"></div>
+            <div><div class="callsign">${esc(agentOf(f.name))}</div><div class="forkname">${esc(f.name)} @ ${short(f.head_sha)}</div></div>
+            <div class="route">${route}</div>
+            <div>${status}</div>
+            <div>${checkCell(f)}</div>
+            <div class="diff"><div class="cell-label">Diff</div><div class="cell-value">${f.diff_lines} lines</div></div>
+          </article>`;
+        }).join("")
+      : `<div class="empty">No forks yet. Agents appear here when they fork ${esc(state.baseline)}.</div>`;
+
+    const signals = (state.signals || []).filter((s) => !s.resolved_at);
+    const kindClass = { semantic_conflict: "semantic", rebase_required: "rebase", landed: "landed" };
+    const conflictItems = [
+      ...signals.map((s) => `<div class="item ${kindClass[s.kind] || ""}"><div class="who">To ${esc(agentOf(s.fork))}: ${esc(s.kind.replace("_", " "))}</div><div class="what">${esc(s.message)}</div></div>`),
+      ...(signals.length ? [] : state.overlaps.map((o) => `<div class="item"><div class="who">${esc(agentOf(o.forks[0]))} and ${esc(agentOf(o.forks[1]))}</div><div class="what">${esc(o.detail)}</div></div>`)),
+    ].join("") || `<div class="empty">No overlaps between in-flight forks.</div>`;
+
+    const log = state.events.slice(0, 25).map((e) =>
+      `<li><time>${time(e.at)}</time><span><span class="kind">${esc(e.kind)}</span> ${e.fork ? esc(agentOf(e.fork)) : ""}</span></li>`).join("");
+
+    app.innerHTML = `<main>
+      <section><h2>Forks in flight</h2><div class="bay">${strips}</div></section>
+      <div>
+        <section class="conflicts"><h2>Signals and overlaps</h2>${conflictItems}</section>
+        <section><h2>Event log</h2><ul class="log">${log}</ul></section>
+      </div>
+    </main>`;
+  }
+
+  let timer = 0;
+  async function poll() {
+    clearTimeout(timer);
+    if (!repo) return askForRepo();
+    if (!key) return askForKey("API key for this agentmesh deployment");
+    try {
+      const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/state`, { headers: { authorization: `Bearer ${key}` } });
+      if (res.status === 401) { key = ""; return askForKey("That key was rejected. Paste the AGENTMESH_API_KEY value."); }
+      const state = await res.json();
+      if (!res.ok) throw new Error(state.error || res.statusText);
+      render(state);
+      live.hidden = false;
+      live.classList.remove("stale");
+      live.textContent = "Live";
+    } catch (err) {
+      live.hidden = false;
+      live.classList.add("stale");
+      live.textContent = "Reconnecting";
+    }
+    timer = setTimeout(poll, 1000);
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

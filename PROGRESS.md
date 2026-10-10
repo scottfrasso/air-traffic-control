@@ -14,9 +14,17 @@ Note that the API token expires 2026-10-15 21:59 UTC.
   - Found that new subscriptions take 30–60 s to activate → ADR-0006 reconcile fallback.
   - Worker locked behind a shared API key (ADR-0005), verified 401/200.
 
+- **Milestone 2: In-flight index** ✅ (`demo/src/checks/m2-index.ts` passes against deployed resources)
+  - `POST /api/repos/:baseline/forks` forks through the Artifacts binding, mints a fork write token and a baseline read token,
+    and creates the fork's push subscription.
+  - Push (event or reconcile) → `PushPipeline` Workflow → tree diff vs merge base through the binding → Coordinator stores
+    touched files, exported-symbol deltas and imports → file and symbol overlaps.
+  - Dashboard at `/r/<baseline>` (strip-bay design, polls every second).
+  - Indexing completes about 10 s after push.
+
 ## Next
 
-- Milestone 2: in-flight index (fork registry, diff vs base, exported symbols, dashboard).
+- Milestone 3: `declare_intent` + `get_signals` (+ MCP server).
 
 ## Stubbed / cut / known gaps
 
