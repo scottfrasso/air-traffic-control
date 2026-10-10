@@ -20,6 +20,7 @@ export type ForkRow = {
   landed_at: number | null;
   check_status: "unknown" | "pending" | "green" | "red";
   check_sha: string | null;
+  check_base: string | null;
   check_detail: string | null;
 };
 

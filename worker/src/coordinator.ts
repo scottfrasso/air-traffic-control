@@ -240,13 +240,21 @@ export class Coordinator extends DurableObject<Env> {
     if (fork.head_sha === sha) return;
     this.sql.exec("UPDATE forks SET head_sha = ?, check_status = 'pending' WHERE name = ?", sha, repo);
     this.log("push.received", { sha, source, commits: isPushed(event) ? event.payload.commits.map((c) => c.message) : undefined }, repo);
+    // A new push is a fresh attempt: drop any go-around/blocked notes; the checks on this push decide.
+    this.resolveSignals({ fork: repo, kind: "rebase_required" });
+    this.resolveSignals({ fork: repo, kind: "land_blocked" });
     await this.startPipeline(repo, sha);
   }
 
-  private async startPipeline(fork: string, sha: string) {
-    const id = `${fork}-${sha.slice(0, 12)}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
+  /**
+   * kind "push": full pipeline (index, overlap signals, PR-on-main check, pair merges).
+   * kind "recheck": main moved; only re-verify that the PR still merges onto the new main and typechecks.
+   */
+  private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" = "push") {
+    const main = this.meta("baseline_head") ?? "";
+    const id = `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
     try {
-      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha } });
+      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind } });
       this.log("pipeline.started", { sha, instance: id }, fork);
     } catch (err) {
       // Same push seen twice (event + reconcile, or queue redelivery) → instance already exists.
@@ -401,24 +409,37 @@ export class Coordinator extends DurableObject<Env> {
     return { current: true, others: this.activeForks().filter((f) => f.name !== fork && f.head_sha !== f.base_sha).map((f) => f.name) };
   }
 
-  private setCheck(fork: string, sha: string, ok: boolean, detail: string) {
+  private setCheck(fork: string, sha: string, ok: boolean, detail: string, base: string | null) {
     const row = this.fork(fork);
     if (!row || row.head_sha !== sha) return; // stale result; a newer push is being checked
-    this.sql.exec("UPDATE forks SET check_status = ?, check_sha = ?, check_detail = ? WHERE name = ?", ok ? "green" : "red", sha, detail, fork);
+    this.sql.exec("UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ? WHERE name = ?", ok ? "green" : "red", sha, base, detail, fork);
   }
 
+  /** Result of "this PR merged onto current main typechecks?" — the PR's green/red status. */
   async applySingle(json: string): Promise<void> {
     const r = JSON.parse(json) as SingleResult;
-    const detail = r.result.ok ? "typechecks" : r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
-    this.setCheck(r.repo, r.result.sha, r.result.ok, detail);
-    this.log("check.single", { sha: r.result.sha, ok: r.result.ok, errors: r.result.errors.length }, r.repo);
+    const errs = r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
+    const detail = r.result.ok ? "merges onto main and typechecks" : r.mainConflict ? `on main: ${errs}` : errs;
+    if (r.baseHead && r.baseHead !== this.meta("baseline_head")) {
+      this.log("check.single.stale", { checkedOn: r.baseHead }, r.repo); // main moved during the check; a recheck follows
+      return;
+    }
+    this.setCheck(r.repo, r.forkSha, r.result.ok, detail, r.baseHead);
+    this.log("check.single", { sha: r.forkSha, ok: r.result.ok, onMain: r.baseHead, mainConflict: !!r.mainConflict, errors: r.result.errors.length, timings: r.timings ?? [] }, r.repo);
+  }
+
+  /** Main moved: re-verify every waiting PR against the new main (no rebase needed unless it no longer fits). */
+  private async recheckAll(except: Set<string>) {
+    for (const f of this.activeForks()) {
+      if (except.has(f.name) || f.head_sha === f.base_sha) continue;
+      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
+      await this.startPipeline(f.name, f.head_sha, "recheck");
+    }
   }
 
   /** Store a pair result; a merge-only typecheck failure becomes a semantic-conflict signal to both forks. */
   async applyPair(json: string): Promise<{ status: string }> {
     const r = JSON.parse(json) as PairResult;
-    this.setCheck(r.a, r.aloneA.sha, r.aloneA.ok, r.aloneA.ok ? "typechecks" : r.aloneA.errors.map(describeError).join("\n"));
-    this.setCheck(r.b, r.aloneB.sha, r.aloneB.ok, r.aloneB.ok ? "typechecks" : r.aloneB.errors.map(describeError).join("\n"));
 
     const a = this.fork(r.a);
     const b = this.fork(r.b);
@@ -487,8 +508,25 @@ export class Coordinator extends DurableObject<Env> {
     return m;
   }
 
+  /** PRs that must go around: they conflict with something that already landed. */
+  private goAroundMap(): Map<string, string> {
+    const m = new Map<string, string>();
+    for (const r of this.sql
+      .exec<{ fork: string; about_fork: string | null; symbol: string | null; message: string }>(
+        "SELECT fork, about_fork, symbol, message FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL",
+      )
+      .toArray())
+      m.set(
+        r.fork,
+        r.about_fork
+          ? `Conflicts with ${prLabel(r.about_fork)} (landed)${r.symbol ? ` on ${r.symbol}` : ""}. Rebase onto main and fix.`
+          : r.message.length > 220 ? `${r.message.slice(0, 217)}...` : r.message,
+      );
+    return m;
+  }
+
   sequence(): SequenceEntry[] {
-    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "");
+    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap());
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -545,11 +583,22 @@ export class Coordinator extends DurableObject<Env> {
       return { landed: false, fork, reason, baselineHead, atc: this.sequence().find((e) => e.fork === fork) ? clearanceMessage(this.sequence().find((e) => e.fork === fork)!) : undefined };
     };
 
-    // base_sha is only known once the push is indexed, so "still checking" must be answered first.
-    if (me.processed_sha !== me.head_sha || me.check_status === "pending" || me.check_sha !== me.head_sha)
+    const goAround = this.goAroundMap().get(fork);
+    if (goAround) return deny(goAround, null);
+    if (me.processed_sha !== me.head_sha || me.check_sha !== me.head_sha || me.check_status === "pending")
       return { landed: false, fork, reason: "Checks for your latest push are still running; retry in a few seconds.", baselineHead, retry: true };
-    if (me.base_sha !== baselineHead) return deny(`Baseline has moved to ${baselineHead.slice(0, 7)}; rebase onto it and push before landing.`, "rebase_required");
-    if (!isGreen(me)) return deny(`Your fork does not typecheck at ${me.head_sha.slice(0, 7)}: ${me.check_detail ?? ""}`.trim());
+    if (me.check_base !== baselineHead) {
+      // Main moved since this PR was checked: re-verify on the new main (merge queue — no rebase needed).
+      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
+      await this.startPipeline(fork, me.head_sha, "recheck");
+      return { landed: false, fork, reason: "Main moved; re-checking your PR on the new main. Retry in a few seconds.", baselineHead, retry: true };
+    }
+    if (!isGreen(me, baselineHead)) {
+      const detail = me.check_detail ?? "";
+      return detail.startsWith("on main:")
+        ? deny(`Your PR doesn't fit on current main: ${detail.slice(9)}. Rebase onto main and fix.`, "rebase_required")
+        : deny(`Your PR does not typecheck at ${me.head_sha.slice(0, 7)}: ${detail}`.trim());
+    }
 
     const ahead = this.rivals(fork).filter((r) => landingOrder(r, me, baselineHead) < 0);
     if (ahead.length) {
@@ -565,8 +614,13 @@ export class Coordinator extends DurableObject<Env> {
         await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: forkRef, baseline: { ...baseRef, expectedHead: baselineHead } }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
-      if (!result.landed || !result.forkHead) return deny(result.reason ?? "landing refused", result.reason?.includes("rebase") ? "rebase_required" : "land_blocked");
-      return this.onLanded(me, result.forkHead, baselineHead);
+      if (result.retry) return { landed: false, fork, reason: result.reason ?? "retry", baselineHead, retry: true };
+      if (!result.landed || !result.landedSha) {
+        const firstError = result.typecheck?.errors[0];
+        const where = firstError ? `: ${describeError(firstError)}` : "";
+        return deny(`Doesn't fit on current main (${result.reason ?? "landing refused"}${where}). Rebase onto main and fix.`, result.mainConflict ? "rebase_required" : "land_blocked");
+      }
+      return this.onLanded(me, result.landedSha, baselineHead, !!result.merged);
     } finally {
       this.setMeta("landing", "");
     }
@@ -578,16 +632,19 @@ export class Coordinator extends DurableObject<Env> {
     return { name: repo, remote: info.remote, token: token.plaintext };
   }
 
-  private async onLanded(winner: ForkRow, newHead: string, previousHead: string): Promise<LandResponse> {
+  /**
+   * After a landing: announce it to everyone. Only PRs with an open conflict against the winner must go around;
+   * the rest stay in line and are automatically re-checked on the new main (ATC merges them when they land).
+   */
+  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean): Promise<LandResponse> {
     const now = Date.now();
     this.setMeta("baseline_head", newHead);
     this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
-    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines }, winner.name);
+    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged }, winner.name);
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
-    const conflicted = new Set(this.rivals(winner.name).map((r) => r.name));
     this.resolveSignals({ fork: winner.name });
-    const told: string[] = [];
+    const goAround: string[] = [];
     for (const other of this.activeForks()) {
       const sem = this.sql
         .exec<{ symbol: string | null; message: string }>(
@@ -596,27 +653,36 @@ export class Coordinator extends DurableObject<Env> {
         )
         .toArray()[0];
       this.resolveSignals({ fork: other.name, about_fork: winner.name });
-      const conflict = conflicted.has(other.name);
-      this.emitSignal({
-        fork: other.name,
-        kind: "rebase_required",
-        about_fork: winner.name,
-        symbol: sem?.symbol ?? null,
-        message: conflict
-          ? `${winner.name} landed (baseline is now ${newHead.slice(0, 7)}). Your fork conflicts with it${sem?.symbol ? ` on ${sem.symbol}` : ""}: rebase onto baseline main and fix before landing. ${sem ? `Earlier finding: ${sem.message}` : ""}`.trim()
-          : `${winner.name} landed (baseline is now ${newHead.slice(0, 7)}). Rebase onto baseline main before landing.`,
-        data: { newHead, conflict },
-        dedupe_key: `rebase:${other.name}:${newHead}`,
-      });
-      told.push(other.name);
+      if (sem) {
+        goAround.push(other.name);
+        this.emitSignal({
+          fork: other.name, kind: "rebase_required", about_fork: winner.name, symbol: sem.symbol,
+          message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}) and your PR conflicts with it${sem.symbol ? ` on ${sem.symbol}` : ""}. Go around: rebase onto main, fix, push. Finding: ${sem.message}`,
+          data: { newHead }, dedupe_key: `rebase:${other.name}:${newHead}`,
+        });
+      } else {
+        this.emitSignal({
+          fork: other.name, kind: "landed", about_fork: winner.name, symbol: null,
+          message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}). No conflict with your PR: stay in line, no rebase needed. ATC is re-checking your PR on the new main.`,
+          data: { newHead }, dedupe_key: `landed-ahead:${other.name}:${newHead}`,
+        });
+      }
     }
     this.emitSignal({
       fork: winner.name, kind: "landed", about_fork: null, symbol: null,
-      message: `Landed at ${newHead.slice(0, 7)}.${told.length ? ` Told ${told.join(", ")} to rebase.` : ""}`,
+      message: `Landed at ${newHead.slice(0, 7)}.${goAround.length ? ` ${goAround.join(", ")} must go around (conflict).` : ""}`,
       data: { newHead }, dedupe_key: `landed:${winner.name}:${newHead}`,
     });
     this.syncDerivedSignals();
-    return { landed: true, fork: winner.name, baselineHead: newHead, previousHead, rebaseRequired: told };
+    await this.recheckAll(new Set(goAround));
+    return {
+      landed: true,
+      fork: winner.name,
+      baselineHead: newHead,
+      previousHead,
+      rebaseRequired: goAround,
+      atc: `ATC: ${prLabel(winner.name)}, landed at ${newHead.slice(0, 7)}${merged ? " (merged onto main by ATC)" : ""}.${goAround.length ? ` ${goAround.map(prLabel).join(", ")} must go around.` : " No one has to go around."}`,
+    };
   }
 
   // ── overlaps ────────────────────────────────────────────────────────────

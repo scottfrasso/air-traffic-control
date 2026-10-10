@@ -41,11 +41,22 @@ export interface PairResult {
 export interface SingleResult {
   mode: "single";
   repo: string;
+  /** The fork head that was checked (result.sha may be the PR merged onto main). */
+  forkSha: string;
+  /** Main commit the PR was merged onto for the check (null if no baseline given). */
+  baseHead: string | null;
+  /** True when the PR is fine alone but conflicts with current main (textually or by typecheck). */
+  mainConflict?: boolean;
   result: Typecheck;
+  timings?: Timing[];
 }
 export interface LandResult {
   mode: "land";
   landed: boolean;
+  retry?: boolean;
+  mainConflict?: boolean;
+  landedSha?: string;
+  merged?: boolean;
   reason?: string;
   forkHead?: string;
   previousHead?: string;

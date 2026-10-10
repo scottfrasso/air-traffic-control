@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS forks(
   landed_at INTEGER,
   check_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown | pending | green | red
   check_sha TEXT,
+  check_base TEXT,                   -- main commit the PR was merged onto for its check
   check_detail TEXT
 );
 

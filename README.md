@@ -14,8 +14,8 @@ both land. ATC (internally `agentmesh`) watches every agent's pull request (each
 - About 10–15 seconds after PR2 pushes, both agents get a **semantic-conflict signal** naming `applyDiscount` and the other PR.
   That comes from a speculative merge plus `tsc` in a container. No one had asked to land yet.
 - ATC's sequence shows, for example, `#1 PR2 CLEARED: beats PR1 on applyDiscount, smaller diff` and `PR1 HOLD: lands after PR2`.
-- PR1 asks to land and merges. PR2 is told to **rebase**, fixes the call, and lands. Three more independent PRs land in sequence.
-  Baseline typechecks.
+- PR1 asks to land and merges. Only PR2 (the real conflict) is told to **go around**; it fixes the call and lands.
+  The three independent PRs are just re-checked on the new main and land in sequence with **no rebases**. Main typechecks.
 
 ![ATC replay: PR1 landing, PR2 rebased, three PRs going around](docs/screenshots/atc-replay.png)
 
@@ -37,7 +37,8 @@ pnpm --dir demo exec tsx src/live.ts 4     # fresh runway + 4 agent prompts + th
 ```
 See [`handover/02-run-real-claude-code-agents.md`](handover/02-run-real-claude-code-agents.md). Each Claude Code session
 calls `start_work` and gets a PR number plus ready-to-run git commands. It then works, pushes, follows `get_signals` and
-`get_clearance`, and calls `request_land`. One headless Claude Code agent was verified to land a PR this way end to end.
+`get_clearance`, and calls `request_land`. Verified: two real Claude Code agents with colliding tasks ran concurrently. One landed,
+the other was told to go around, fixed the first agent's new caller, and landed. Main typechecks.
 
 Milestone checks, each against deployed resources:
 
@@ -96,9 +97,10 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
 - **Signals are context, not commands.** Kinds: `signature_change` (an export you use, edit, or plan to touch is changing),
   `overlap` (same file), `intent_overlap`, `semantic_conflict` (the merge fails typecheck and neither fork does alone),
   `merge_conflict` (textual), `rebase_required`, `land_blocked`, `landed`.
-- **Landing gate:** a PR lands only if it is **current** (its merge base is baseline main) and **green** (it typechecks).
-  When PRs conflict, the one **closest to landing** wins: requested landing > current > green. **Ties go to the
-  smaller diff.**
+- **Landing gate (a merge queue):** a PR lands only if it is **current and green**, meaning it merges onto the *current*
+  main and that exact commit typechecks. ATC does the merge itself, so agents never rebase just because main moved.
+  When PRs conflict, the one **closest to landing** wins: requested landing > checked on current main > green.
+  **Ties go to the smaller diff.** After a landing, only PRs that conflict with it go around; everyone else stays in line.
 - **ATC sequence:** every in-flight PR gets one clearance and one reason: `CLEARED`, `FOLLOW`, `HOLD`
   (a conflicting PR lands first), `GO AROUND` (baseline moved, so rebase) or `STANDBY` (checks running). Agents read theirs with
   `get_clearance`. The dashboard flies the planes in exactly this order.

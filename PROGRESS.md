@@ -10,11 +10,14 @@ Nothing.
 
 ## Works (verified against deployed Cloudflare resources)
 
-- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order, about 60 s.
+- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order **without rebasing**, about 56 s.
+- **Merge-queue landing (ADR-0015):** ATC merges each PR onto the current main, typechecks that exact commit, and pushes. After a landing,
+  only conflicting PRs go around; the rest are re-checked automatically.
+- **Real agents, concurrently:** two real Claude Code agents (colliding tasks) both landed with no human help; one was sent around
+  and fixed the other's new caller. Main typechecks.
 - **ATC:** forks are numbered PRs. ATC computes a landing sequence (CLEARED / FOLLOW / HOLD / GO AROUND / STANDBY) with one reason
   each, which agents read via `get_clearance` (MCP + HTTP) and which the dashboard flies.
-- **Real agents:** `demo/src/live.ts` + `agents/` prompts + `handover/02-…`. One headless Claude Code agent landed a PR end to end
-  through the MCP server. Several agents at once hasn't been tried yet; that's for the owner to run.
+- **Real agents:** `demo/src/live.ts` + `agents/` prompts + `handover/02-…`.
 - **Live push, recording, replay:** hibernatable WebSocket push on every event (verified: 63 pushes in one run). Snapshots are recorded
   (39 in one run), and `/r/<baseline>?replay` replays them with popups from real events.
 - **Outbound webhooks:** HMAC-signed POST per event. **Not verified against a real receiver yet.**
@@ -46,7 +49,7 @@ Nothing.
 - **Push events vs reconcile:** a new Artifacts subscription takes 30–60 s to start delivering, so a fork's first pushes are
   usually caught by the Coordinator's 5 s reconcile poll (ADR-0006). Both paths are live; the event log shows which one fired.
 - **Auth:** one shared API key for every agent and the dashboard (ADR-0005). Agent identity is not authenticated.
-- **Landing is fast-forward only.** Agents merge or rebase baseline themselves (the demo's agent B merges).
+- **Go-around fixes are the agent's job.** ATC merges PRs that fit; when one doesn't fit, the agent merges main and fixes it.
 - **Typecheck is the only CI**, by design (prompt.md: no CI beyond typecheck).
 - **Alarm-kept DOs run stale code across deploys** (ADR-0009). Mitigated by a 10-minute idle cutoff, fresh baselines per run, and teardown.
 
@@ -60,8 +63,8 @@ Nothing.
 
 ## Next
 
-1. Record the video per DEMO_SCRIPT.md.
-2. Optional: two-real-agent MCP variant; logo asset in the hero cloud.
+1. Make the video: see `handover/03-video.md` (Remotion + ElevenLabs; footage from `demo/src/tools/record-replay.ts`).
+2. Optional: logo asset in the hero cloud; route checks by fork to raise the cache hit rate.
 
 ## Tools
 

@@ -50,9 +50,15 @@ try {
   for (const x of sem) say(x.fork === a.fork ? "A" : "B", `signal [semantic_conflict] ${x.message}`);
   check(sem.every((x) => x.symbol === "applyDiscount"), "signals name applyDiscount");
   check(sem.some((x) => x.fork === a.fork && x.about_fork === b.fork) && sem.some((x) => x.fork === b.fork && x.about_fork === a.fork), "each signal names the other fork");
-  const fa = s.forks.find((f) => f.name === a.fork)!;
-  const fb = s.forks.find((f) => f.name === b.fork)!;
-  check(fa.check_status === "green" && fb.check_status === "green", `each fork typechecks alone (A ${fa.check_status}, B ${fb.check_status})`);
+  // Each PR's own status comes from the "PR merged onto current main" check, which may finish just after the pair check.
+  const settled = await waitFor("both PRs checked on main", async () => {
+    const st = await mesh.state();
+    const x = st.forks.filter((f) => f.name === a.fork || f.name === b.fork);
+    return x.every((f) => f.check_status !== "pending") ? st : null;
+  }, 60_000);
+  const fa = settled.forks.find((f) => f.name === a.fork)!;
+  const fb = settled.forks.find((f) => f.name === b.fork)!;
+  check(fa.check_status === "green" && fb.check_status === "green", `each PR merged onto main typechecks (A ${fa.check_status}, B ${fb.check_status})`);
   check(!s.events.some((e) => e.kind.startsWith("land")), "no landing requested yet");
   say("system", `dashboard: https://agentmesh.scottfrasso.workers.dev/r/${baseline}`);
   await Promise.all([mesh.abandon(a.fork), mesh.abandon(b.fork)]);

@@ -73,6 +73,34 @@ function mainBuildInfo(baseSha: string | null): string | null {
   return existsSync(file) ? file : null;
 }
 
+/**
+ * Merge-queue step: put `fork` on top of `base`. If the fork already contains base, that's the fork itself;
+ * otherwise create a merge commit in a scratch worktree (first parent = base, so pushing it to main is a fast-forward).
+ */
+function ontoBase(fork: string, base: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
+  if (git(["merge-base", "--is-ancestor", base, fork], { allowFail: true }).ok) return { sha: fork };
+  const wt = mkdtempSync("/work/onto-");
+  const prev = dir;
+  try {
+    git(["worktree", "add", "-q", "--detach", wt, base]);
+    dir = wt;
+    const merge = git(["merge", "--no-ff", "-q", "-m", message, fork], { allowFail: true });
+    if (!merge.ok) {
+      const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
+      return { conflicts, output: merge.out.slice(0, 2000) };
+    }
+    const sha = git(["rev-parse", "HEAD"]).out;
+    dir = repoDir;
+    git(["update-ref", `refs/agentmesh/onto-${sha.slice(0, 12)}`, sha]); // keep the object reachable for push
+    return { sha };
+  } finally {
+    dir = prev;
+    git(["worktree", "remove", "--force", wt], { allowFail: true });
+  }
+}
+
+const prOf = (name: string) => (/--pr(\d+)$/.exec(name) ? `PR${/--pr(\d+)$/.exec(name)![1]}` : name);
+
 /** Typecheck a commit in a throwaway worktree. Results are cached by tree hash; main's incremental state seeds tsc. */
 function typecheck(rev: string, label: string, buildInfo: string | null): Typecheck {
   const sha = git(["rev-parse", rev]).out;
@@ -123,9 +151,20 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
 
 function run(): unknown {
   if (input.mode === "single") {
+    // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
     const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
     const sha = fetchMain(input.repo, "fork");
-    return { mode: "single", repo: input.repo.name, result: typecheck(sha, "fork", mainBuildInfo(base)), timings };
+    if (!base) return { mode: "single", repo: input.repo.name, forkSha: sha, baseHead: null, result: typecheck(sha, "fork", null), timings };
+    const onto = ontoBase(sha, base, `Land ${prOf(input.repo.name)} via ATC`);
+    if ("conflicts" in onto) {
+      return {
+        mode: "single", repo: input.repo.name, forkSha: sha, baseHead: base, mainConflict: true,
+        result: { sha, ok: false, errors: [], output: `merge conflict with main in ${onto.conflicts.join(", ")}` }, timings,
+      };
+    }
+    const result = typecheck(onto.sha, "on main", mainBuildInfo(base));
+    const alone = result.ok || onto.sha === sha ? null : typecheck(sha, "alone", mainBuildInfo(base));
+    return { mode: "single", repo: input.repo.name, forkSha: sha, baseHead: base, mainConflict: !result.ok && alone?.ok === true, result, timings };
   }
   if (input.mode === "pair") {
     const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
@@ -156,17 +195,17 @@ function run(): unknown {
       git(["worktree", "remove", "--force", mwt], { allowFail: true });
     }
   }
-  // land
+  // land: merge queue. Put the PR on top of the current main, typecheck that exact commit, push it.
   const baseHead = fetchMain(input.baseline, "base");
-  if (baseHead !== input.baseline.expectedHead) return { mode: "land", landed: false, reason: `baseline moved: expected ${input.baseline.expectedHead.slice(0, 7)}, found ${baseHead.slice(0, 7)}` };
+  if (baseHead !== input.baseline.expectedHead) return { mode: "land", landed: false, retry: true, reason: `main moved to ${baseHead.slice(0, 7)} while landing; retry` };
   const forkHead = fetchMain(input.fork, "fork");
-  const current = git(["merge-base", "--is-ancestor", baseHead, forkHead], { allowFail: true }).ok;
-  if (!current) return { mode: "land", landed: false, reason: "fork is not current with baseline (rebase required)", forkHead, baseHead };
-  const check = typecheck(forkHead, "land", mainBuildInfo(baseHead));
-  if (!check.ok) return { mode: "land", landed: false, reason: "fork does not typecheck", forkHead, baseHead, typecheck: check };
-  const push = git(["push", "-q", input.baseline.remote, `${forkHead}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
-  if (!push.ok) return { mode: "land", landed: false, reason: `push to baseline failed: ${push.out}`, forkHead, baseHead };
-  return { mode: "land", landed: true, forkHead, previousHead: baseHead, typecheck: check };
+  const onto = ontoBase(forkHead, baseHead, `Land ${prOf(input.fork.name)} via ATC`);
+  if ("conflicts" in onto) return { mode: "land", landed: false, mainConflict: true, reason: `merge conflict with main in ${onto.conflicts.join(", ")}`, forkHead, baseHead };
+  const check = typecheck(onto.sha, "land", mainBuildInfo(baseHead));
+  if (!check.ok) return { mode: "land", landed: false, mainConflict: true, reason: "PR merged onto current main fails typecheck", forkHead, baseHead, typecheck: check };
+  const push = git(["push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
+  if (!push.ok) return { mode: "land", landed: false, retry: true, reason: `push to main failed (${push.out.slice(0, 120)}); retry`, forkHead, baseHead };
+  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }
 
 try {

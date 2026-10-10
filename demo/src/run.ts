@@ -40,7 +40,7 @@ const land = async (who: "A" | "B", fork: string): Promise<LandResponse> => {
   for (;;) {
     const res = await mesh.call<LandResponse>("POST", "/land", { fork });
     if (!res.retry) return res;
-    say(who, `land: ${res.reason}`);
+    say(who === "B" && !fork.endsWith(`--pr2`) ? "system" : who, `${fork.split("--").pop()?.toUpperCase()} land: ${res.reason}`);
     await sleep(3000);
   }
 };
@@ -119,15 +119,15 @@ try {
   check(bLand.landed, `B landed: ${bLand.landed ? `baseline is now ${bLand.baselineHead?.slice(0, 7)}` : bLand.reason}`);
 
   if (traffic.length) {
-    step(6, "ATC lands the remaining traffic in sequence (each rebases, then lands)");
+    step(6, "The other PRs land in ATC's sequence: no rebases (ATC merges each onto main and re-checks it)");
+    const rebaseTold = new Set<string>();
+    for (const t of traffic) if ((await mesh.call<Signal[]>("GET", `/signals?fork=${t.creds.fork}&all=1`)).some((s) => s.kind === "rebase_required")) rebaseTold.add(t.creds.fork);
+    check(rebaseTold.size === 0, `no traffic PR was told to rebase when PR${a.pr} landed (only the conflicting PR${b.pr} went around)`);
     const order = ((await mesh.state()).sequence ?? []).map((e) => e.fork);
     traffic.sort((x, y) => order.indexOf(x.creds.fork) - order.indexOf(y.creds.fork));
-    for (const { creds, repo } of traffic) {
-      const head = repo.fetch(creds.baselineRemote);
-      repo.git(["merge", "--no-edit", "-q", head]);
-      repo.push(creds.remote);
+    for (const { creds } of traffic) {
       const res = await land("B", creds.fork);
-      check(res.landed, `PR${creds.pr} landed: ${res.landed ? `baseline is now ${res.baselineHead?.slice(0, 7)}` : res.reason}`);
+      check(res.landed, `PR${creds.pr} landed without rebasing: ${res.landed ? `main is now ${res.baselineHead?.slice(0, 7)}` : res.reason}`);
     }
   }
 
