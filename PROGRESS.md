@@ -1,48 +1,58 @@
 # PROGRESS
 
+_Last updated 2026-10-10._
+
 ## Blocked
 
-Nothing. The Worker subscription token was added 2026-10-10, and per-fork push subscriptions are verified working.
+Nothing.
+- Workers Paid is active. The Worker's Queues-only subscription token is installed (`CLOUDFLARE_AGENTMESH_WORKER_API_KEY` → secret `CF_API_TOKEN`).
+- Heads-up: the main `CLOUDFLARE_API_TOKEN` (used by seed/teardown) expires **2026-10-15 21:59 UTC**, one day after the deadline.
 
-## Done
+## Works (verified against deployed Cloudflare resources)
 
-- **Milestone 1: Spike** ✅ (verified against real Artifacts; findings in DECISIONS.md)
-  - Sample TS repo `sample-repo/` (shop-core: money → pricing → cart → index, `tsc --noEmit`).
-  - Imported into Artifacts (create + `git push`), forked twice, pushed to a fork with plain git.
-  - Push event received in the deployed Worker (Queue consumer → Coordinator DO event log), about 4 s latency.
-  - Found that new subscriptions take 30–60 s to activate → ADR-0006 reconcile fallback.
-  - Worker locked behind a shared API key (ADR-0005), verified 401/200.
+- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps, about 40 s, on 3 consecutive runs.
+- **M1 spike:** import (create + `git push`), fork ×2, push with plain git, push event into the Worker. Findings are in DECISIONS.md.
+- **M2 in-flight index:** forks through the Artifacts binding, per-fork push subscriptions, a Workflow per push, a tree diff against the true
+  merge base (full ancestry), touched files, exported-symbol deltas, imports, file and symbol overlaps. Check: `demo/src/checks/m2-index.ts`.
+- **M3 intents and signals:** `declare_intent` returns collisions and notifies others. `get_signals` covers signature changes, overlaps and intent
+  overlaps; signals refresh in place and auto-resolve. MCP server with 4 tools. Check: `m3-signals.ts` (agent B is pure MCP).
+- **M4 speculative merges:** a `Checker` container runs A alone, B alone, `git merge`, and typechecks the merge. A merge-only failure
+  produces `semantic_conflict` to both forks, naming the symbol and the other fork, about 11–21 s after push. Check: `m4-speculative.ts`.
+- **M5 landing gate:** current + green gate, closest-to-landing arbitration with ties to the smaller diff, fast-forward landing in the
+  container, `rebase_required` to the others. Covered by `run.sh` and `worker/test/landing.test.ts`.
+- **Dashboard:** an 8-bit top-down runway at `/r/<baseline>`. Planes approach in landing order, conflicts blink and link,
+  rebase-required planes hold, and landings roll out to the apron. Includes a flight board and tower radio.
+- **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
+  clean before the first push), 16 unit tests, strict TypeScript in every package.
 
-- **Milestone 2: In-flight index** ✅ (`demo/src/checks/m2-index.ts` passes against deployed resources)
-  - `POST /api/repos/:baseline/forks` forks through the Artifacts binding, mints a fork write token and a baseline read token,
-    and creates the fork's push subscription.
-  - Push (event or reconcile) → `PushPipeline` Workflow → tree diff vs merge base through the binding → Coordinator stores
-    touched files, exported-symbol deltas and imports → file and symbol overlaps.
-  - Dashboard at `/r/<baseline>` (strip-bay design, polls every second).
-  - Indexing completes about 10 s after push.
+## Stubbed, simplified, or heuristic (honest list)
 
-- **Milestone 3: Intent and early signals** ✅ (`demo/src/checks/m3-signals.ts` passes; agent B runs entirely over MCP)
-  - `declare_intent` returns overlaps with other forks' changes, uses and intents, and notifies those forks.
-  - `get_signals`: signature changes reach forks that import, edit, or plan to touch the symbol; the changer learns its dependents;
-    file overlaps; intent overlaps. Signals refresh in place and resolve when they stop holding.
-  - MCP server at `/mcp` (stateless), with tools `start_work`, `declare_intent`, `get_signals`.
+- **Symbol extraction is a scanner, not the TS compiler** (ADR-0007). Early `signature_change` and overlap signals are heuristics.
+  Semantic-conflict verdicts come only from real `tsc`.
+- **Symbol attribution** in a semantic conflict matches the error line against the forks' changed export names. An error
+  that doesn't mention a changed symbol is still reported as a conflict, but `symbol` is null.
+- **Pair checks are O(n²)** per push across active forks. That's fine for a handful of agents but not tuned for dozens.
+- **Push events vs reconcile:** a new Artifacts subscription takes 30–60 s to start delivering, so a fork's first pushes are
+  usually caught by the Coordinator's 5 s reconcile poll (ADR-0006). Both paths are live; the event log shows which one fired.
+- **Auth:** one shared API key for every agent and the dashboard (ADR-0005). Agent identity is not authenticated.
+- **Landing is fast-forward only.** Agents merge or rebase baseline themselves (the demo's agent B merges).
+- **Typecheck is the only CI**, by design (prompt.md: no CI beyond typecheck).
+- **Alarm-kept DOs run stale code across deploys** (ADR-0009). Mitigated by a 10-minute idle cutoff, fresh baselines per run, and teardown.
 
-- **Milestone 4: Speculative merges** ✅ (`demo/src/checks/m4-speculative.ts` passes)
-  - Plain git merges A and B cleanly; the container finds `src/checkout.ts:6 TS2345` only in the merge.
-  - Both agents get a `semantic_conflict` signal naming `applyDiscount` and the other fork about 21 s after push, before any landing.
-- Repo: private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog secret scan on every PR.
+## Cut / not done
 
-- **Milestone 5: Landing gate** ✅ and **acceptance test** ✅
-  - `demo/run.sh` passes end to end against deployed resources (2 consecutive runs, about 40 s each). All 6 acceptance steps PASS.
-  - M2–M4 checks re-run green after M5.
+- **Stretch:** blast-radius estimation from ticket descriptions and scheduling overlapping tickets. Not started.
+- **Second demo variant with two real coding agents over MCP.** The tools are built and exercised by a scripted MCP client
+  (`m3-signals.ts`), but there's no recorded run with two LLM agents.
+- Cloudflare logo in the dashboard's hero cloud (slot reserved; waiting on the owner's asset).
+- The dashboard polls every second instead of using WebSockets (ADR-0008).
 
 ## Next
 
-- 8-bit retro top-down runway dashboard (planes = agents, approach order = landing order, clouds; Cloudflare logo later).
-- README.md, DEMO_SCRIPT.md, final PROGRESS honesty pass.
-- Stretch: MCP variant with two real coding agents; blast-radius scheduling.
+1. Record the video per DEMO_SCRIPT.md.
+2. Optional: two-real-agent MCP variant; logo asset in the hero cloud.
 
-## Stubbed / cut / known gaps
+## Tools
 
-- One shared API key; agent identity is not authenticated (ADR-0005).
-- `demo/src/teardown.ts [--keep <baseline>]` cleans up old runs (repos, forks, subscriptions).
+- `demo/src/teardown.ts [--keep <baseline>]` deletes old runs (repos, forks, subscriptions).
+- `demo/src/tools/scene.ts [conflict|landed]` + `screenshot.ts <baseline> <out.png>` produce dashboard stills.
