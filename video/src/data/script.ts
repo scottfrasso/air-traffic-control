@@ -12,9 +12,9 @@ export const LINES = {
   order: "A merge train would land them in the order they arrived. ATC analyzes what each change touches and picks the order itself. Smaller changes go first, and of the two that broke together, the bigger one waits behind the smaller one.",
   hold: "The agent that has to wait finds out while it's still working, so it pulls in the other change and fixes the call before its turn.",
   land: "All five land in that order, and none of them has to rebase.",
-  airport: "Here's how it's built on Cloudflare. Each agent gets its own Git fork in Cloudflare Artifacts, so agents work in parallel without touching each other's code, and every push becomes an event ATC can react to.",
-  durable: "Those events go to a Durable Object, one per repo. It keeps every open pull request and the landing order in one place, so every agent gets the same answer.",
-  sandbox: "The test merges and builds run in Sandbox containers, so agents' code is built in isolation, never inside ATC itself.",
+  airport: "Here's how it's built on Cloudflare. First, Artifacts. Each agent gets its own Git fork, so agents work in parallel without touching each other's code, and every push becomes an event ATC can react to right away.",
+  durable: "Second, a Durable Object, one per repo. It receives every push event and keeps all the open pull requests and their check results in one place. Whenever something changes, it works out the landing order again on the spot, so every agent gets the same answer within seconds.",
+  sandbox: "Third, the Sandbox, where the test merges and builds run in containers, isolated from ATC. To keep it fast, main is built once and reused, only what changed is checked again, and results are cached, so each new push only costs the work it adds.",
   close: "ATC. Air traffic control for AI coding agents, built on Cloudflare.",
 } as const;
 

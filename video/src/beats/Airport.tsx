@@ -34,9 +34,9 @@ export function Airport({ t }: { t: number }) {
     checkLight: inSandbox ? (Math.floor(t * 3) % 2 ? C.green : "#2f8a45") : undefined,
   };
   const closing = t >= T.closeStart;
-  const card = t < T.durableVo ? 0 : t < T.sandboxVo ? 1 : 2;
-  const from = [T.airportVo + 2.2, T.durableVo, T.sandboxVo][card]!;
-  const glow = card === 0 && t >= from ? clamp((t - from) / 0.4) * (0.5 + 0.5 * Math.sin(t * 4)) : 0;
+  const starts = [T.airportVo + 2.2, T.durableVo + 0.8, T.sandboxVo + 0.8];
+  const current = starts.filter((x) => t >= x).length - 1;
+  const glow = current === 0 ? clamp((t - starts[0]!) / 0.4) * (0.5 + 0.5 * Math.sin(t * 4)) : 0;
   return (
     <Stage scene={scene}>
       {!closing && (
@@ -45,7 +45,9 @@ export function Airport({ t }: { t: number }) {
             <div key={hx} style={{ position: "absolute", left: (hx - 3) * SCALE, top: (GROUND - 29) * SCALE, width: 50 * SCALE, height: 30 * SCALE, boxShadow: `0 0 40px 12px rgba(250,174,64,${0.5 * glow})`, background: `rgba(250,174,64,${0.12 * glow})` }} />
           ))}
           <div style={{ position: "absolute", left: 48, top: 40, font: `22px/1 ${PIXEL}`, color: C.orange, opacity: clamp((t - T.airportVo) / 0.4) }}>BUILT ON CLOUDFLARE</div>
-          {t >= from && <Card {...CARDS[card]!} opacity={clamp((t - from) / 0.4)} />}
+          <div style={{ position: "absolute", left: 960, top: 90, transform: "translateX(-50%)", width: 1400, display: "flex", flexDirection: "column", gap: 18 }}>
+            {CARDS.map((c, i) => t >= starts[i]! && <Card key={c.title} n={i + 1} {...c} opacity={clamp((t - starts[i]!) / 0.4)} active={i === current} />)}
+          </div>
         </>
       )}
       {closing && <Close t={t} />}
@@ -54,17 +56,20 @@ export function Airport({ t }: { t: number }) {
 }
 
 const CARDS = [
-  { title: "ARTIFACTS", color: C.amber, what: "A Git fork for every agent.", why: "Agents work in parallel without touching each other's code, and every push is an event ATC can react to." },
-  { title: "DURABLE OBJECTS", color: C.cyan, what: "One per repo, fed by those push events.", why: "Every open pull request and the landing order live in one place, so every agent gets the same answer." },
-  { title: "SANDBOX", color: C.green, what: "Containers for the test merges and builds.", why: "Agents' code is built in isolation, never inside ATC itself." },
+  { title: "ARTIFACTS", color: C.amber, what: "A Git fork for every agent.", why: "Agents work in parallel, and every push is an event ATC reacts to right away." },
+  { title: "DURABLE OBJECT", color: C.cyan, what: "One per repo: every open PR, its check results, and the landing order.", why: "Recomputes the order the moment anything changes. Every agent gets the same answer." },
+  { title: "SANDBOX", color: C.green, what: "Containers that run the test merges and builds, isolated from ATC.", why: "Fast: main is built once, only what changed is re-checked, results are cached." },
 ];
 
-function Card({ title, color, what, why, opacity }: { title: string; color: string; what: string; why: string; opacity: number }) {
+function Card({ n, title, color, what, why, opacity, active }: { n: number; title: string; color: string; what: string; why: string; opacity: number; active: boolean }) {
   return (
-    <div style={{ position: "absolute", left: 960, top: 150, transform: "translateX(-50%)", width: 1100, opacity, padding: "28px 36px 24px", background: "rgba(15,21,48,0.94)", border: `6px solid ${color}`, boxShadow: "8px 8px 0 #0f1530" }}>
-      <div style={{ font: `34px/1.2 ${PIXEL}`, color }}>{title}</div>
-      <div style={{ font: `44px/1.2 ${TERM}`, color: C.text, marginTop: 16 }}>{what}</div>
-      <div style={{ font: `40px/1.2 ${TERM}`, color: C.dim, marginTop: 8 }}>{why}</div>
+    <div style={{ opacity, display: "grid", gridTemplateColumns: "90px 1fr", padding: "18px 28px 16px", background: "rgba(15,21,48,0.95)", border: `6px solid ${active ? color : C.edge}`, boxShadow: "8px 8px 0 #0f1530" }}>
+      <div style={{ font: `56px/1 ${PIXEL}`, color }}>{n}</div>
+      <div>
+        <div style={{ font: `28px/1.2 ${PIXEL}`, color }}>{title}</div>
+        <div style={{ font: `38px/1.15 ${TERM}`, color: C.text, marginTop: 10 }}>{what}</div>
+        <div style={{ font: `36px/1.15 ${TERM}`, color: active ? C.amber : C.dim, marginTop: 4 }}>{why}</div>
+      </div>
     </div>
   );
 }

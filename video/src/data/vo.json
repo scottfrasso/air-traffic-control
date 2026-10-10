@@ -26,8 +26,8 @@
   },
   "airport": {
     "file": "vo/airport.mp3",
-    "seconds": 13.453061,
-    "hash": "adab289ca45f"
+    "seconds": 13.87102,
+    "hash": "610967e57982"
   },
   "close": {
     "file": "vo/close.mp3",
@@ -61,12 +61,12 @@
   },
   "durable": {
     "file": "vo/durable.mp3",
-    "seconds": 10.213878,
-    "hash": "7c624ada6e02"
+    "seconds": 19.173878,
+    "hash": "255c0d67942e"
   },
   "sandbox": {
     "file": "vo/sandbox.mp3",
-    "seconds": 7.549388,
-    "hash": "08d51d26afc5"
+    "seconds": 18.233469,
+    "hash": "cc9826da560c"
   }
 }
