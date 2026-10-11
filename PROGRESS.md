@@ -30,7 +30,7 @@ Nothing.
   Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
-  landed PR has it (`shop-261011174828`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
+  landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
 - **Savings in numbers (#17, ADR-0019):** computed from the event log; `run.sh` prints
   `5 PRs · 10 pairs checked · 1 conflict found in 8 s · 1 rebase (naive: 10)` and the dashboard has a SAVINGS panel.
 - **Merge-queue landing (ADR-0015):** ATC merges each PR onto the current main, typechecks that exact commit, and pushes. After a landing,
@@ -58,7 +58,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 37 unit tests, strict TypeScript in every package.
+  clean before the first push), 62 unit tests, strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 
@@ -87,8 +87,9 @@ Nothing.
 
 Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
 
-1. Landing reliability bugs #1, #3, #5.
-2. #15 flight log on the landed commit (context preservation), then #17 savings in numbers.
+1. ~~Landing reliability bugs #1, #3, #5.~~ Done 2026-10-11 (#22).
+2. ~~#15 flight log on the landed commit (context preservation), then #17 savings in numbers.~~ Done 2026-10-11 (#23);
+   still to do: a 10–15 s flight-log beat and a recap with the real numbers in the video.
 3. #14 public read-only replay link; fill `<PUBLIC_REPLAY_URL>` in `submission/FORM_DRAFT.md`.
 4. If time: #18 one-command deploy, #16 review clearance.
 5. Video is approved (#13). Optional: re-render with a #15/#17 beat in place of the recap's "next" line.
