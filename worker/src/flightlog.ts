@@ -50,7 +50,7 @@ export function flightLogNote(f: FlightLogInput): string {
   const pr = prLabel(f.fork);
   const lines = [`ATC flight log: ${pr} (agent ${oneLine(f.agent, 40)})`, "", `ATC-PR: ${pr}`, `ATC-Agent: ${oneLine(f.agent)}`];
   // Latest distinct intents only: an agent re-declaring in a loop must not grow the note without bound.
-  for (const i of [...new Set(f.intents.map((x) => oneLine(x)))].slice(-3)) lines.push(`ATC-Intent: ${i}`);
+  for (const i of [...new Set(f.intents.map((x) => oneLine(x)).reverse())].slice(0, 3).reverse()) lines.push(`ATC-Intent: ${i}`);
   const seen = new Set<string>();
   for (const s of [...f.signals].sort((a, b) => a.created_at - b.created_at)) {
     if (!STORY_KINDS.has(s.kind)) continue;

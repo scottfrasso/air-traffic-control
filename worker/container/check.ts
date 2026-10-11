@@ -171,7 +171,9 @@ function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>):
   // Only "no notes yet" may start a new notes history; any other fetch error would make the push diverge.
   if (!fetch.ok && !/couldn't find remote ref/i.test(fetch.out)) return { mode: "notes", written: [], error: `fetch refs/notes/atc: ${fetch.out.slice(0, 200)}` };
   for (const n of notes) {
-    const add = git(["notes", `--ref=${local}`, "add", "-f", "-F", "-", n.sha], { allowFail: true, input: n.note });
+    // Never replace a note: a PR that added nothing new lands on an existing commit that already has one. Append instead.
+    const has = git(["notes", `--ref=${local}`, "show", n.sha], { allowFail: true }).ok;
+    const add = git(["notes", `--ref=${local}`, has ? "append" : "add", "-F", "-", n.sha], { allowFail: true, input: n.note });
     if (!add.ok) return { mode: "notes", written: [], error: `notes add ${n.sha.slice(0, 7)}: ${add.out.slice(0, 200)}` };
   }
   const push = timed("push notes", () => git([...LOW_SPEED, "push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));

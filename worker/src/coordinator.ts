@@ -716,7 +716,7 @@ export class Coordinator extends DurableObject<Env> {
         return deny(`Doesn't fit on current main (${result.reason ?? "landing refused"}${where}). Rebase onto main and fix.`, result.mainConflict ? "rebase_required" : "land_blocked");
       }
       const landed = await this.onLanded(me, result.landedSha, baselineHead, !!result.merged, note);
-      await this.writeNotes(); // after the landing is recorded, still under the lock: notes never race each other
+      this.ctx.waitUntil(this.writeNotes()); // after the landing is recorded; the agent doesn't wait on git notes
       return landed;
     } finally {
       if (mayRelease(parseLock(this.meta("landing")), token)) this.setMeta("landing", "");
@@ -788,23 +788,55 @@ export class Coordinator extends DurableObject<Env> {
 
   // ── flight log (context preservation, ADR-0019) ─────────────────────────
 
-  /** Write every flight log not yet in git (this landing's, plus any that failed before). Never throws. */
-  private async writeNotes() {
-    const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0").toArray();
-    if (!pending.length) return;
+  private notesRunning: Promise<void> | null = null;
+  private notesAgain = false;
+
+  /**
+   * Write every flight log not yet in git (this landing's, plus any that failed before). One writer per Coordinator, so
+   * two notes pushes never race; a call while one runs makes it go round again. Retries with backoff; the reconcile
+   * alarm picks up anything left. Never throws.
+   */
+  private writeNotes(): Promise<void> {
+    if (this.notesRunning) {
+      this.notesAgain = true;
+      return this.notesRunning;
+    }
+    this.notesRunning = (async () => {
+      try {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          this.notesAgain = false;
+          const ok = await this.writePendingNotes();
+          if (ok && !this.notesAgain) return;
+          if (!ok) await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
+        }
+      } finally {
+        this.notesRunning = null;
+      }
+    })();
+    return this.notesRunning;
+  }
+
+  /** One attempt; true if nothing is left pending. */
+  private async writePendingNotes(): Promise<boolean> {
+    const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0 ORDER BY landed_at").toArray();
+    if (!pending.length) return true;
     let error: string;
     try {
       const r = JSON.parse(
         await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: pending.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
-      ) as NotesResult & { error?: string };
-      for (const sha of r.written) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE landed_sha = ?", sha);
-      if (!r.error) return this.log("notes.written", { forks: pending.map((p) => p.fork) });
+      ) as Partial<NotesResult> & { error?: string };
+      for (const sha of r.written ?? []) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE landed_sha = ?", sha);
+      if (!r.error) {
+        this.log("notes.written", { forks: pending.map((p) => p.fork) });
+        return true;
+      }
       error = r.error;
     } catch (err) {
       error = (err as Error).message;
     }
     this.sql.exec("UPDATE flight_logs SET note_error = ? WHERE noted = 0", error.slice(0, 300));
     this.log("notes.failed", { forks: pending.map((p) => p.fork), error: error.slice(0, 300) });
+    return false;
   }
 
   /** The PR's story so far, as the note ATC attaches to its landed commit. */
@@ -907,6 +939,7 @@ export class Coordinator extends DurableObject<Env> {
       }),
     );
     await this.requeuePairs();
+    if (this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length) this.ctx.waitUntil(this.writeNotes());
     return found;
   }
 
@@ -918,7 +951,8 @@ export class Coordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     if (await this.reconcile()) this.touch();
     const idle = Date.now() - Number(this.meta("last_activity") ?? 0);
-    if (this.activeForks().length > 0 && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    const notesPending = this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length > 0; // retry notes after the last landing too
+    if ((this.activeForks().length > 0 || notesPending) && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     else this.log("reconcile.paused", { idleMs: idle });
   }
 

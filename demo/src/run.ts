@@ -150,8 +150,12 @@ try {
   say("system", `git log on baseline:\n${final.git(["log", "--oneline", "-6"]).out.split("\n").map((l) => `           ${l}`).join("\n")}`);
 
   step(8, "Every landed PR's flight log is a git note on main (refs/notes/atc)");
+  // ATC writes notes right after answering the landing request, so give the last one a moment.
+  const end = await waitFor("flight log notes in git", async () => {
+    const st = await mesh.state();
+    return st.forks.filter((f) => f.status === "landed").every((f) => st.flightLogs?.some((l) => l.fork === f.name && l.noted)) ? st : null;
+  }, 60_000, 1000).catch(() => mesh.state());
   final.git(["fetch", "-q", a.baselineRemote, "refs/notes/atc:refs/notes/atc"], { remote: a.baselineRemote });
-  const end = await mesh.state();
   const landedForks = end.forks.filter((f) => f.status === "landed");
   const logs = end.flightLogs ?? [];
   for (const f of landedForks) {

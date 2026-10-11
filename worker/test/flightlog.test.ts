@@ -57,8 +57,8 @@ test("an in-flight log doesn't claim a landing", () => {
 });
 
 test("intents are deduped and capped", () => {
-  const note = flightLogNote(input({ intents: ["a", "b", "a", "c", "d", "\nd "] }));
-  assert.deepEqual(note.split("\n").filter((l) => l.startsWith("ATC-Intent:")), ["ATC-Intent: b", "ATC-Intent: c", "ATC-Intent: d"]);
+  const note = flightLogNote(input({ intents: ["a", "b", "c", "d", "\nd ", "a"] }));
+  assert.deepEqual(note.split("\n").filter((l) => l.startsWith("ATC-Intent:")), ["ATC-Intent: c", "ATC-Intent: d", "ATC-Intent: a"]); // latest three, re-declared "a" last
 });
 
 test("a multi-line agent name can't break the trailer block", () => {

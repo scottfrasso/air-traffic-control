@@ -20,14 +20,17 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     (the latest may not be flushed yet). Long histories keep the first 3 and the last 5.
   - Signals keep only the kinds that tell the story (conflicts, signature changes, overlaps, failed checks), one line
     per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`.
-- **Written after the landing is recorded, under the landing lock.** The Coordinator builds the note *before* landing (the
-  story up to that moment) and stores it in `flight_logs` with `noted = 0` when it records the landing. Then, still holding
-  the lock, it makes a separate checker call (`mode: "notes"`) with **every** log not yet in git, so a note that failed
-  on an earlier landing is retried. The container fetches `refs/notes/atc` into a per-baseline local ref, adds the notes
-  (on stdin), and pushes without force. Landings are serialized, so the push fast-forwards; if it's rejected, nothing is
-  overwritten.
+- **Written after the landing is recorded, in the background.** The Coordinator builds the note *before* landing (the
+  story up to that moment) and stores it in `flight_logs` with `noted = 0` when it records the landing. It answers the
+  agent, then (`ctx.waitUntil`) makes a separate checker call (`mode: "notes"`) with **every** log not yet in git. The
+  container fetches `refs/notes/atc` into a per-baseline local ref, adds the notes (on stdin), and pushes without force.
   - Why a separate call: work after the main push inside the land call could be killed by the checker's hard timeout,
-    leaving a PR that is on main but not recorded as landed. Now the landing is recorded first.
+    leaving a PR that is on main but not recorded as landed. Now the landing is recorded first, and the agent never
+    waits on notes.
+  - One writer per Coordinator (an in-memory promise): two notes pushes never race; a landing during a write makes the
+    writer go round again. A failed write retries with backoff (2, 4, 8 s), and the reconcile alarm, which keeps running
+    while any note is pending, retries after that.
+  - A note is never replaced: a PR that added nothing new lands on a commit that already has a note, so ATC appends.
   - Only "couldn't find remote ref" counts as "no notes yet". Any other fetch error skips the write, because starting a
     new notes history would diverge from the remote one. Transfers use `http.lowSpeedLimit/Time` so a stall fails within ~10 s.
   - An in-flight log (`get_history` with `fork`) never claims a landing: no "landed after a new push", and
@@ -50,7 +53,8 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   the dashboard has a SAVINGS panel.
 
 ## Consequences
-- One extra checker call per landing (inside the lock): a fetch, `git notes add` and a push, about a second.
+- One extra checker call per landing, after the agent has its answer: a fetch, `git notes add` and a push, about a second.
+  A reader can see the landing a second or two before its note.
 - Notes are not copied by a plain `git clone`; readers must fetch `refs/notes/atc` (documented in `get_history`).
 - Savings are recomputed from the filtered event log on every flush: linear in the run's events, fine for the demo and
   tens of PRs; cache by last event id before a large synthetic load run. Savings in snapshots also mean a snapshot on
