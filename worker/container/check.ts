@@ -36,10 +36,13 @@ let dir = repoDir; // git commands run here; typechecks run in throwaway worktre
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
 const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
-function git(args: string[], opts: { token?: string; allowFail?: boolean } = {}): { ok: boolean; out: string } {
+function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
   const auth = opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [];
   try {
-    return { ok: true, out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() };
+    return {
+      ok: true,
+      out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
+    };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
     const out = `${e.stdout ?? ""}${e.stderr ?? ""}`.trim();
@@ -154,15 +157,18 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
 /**
  * Append a flight log note for `sha` to the baseline's refs/notes/atc. Landings are serialized by ATC's lock, so a
  * plain (non-force) push is enough; if it is rejected, the note is reported missing and nothing is overwritten.
- * The local ref is per baseline: one warm container serves several baselines.
+ * The local ref is per baseline, so it never mixes notes from two runs. Main is already pushed, so every call here is
+ * time-limited: a stalled note must not use up the checker's budget and leave a landed PR unrecorded by ATC.
  */
+const NOTE_TIMEOUT_MS = 20_000;
+
 function writeNote(base: RepoRef, sha: string, note: string): { ok: boolean; error?: string } {
   const local = `refs/notes/agentmesh-${base.name}`;
   git(["update-ref", "-d", local], { allowFail: true });
-  git(["fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true }); // a new baseline has no notes yet
-  const add = git(["notes", `--ref=${local}`, "add", "-f", "-m", note, sha], { allowFail: true });
+  git(["fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }); // a new baseline has no notes yet
+  const add = git(["notes", `--ref=${local}`, "add", "-f", "-F", "-", sha], { allowFail: true, input: note, timeoutMs: NOTE_TIMEOUT_MS });
   if (!add.ok) return { ok: false, error: add.out.slice(0, 200) };
-  const push = timed("push note", () => git(["push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true }));
+  const push = timed("push note", () => git(["push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));
   return push.ok ? { ok: true } : { ok: false, error: push.out.slice(0, 200) };
 }
 

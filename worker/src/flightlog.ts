@@ -46,8 +46,9 @@ const about = (s: FlightSignal) => `${s.about_fork ? ` with ${prLabel(s.about_fo
 /** The note text ATC attaches to the landed commit. */
 export function flightLogNote(f: FlightLogInput): string {
   const pr = prLabel(f.fork);
-  const lines = [`ATC flight log: ${pr} (agent ${f.agent})`, "", `ATC-PR: ${pr}`, `ATC-Agent: ${oneLine(f.agent)}`];
-  for (const i of f.intents) lines.push(`ATC-Intent: ${oneLine(i)}`);
+  const lines = [`ATC flight log: ${pr} (agent ${oneLine(f.agent, 40)})`, "", `ATC-PR: ${pr}`, `ATC-Agent: ${oneLine(f.agent)}`];
+  // Latest distinct intents only: an agent re-declaring in a loop must not grow the note without bound.
+  for (const i of [...new Set(f.intents.map((x) => oneLine(x)))].slice(-3)) lines.push(`ATC-Intent: ${i}`);
   const seen = new Set<string>();
   for (const s of [...f.signals].sort((a, b) => a.created_at - b.created_at)) {
     if (!STORY_KINDS.has(s.kind)) continue;
@@ -58,7 +59,7 @@ export function flightLogNote(f: FlightLogInput): string {
   const steps = f.clearances.length > 8 ? [...f.clearances.slice(0, 3), ...f.clearances.slice(-5)] : f.clearances;
   for (const c of steps) lines.push(`ATC-Clearance: ${WORD[c.clearance] ?? c.clearance.toUpperCase()} (${oneLine(c.reason, 160)})`);
   for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at))
-    lines.push(`ATC-Go-Around: ${s.about_fork ? `${prLabel(s.about_fork)} landed first and conflicted${s.symbol ? ` on ${s.symbol}` : ""}; rebased onto main and fixed` : oneLine(s.message)}`);
+    lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${prLabel(s.about_fork)} landed (conflict${s.symbol ? ` on ${s.symbol}` : ""}); landed after a new push` : oneLine(s.message)}`);
   lines.push(`ATC-Diff-Lines: ${f.diffLines}`, `ATC-Landed-Onto: ${f.onto.slice(0, 12)}`);
   return lines.join("\n");
 }

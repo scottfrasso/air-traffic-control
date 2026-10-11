@@ -97,8 +97,8 @@ export class Coordinator extends DurableObject<Env> {
       signals: model.signals
         .filter((x) => x.resolved_at === null && ["semantic_conflict", "merge_conflict", "rebase_required"].includes(x.kind))
         .map(({ kind, fork, about_fork, symbol }) => ({ kind, fork, about_fork, symbol, resolved_at: null })),
-      flightLogs: model.flightLogs,
-      savings: model.savings,
+      savings: model.savings, // flight logs never change once written: the timeline carries them once
+
     });
     const last = this.sql.exec<{ state: string }>("SELECT state FROM snapshots ORDER BY id DESC LIMIT 1").toArray()[0]?.state;
     if (last !== compact) this.sql.exec("INSERT INTO snapshots(at, state) VALUES (?, ?)", Date.now(), compact);
@@ -130,7 +130,7 @@ export class Coordinator extends DurableObject<Env> {
   async timelineJson(): Promise<string> {
     const snapshots = this.sql.exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id").toArray();
     const events = this.sql.exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id").toArray();
-    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
+    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"flightLogs":${JSON.stringify(this.flightLogs())},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
       .map((e) => JSON.stringify({ id: e.id, at: e.at, kind: e.kind, fork: e.fork, detail: JSON.parse(e.detail) as unknown }))
       .join(",")}]}`;
   }
@@ -789,9 +789,9 @@ export class Coordinator extends DurableObject<Env> {
   /** The PR's story so far, as the note ATC attaches to its landed commit. */
   private flightLogNote(f: ForkRow, onto: string): string {
     const snapshots = this.sql
-      .exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id")
+      .exec<{ at: number; sequence: string | null }>("SELECT at, json_extract(state, '$.sequence') AS sequence FROM snapshots ORDER BY id")
       .toArray()
-      .map((r): SequenceSnapshot => ({ at: r.at, sequence: (JSON.parse(r.state) as { sequence?: SequenceSnapshot["sequence"] }).sequence ?? [] }));
+      .map((r): SequenceSnapshot => ({ at: r.at, sequence: r.sequence ? (JSON.parse(r.sequence) as SequenceSnapshot["sequence"]) : [] }));
     snapshots.push({ at: Date.now(), sequence: this.sequence() }); // the latest clearance may not be recorded yet
     return flightLogNote({
       fork: f.name,

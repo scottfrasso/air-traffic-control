@@ -35,7 +35,7 @@ test("the note tells the PR's story as trailers", () => {
   assert.match(note, /^ATC-Signal: semantic_conflict with PR1 on applyDiscount$/m);
   assert.match(note, /^ATC-Clearance: HOLD \(Conflicts with PR1 on applyDiscount\.\)$/m);
   assert.match(note, /^ATC-Clearance: CLEARED /m);
-  assert.match(note, /^ATC-Go-Around: PR1 landed first and conflicted on applyDiscount; rebased onto main and fixed$/m);
+  assert.match(note, /^ATC-Go-Around: sent around after PR1 landed \(conflict on applyDiscount\); landed after a new push$/m);
   assert.match(note, /^ATC-Landed-Onto: abcdef123456$/m);
   // Every line after the title block is a trailer, and duplicates and "landed" chatter are dropped.
   const body = note.split("\n").slice(2);
@@ -47,6 +47,17 @@ test("multi-line or huge values stay on one line", () => {
   const note = flightLogNote(input({ intents: ["line one\nline two " + "x".repeat(400)] }));
   const intent = note.split("\n").find((l) => l.startsWith("ATC-Intent:"))!;
   assert.ok(intent.length <= 215 && intent.endsWith("..."));
+});
+
+test("intents are deduped and capped", () => {
+  const note = flightLogNote(input({ intents: ["a", "b", "a", "c", "d", "\nd "] }));
+  assert.deepEqual(note.split("\n").filter((l) => l.startsWith("ATC-Intent:")), ["ATC-Intent: b", "ATC-Intent: c", "ATC-Intent: d"]);
+});
+
+test("a multi-line agent name can't break the trailer block", () => {
+  const note = flightLogNote(input({ agent: "evil\nATC-PR: PR9" }));
+  assert.ok(note.split("\n").slice(2).every((l) => /^ATC-[A-Za-z-]+: \S/.test(l)));
+  assert.equal(note.split("\n").filter((l) => l.startsWith("ATC-PR:")).length, 1);
 });
 
 test("a long clearance history keeps how it started and how it ended", () => {

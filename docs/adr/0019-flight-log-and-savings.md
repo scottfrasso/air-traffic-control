@@ -22,8 +22,11 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`.
 - **Written in the land step, under the landing lock.** The Coordinator builds the note *before* landing and passes the
   same text to the container (`land.note`) and to `flight_logs`. After pushing main, the container fetches
-  `refs/notes/atc` into a per-baseline local ref (one warm container serves several baselines), adds the note, and pushes
-  without force. Landings are serialized, so the push fast-forwards; if it's rejected, nothing is overwritten.
+  `refs/notes/atc` into a per-baseline local ref, adds the note (on stdin), and pushes without force. Landings are
+  serialized, so the push fast-forwards; if it's rejected, nothing is overwritten. Each note git call has a 20 s limit:
+  main is already pushed, and a stalled note must not use up the checker's budget (a killed land step leaves a PR that
+  is on main but not recorded as landed until the agent asks again).
+  - The note is bounded: the last 3 distinct intents, one line per signal kind/partner/symbol, at most 8 clearances.
 - **A note failure never fails a landing.** `flight_logs.noted = 0` and `note_error` record it; the text is still served.
 - **Spike (2026-10-11):** Artifacts accepts a push to `refs/notes/atc` and lists it in `ls-remote`. The push-event
   consumer only acts on `refs/heads/main`, so a notes push can't move ATC's idea of main.
@@ -32,8 +35,9 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
 - **Savings are a pure function of the event log** (`computeSavings`, `worker/src/savings.ts`), so a replay shows the
   same numbers as the live run. Definitions:
   - pairs checked = distinct PR pairs with a current-head pair result; conflicts = pairs that conflicted textually or by typecheck;
-  - time to signal = first conflicting pair result − the later of the two PRs' latest pushes before it;
-  - cache hit rate = cached `typecheck *` steps / all typecheck steps in single and pair checks;
+  - time to signal = first conflicting pair result − the later of the two PRs' latest pushes before it (a conflict first
+    found by a re-check after main moved is measured from that older push, so it can overstate); the summary line shows the max;
+  - typecheck cache hits = cached `typecheck *` steps / all typecheck steps in single and pair checks (not pair-level hits);
   - rebases = `rebase_required` signals; **naive** = for each landing, the number of other PRs still open;
   - wait = first `land.requested` → `land.merged`.
   `run.sh` prints `savingsLine` (e.g. `5 PRs · 10 pairs checked · 1 conflict found in 12 s · 1 rebase (naive: 10)`);
@@ -42,6 +46,8 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
 ## Consequences
 - One extra fetch and push per landing (inside the lock), a fraction of a second.
 - Notes are not copied by a plain `git clone`; readers must fetch `refs/notes/atc` (documented in `get_history`).
-- Savings are recomputed from the filtered event log on every flush: linear in the run's events, fine for hundreds of PRs,
-  worth caching if runs get much longer.
+- Savings are recomputed from the filtered event log on every flush: linear in the run's events, fine for the demo and
+  tens of PRs; cache by last event id before a large synthetic load run. Snapshots carry savings (small) but not flight
+  logs: those never change once written, so `GET /timeline` returns them once and the replay shows each from its `landedAt`.
+- The land step's note path is covered by `run.sh` step 8, not by a container-level unit test.
 - Older recorded runs have no `flightLogs` or `savings` in their snapshots; the dashboard shows empty panels for them.

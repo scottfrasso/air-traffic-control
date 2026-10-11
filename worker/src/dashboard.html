@@ -401,11 +401,14 @@
   }
 
   // ── flight log: click a parked plane to read why it landed the way it did (issue #15) ──
-  let flightFork = null;
+  let flightFork = null, flightShown = null;
   function showFlight(fork) { flightFork = fork; renderFlight(); }
   function renderFlight() {
     const el = document.getElementById("flight");
     const log = flightFork && (state.flightLogs || []).find((l) => l.fork === flightFork);
+    const key = log ? `${log.fork}|${log.note}|${log.noted}` : "";
+    if (key === flightShown) return; // a log never changes once written: don't reset the reader's scroll on every push
+    flightShown = key;
     if (!log) {
       el.innerHTML = `<h2>FLIGHT LOG</h2><p class="empty">Click a parked plane to read its flight log.</p>`;
       return;
@@ -492,7 +495,7 @@
       if (i !== lastI || events.length !== (state && state.events ? state.events.length : -1)) {
         const first = lastI === -1;
         lastI = i;
-        applyState({ ...snaps[i].state, events: events.slice().reverse() }, first);
+        applyState({ ...snaps[i].state, flightLogs: (tl.flightLogs || []).filter((l) => l.landedAt <= t), events: events.slice().reverse() }, first);
       }
       document.getElementById("pg").value = Math.round((v / total) * 1000);
       document.getElementById("clk").textContent = `${fmt(v)} / ${fmt(total)}`;
