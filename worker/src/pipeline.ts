@@ -6,8 +6,9 @@ export interface PipelineParams {
   baseline: string;
   fork: string;
   sha: string;
-  /** "recheck": main moved; only re-verify the PR merged onto the new main. */
-  kind?: "push" | "recheck";
+  /** "recheck": main moved; only re-verify the PR merged onto the new main. "pairs": only re-run the pair checks in `others`. */
+  kind?: "push" | "recheck" | "pairs";
+  others?: string[];
 }
 
 /**
@@ -17,7 +18,7 @@ export interface PipelineParams {
  */
 export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
   override async run(event: WorkflowEvent<PipelineParams>, step: WorkflowStep) {
-    const { baseline, fork, sha, kind = "push" } = event.payload;
+    const { baseline, fork, sha, kind = "push", others = [] } = event.payload;
     const coordinator = this.env.COORDINATOR.getByName(baseline);
     const slow: WorkflowStepConfig = { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" };
     // Is this PR, merged onto the current main, green? (Tokens are minted inside the step so they never land in Workflow state.)
@@ -25,10 +26,28 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
       step.do("check PR on current main", slow, async () => {
         await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork), baseline: await readRef(this.env, baseline) }));
       });
+    // All pairs in parallel (each in its own work dir in the same warm container).
+    const pairs = async (list: string[]) => {
+      const statuses = await Promise.all(
+        list.map((other) =>
+          step.do(`speculative merge with ${other}`, slow, async () => {
+            const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({
+              mode: "pair",
+              a: await readRef(this.env, fork),
+              b: await readRef(this.env, other),
+              baseline: await readRef(this.env, baseline),
+            });
+            return (await coordinator.applyPair(out)).status;
+          }),
+        ),
+      );
+      return Object.fromEntries(list.map((o, i) => [o, statuses[i]]));
+    };
     if (kind === "recheck") {
       await onMain();
       return { fork, sha, kind };
     }
+    if (kind === "pairs") return { fork, sha, kind, merges: await pairs(others) };
 
     const index = await step.do("index fork vs base", { retries: { limit: 3, delay: "2 seconds", backoff: "exponential" } }, () =>
       indexFork(this.env, baseline, fork, sha),
@@ -40,21 +59,7 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
     const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
     if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
     const mainCheck = onMain();
-    // All pairs in parallel (each in its own work dir in the same warm container).
-    const statuses = await Promise.all(
-      plan.others.map((other) =>
-        step.do(`speculative merge with ${other}`, slow, async () => {
-          const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({
-            mode: "pair",
-            a: await readRef(this.env, fork),
-            b: await readRef(this.env, other),
-            baseline: await readRef(this.env, baseline),
-          });
-          return (await coordinator.applyPair(out)).status;
-        }),
-      ),
-    );
-    const results = Object.fromEntries(plan.others.map((o, i) => [o, statuses[i]]));
+    const results = await pairs(plan.others);
     await mainCheck;
     return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
   }

@@ -52,3 +52,9 @@ test("a PR that fits alone but not on current main goes around with the reason",
   assert.equal(seq[0]!.clearance, "go_around");
   assert.match(seq[0]!.reason, /Doesn't fit on current main \(src\/checkout\.ts:6 TS2345 boom\)/);
 });
+
+test("a PR with a pair check outstanding is never cleared (issue #5)", () => {
+  const seq = buildSequence([f(1, { diff_lines: 3 }), f(2, { diff_lines: 7 })], new Map(), "base", new Map(), new Set(["shop--pr1", "shop--pr2"]));
+  assert.deepEqual(seq.map((e) => [e.pr, e.clearance]), [["PR1", "checking"], ["PR2", "checking"]]);
+  assert.equal(seq[0]!.reason, "Checking against the other PRs.");
+});

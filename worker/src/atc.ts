@@ -32,8 +32,15 @@ export function prLabel(fork: string): string {
 /**
  * `goAround`: PRs that must rebase because they conflict with something that already landed (fork → short reason).
  * Everyone else stays in line: ATC lands them by merging onto main (merge queue), so they never rebase just because main moved.
+ * `pairsPending`: PRs still missing a speculative-merge result against another PR's current head; never cleared until it's in.
  */
-export function buildSequence(forks: ForkRow[], conflicts: Map<string, Conflict[]>, baselineHead: string, goAround: Map<string, string> = new Map()): SequenceEntry[] {
+export function buildSequence(
+  forks: ForkRow[],
+  conflicts: Map<string, Conflict[]>,
+  baselineHead: string,
+  goAround: Map<string, string> = new Map(),
+  pairsPending: Set<string> = new Set(),
+): SequenceEntry[] {
   const active = forks.filter((f) => f.status === "active").sort((a, b) => landingOrder(a, b, baselineHead));
   const byName = new Map(active.map((f) => [f.name, f]));
   const out: SequenceEntry[] = [];
@@ -66,6 +73,10 @@ export function buildSequence(forks: ForkRow[], conflicts: Map<string, Conflict[
       const detail = f.check_detail ? firstLine(f.check_detail) : "";
       if (detail.startsWith("on main:")) entry("go_around", `Doesn't fit on current main (${detail.slice(9)}). Rebase and fix.`);
       else entry("fix", `Fails typecheck${detail ? `: ${detail}` : ""}.`);
+      continue;
+    }
+    if (pairsPending.has(f.name)) {
+      entry("checking", "Checking against the other PRs.");
       continue;
     }
     // A conflicting PR that is ahead in the order lands first; this one holds.

@@ -10,7 +10,12 @@ Nothing.
 
 ## Works (verified against deployed Cloudflare resources)
 
-- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order **without rebasing**, about 56 s.
+- **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order **without rebasing**, about 68 s
+  (last run 2026-10-11, `shop-261011095459`, after the landing-reliability fixes).
+- **Landing reliability (#1, #3, #5, 2026-10-11):** the land check pins the fork head ATC checked and retries if the fork moved;
+  the landing lock is token-owned and outlives the checker timeout; every pair of open PRs must have a speculative-merge result
+  for their **current** heads before either is cleared or lands (missing or stale pairs are re-queued by the reconcile alarm,
+  by a stale result, and by a land request). Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **Merge-queue landing (ADR-0015):** ATC merges each PR onto the current main, typechecks that exact commit, and pushes. After a landing,
   only conflicting PRs go around; the rest are re-checked automatically.
 - **Real agents, concurrently:** two real Claude Code agents (colliding tasks) both landed with no human help; one was sent around
@@ -36,7 +41,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 16 unit tests, strict TypeScript in every package.
+  clean before the first push), 33 unit tests, strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 
