@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landingOrder, mayRelease, outstandingPairs, parseLock, takeLock, type PairCheckRow } from "../src/landing";
+import {
+  approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landingOrder, mayRelease, outstandingPairs, PAIR_RETRY_MS, pairResultIsCurrent,
+  pairsToQueue, parseLock, takeLock, type PairCheckRow, type PairQueueRow,
+} from "../src/landing";
 import type { ForkRow } from "../src/types";
 
 const fork = (name: string, over: Partial<ForkRow> = {}): ForkRow => ({
@@ -45,22 +48,81 @@ test("lock parsing round-trips and treats legacy or garbage values as free", () 
 
 // ── pair coverage (issue #5) ──
 
-test("two near-simultaneous pushes: stale pair results don't count; the current-head pair must be checked", () => {
+/**
+ * In-memory airspace that applies pair results and re-queues exactly as the Coordinator does, through the same
+ * decision functions (the Coordinator itself needs the Workers runtime).
+ */
+function airspace(...names: string[]) {
+  const forks = new Map(names.map((n) => [n, fork(n, { head_sha: `${n}0`, processed_sha: `${n}0` })]));
   const checks: PairCheckRow[] = [];
-  let a = fork("a", { head_sha: "a1" });
-  let b = fork("b", { head_sha: "b0" });
-  assert.deepEqual(outstandingPairs([a, b], checks), [{ a: "a", b: "b", shaA: "a1", shaB: "b0" }]);
-  // Both push again at about the same time; each pipeline's pair check saw the other's OLD head.
-  a = { ...a, head_sha: "a2" };
-  b = { ...b, head_sha: "b1" };
-  checks.push({ fork_a: "a", fork_b: "b", sha_a: "a2", sha_b: "b0" }); // from a's pipeline
-  checks.splice(0, 1, { fork_a: "a", fork_b: "b", sha_a: "a1", sha_b: "b1" }); // b's result overwrites the row
-  assert.deepEqual(outstandingPairs([a, b], checks), [{ a: "a", b: "b", shaA: "a2", shaB: "b1" }]);
-  assert.deepEqual([...forksWaitingOnPairs(outstandingPairs([a, b], checks))].sort(), ["a", "b"]);
-  // The re-queued check for the current heads lands: nothing outstanding.
-  checks.splice(0, 1, { fork_a: "a", fork_b: "b", sha_a: "a2", sha_b: "b1" });
-  assert.deepEqual(outstandingPairs([a, b], checks), []);
+  const queue: PairQueueRow[] = [];
+  const all = () => [...forks.values()];
+  return {
+    push(n: string, sha: string, indexed = true) {
+      forks.set(n, { ...forks.get(n)!, head_sha: sha, processed_sha: indexed ? sha : forks.get(n)!.processed_sha });
+    },
+    /** applyPair: record only results for both current heads. */
+    result(a: string, shaA: string, b: string, shaB: string) {
+      if (!pairResultIsCurrent(all(), a, shaA, b, shaB)) return false;
+      const i = checks.findIndex((c) => c.fork_a === a && c.fork_b === b);
+      const row = { fork_a: a, fork_b: b, sha_a: shaA, sha_b: shaB };
+      if (i >= 0) checks[i] = row;
+      else checks.push(row);
+      return true;
+    },
+    /** requeuePairs: returns what would be started, and marks it queued. */
+    requeue(now: number) {
+      const due = pairsToQueue(outstandingPairs(all(), checks), queue, now);
+      for (const d of due) {
+        const i = queue.findIndex((q) => q.fork_a === d.a && q.fork_b === d.b);
+        const row = { fork_a: d.a, fork_b: d.b, sha_a: d.shaA, sha_b: d.shaB, queued_at: now };
+        if (i >= 0) queue[i] = row;
+        else queue.push(row);
+      }
+      return due;
+    },
+    waiting: () => forksWaitingOnPairs(outstandingPairs(all(), checks)),
+  };
+}
+
+test("a late result from an older push can't overwrite the current one (review finding 1)", () => {
+  const s = airspace("a", "b");
+  s.push("a", "a1");
+  s.push("a", "a2");
+  assert.equal(s.result("a", "a2", "b", "b0"), true); // the newer push's check finishes first
+  assert.equal(s.result("a", "a1", "b", "b0"), false); // the slower, older one is dropped
+  assert.deepEqual([...s.waiting()], []);
 });
+
+test("a result for a push ATC hasn't seen yet doesn't count; once seen, that pair is re-queued (review finding 2)", () => {
+  const s = airspace("a", "b");
+  s.push("a", "a1");
+  s.requeue(0);
+  // The container fetched b1 before ATC heard about it: not current, so not recorded (and no signals were raised).
+  assert.equal(s.result("a", "a1", "b", "b1"), false);
+  s.push("b", "b1");
+  assert.deepEqual([...s.waiting()].sort(), ["a", "b"]); // a can't be cleared yet
+  assert.deepEqual(s.requeue(1), [{ a: "a", b: "b", shaA: "a1", shaB: "b1" }]); // queued at the new heads right away
+  assert.equal(s.result("a", "a1", "b", "b1"), true);
+  assert.deepEqual([...s.waiting()], []);
+});
+
+test("a lost pair check is re-queued after the retry window, not before", () => {
+  const s = airspace("a", "b");
+  s.push("a", "a1");
+  assert.equal(s.requeue(1_000).length, 1);
+  assert.equal(s.requeue(1_000 + PAIR_RETRY_MS - 1).length, 0); // still in flight
+  assert.equal(s.requeue(1_000 + PAIR_RETRY_MS + 1).length, 1); // no result: assume lost
+});
+
+test("a PR whose push never gets indexed doesn't block the PRs it pairs with (review finding 3)", () => {
+  const s = airspace("a", "b");
+  s.push("a", "a1");
+  s.push("b", "b1", false); // b's pipeline failed: head moved, never processed
+  assert.deepEqual([...s.waiting()], []);
+  assert.deepEqual(s.requeue(0), []);
+});
+
 test("forks with no pushed changes, or not active, need no pair checks", () => {
   const idle = fork("idle", { head_sha: "base" });
   const gone = fork("gone", { status: "landed", head_sha: "g1" });

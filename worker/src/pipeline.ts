@@ -8,7 +8,8 @@ export interface PipelineParams {
   sha: string;
   /** "recheck": main moved; only re-verify the PR merged onto the new main. "pairs": only re-run the pair checks in `others`. */
   kind?: "push" | "recheck" | "pairs";
-  others?: string[];
+  /** "pairs": the other PRs and the heads they were queued at. */
+  others?: Array<{ name: string; sha: string }>;
 }
 
 /**
@@ -27,21 +28,27 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
         await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork), baseline: await readRef(this.env, baseline) }));
       });
     // All pairs in parallel (each in its own work dir in the same warm container).
-    const pairs = async (list: string[]) => {
+    // A pair that still fails after its retries is recorded as failed (never left outstanding, which would block landing).
+    const pairs = async (list: Array<{ name: string; sha: string }>) => {
       const statuses = await Promise.all(
-        list.map((other) =>
-          step.do(`speculative merge with ${other}`, slow, async () => {
-            const out = await checkerFor(this.env, baseline, [fork, other].sort().join("|")).run({
-              mode: "pair",
-              a: await readRef(this.env, fork),
-              b: await readRef(this.env, other),
-              baseline: await readRef(this.env, baseline),
+        list.map(async (other) => {
+          try {
+            return await step.do(`speculative merge with ${other.name}`, slow, async () => {
+              const out = await checkerFor(this.env, baseline, [fork, other.name].sort().join("|")).run({
+                mode: "pair",
+                a: await readRef(this.env, fork),
+                b: await readRef(this.env, other.name),
+                baseline: await readRef(this.env, baseline),
+              });
+              return (await coordinator.applyPair(out)).status;
             });
-            return (await coordinator.applyPair(out)).status;
-          }),
-        ),
+          } catch (err) {
+            await step.do(`record failed merge with ${other.name}`, () => coordinator.applyPairFailure(fork, sha, other.name, other.sha, (err as Error).message));
+            return "error";
+          }
+        }),
       );
-      return Object.fromEntries(list.map((o, i) => [o, statuses[i]]));
+      return Object.fromEntries(list.map((o, i) => [o.name, statuses[i]]));
     };
     if (kind === "recheck") {
       await onMain();

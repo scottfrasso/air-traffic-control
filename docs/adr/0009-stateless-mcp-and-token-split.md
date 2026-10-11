@@ -26,3 +26,9 @@ Mitigations:
 - The reconcile alarm stops after 10 minutes without activity (`RECONCILE_IDLE_MS`), and the next API call restarts it.
 - `demo/src/teardown.ts` abandons forks, which stops alarms, and deletes old repos and subscriptions.
 - Each demo run uses a fresh baseline, so it gets a fresh DO on current code (ADR-0008).
+
+## Gotcha: RPC shape skew right after a deploy (2026-10-11)
+For roughly the first minute after `wrangler deploy`, a new Workflow instance can call a Coordinator that still runs
+the previous version. When a deploy changes the shape of a Coordinator RPC (here `checkPlan` returning objects instead of
+names), runs started in that window fail in odd ways ("speculative merge with undefined", calls to methods that don't
+exist yet). Wait about a minute after a deploy that changes Coordinator/Workflow RPCs before running `./demo/run.sh`.
