@@ -77,6 +77,21 @@ function createServer(env: Env) {
   );
 
   server.registerTool(
+    "get_history",
+    {
+      description:
+        "Why main looks the way it does: the flight log of every PR that landed, oldest first (intent, signals it got, ATC's clearances and reasons, " +
+        "go-arounds). The same text is a git note on each landed commit: `git fetch <baseline> refs/notes/atc:refs/notes/atc && git log --notes=atc`. " +
+        "Pass your fork to also get your own PR's log so far.",
+      inputSchema: z.object({
+        repo: z.string().describe("Baseline repo name"),
+        fork: z.string().optional().describe("Your fork name, to include your in-flight PR's log"),
+      }),
+    },
+    async ({ repo, fork }) => text(await (await coordinatorFor(env, fork ? baselineOf(fork) : repo)).getHistory(fork)),
+  );
+
+  server.registerTool(
     "request_land",
     {
       description:

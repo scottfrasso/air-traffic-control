@@ -63,8 +63,23 @@ export interface CoordinatorState {
   sequence: import("./atc").SequenceEntry[];
   signals: SignalRow[];
   intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number }>;
+  /** Landed PRs' flight logs, oldest first (ADR-0019). */
+  flightLogs: FlightLogEntry[];
+  /** What ATC saved in this run, from the event log (issue #17). */
+  savings: import("./savings").Savings;
   events: Array<{ id: number; at: number; kind: string; fork: string | null; detail: unknown }>;
 }
+
+export type FlightLogEntry = {
+  fork: string;
+  pr: string;
+  landedSha: string;
+  landedAt: number;
+  /** The git note on the landed commit (refs/notes/atc). */
+  note: string;
+  /** False if the note couldn't be pushed; the text is still kept here. */
+  noted: boolean;
+};
 
 export type SignalRow = {
   id: number;

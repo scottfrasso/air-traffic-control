@@ -53,6 +53,17 @@
   .c-checking { color: var(--cyan); }
   .landed { color: var(--dim); margin-top: 10px; }
   .landed b { color: var(--green); font-weight: normal; }
+  .landed button { padding: 0 2px; font: inherit; color: var(--green); background: none; border: 0; border-bottom: 2px dotted var(--green); cursor: pointer; }
+  canvas.pick { cursor: pointer; }
+
+  .stats { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
+  .stats dt { color: var(--dim); }
+  .stats dd { margin: 0; text-align: right; }
+  .stats .win { color: var(--green); }
+  .flight pre { margin: 0; max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.15 "VT323", ui-monospace, monospace; }
+  .flight .k { color: var(--cyan); }
+  .flight .hint { color: var(--dim); margin: 8px 0 0; }
+  .flight button { float: right; padding: 2px 6px; font: 8px "Press Start 2P", monospace; color: var(--dim); background: none; border: 2px solid var(--edge); cursor: pointer; }
 
   .log { list-style: none; margin: 0; padding: 0; }
   .log li { padding: 2px 0; }
@@ -357,12 +368,68 @@
     const seq = state.sequence || [];
     const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
       <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span></li>`).join("");
-    const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at).map((f) => pr(f.name));
+    const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at);
+    const logged = new Set((state.flightLogs || []).map((l) => l.fork));
+    const names = landed.map((f) => logged.has(f.name) ? `<button type="button" data-flight="${esc(f.name)}" title="Show flight log">${esc(pr(f.name))}</button>` : `<b>${esc(pr(f.name))}</b>`);
     document.getElementById("seq").innerHTML = (rows ? `<ul class="seq">${rows}</ul>` : `<p class="empty">No traffic. PRs appear when agents start work.</p>`)
-      + (landed.length ? `<p class="landed">Landed: <b>${landed.join(", ")}</b></p>` : "");
+      + (landed.length ? `<p class="landed">Landed: ${names.join(", ")}</p>` : "");
+    document.querySelectorAll("[data-flight]").forEach((b) => (b.onclick = () => showFlight(b.dataset.flight)));
+    renderSavings();
+    renderFlight();
     const lines = state.events.map((e) => [e, logLine(e)]).filter(([, l]) => l).slice(0, 10)
       .map(([e, [t, cls]]) => `<li><time>${hhmmss(e.at)}</time><span class="${cls}">${esc(t)}</span></li>`).join("");
     document.getElementById("log").innerHTML = lines || `<li class="empty">Frequency quiet.</li>`;
+  }
+
+  // ── savings: what ATC saved, in numbers (issue #17) ────────────────────
+  const secs = (ms) => `${Math.round(ms / 1000)} s`;
+  function renderSavings() {
+    const s = state.savings;
+    const el = document.getElementById("savings");
+    if (!s || !s.prs) { el.innerHTML = `<p class="empty">Numbers appear once PRs are checked.</p>`; return; }
+    const avg = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+    const wait = avg(s.waitMs);
+    const rows = [
+      ["PRs", `${s.prs} (${s.landed} landed)`],
+      ["Pairs checked", `${s.pairsChecked}`],
+      ["Conflicts found", `${s.conflicts}${s.signalMs.length ? ` in ${secs(Math.max(...s.signalMs))}` : ""}`],
+      ["Typecheck cache hits", s.typechecks ? `${Math.round((s.cacheHits / s.typechecks) * 100)}% of ${s.typechecks}` : "-"],
+      ["Rebases (ATC / naive)", `${s.rebases} / ${s.naiveRebases}`, s.naiveRebases > s.rebases],
+      ["Avg wait to land", wait === null ? "-" : secs(wait)],
+    ];
+    el.innerHTML = `<dl class="stats">${rows.map(([k, v, win]) => `<dt>${k}</dt><dd${win ? ' class="win"' : ""}>${esc(v)}</dd>`).join("")}</dl>`;
+  }
+
+  // ── flight log: click a parked plane to read why it landed the way it did (issue #15) ──
+  let flightFork = null, flightShown = null;
+  function showFlight(fork) { flightFork = fork; renderFlight(); }
+  function renderFlight() {
+    const el = document.getElementById("flight");
+    const log = flightFork && (state.flightLogs || []).find((l) => l.fork === flightFork);
+    const key = log ? `${log.fork}|${log.note}|${log.noted}` : "";
+    if (key === flightShown) return; // a log never changes once written: don't reset the reader's scroll on every push
+    flightShown = key;
+    if (!log) {
+      el.innerHTML = `<h2>FLIGHT LOG</h2><p class="empty">Click a parked plane to read its flight log.</p>`;
+      return;
+    }
+    const body = esc(log.note).replace(/^(ATC-[A-Za-z-]+:)/gm, '<span class="k">$1</span>');
+    el.innerHTML = `<h2>FLIGHT LOG · ${esc(log.pr)} <button type="button" id="closeFlight">CLOSE</button></h2><pre>${body}</pre>
+      <p class="hint">${log.noted ? `git note on ${esc(log.landedSha.slice(0, 7))}: git log --notes=atc` : "Writing the git note..."}</p>`;
+    document.getElementById("closeFlight").onclick = () => showFlight(null);
+  }
+  function planeAt(ev) {
+    const r = canvas.getBoundingClientRect();
+    const x = (ev.clientX - r.left) * (W / r.width), y = (ev.clientY - r.top) * (H / r.height);
+    const logged = new Set((state && state.flightLogs || []).map((l) => l.fork));
+    const shown = state ? targets() : new Map(); // only planes at a gate: older landings are parked out of sight
+    let best = null, bestD = 16;
+    for (const [name, p] of planes) {
+      if (!logged.has(name) || !shown.has(name)) continue;
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < bestD) { best = name; bestD = d; }
+    }
+    return best;
   }
 
   // ── live: ATC pushes every change over a WebSocket (polling only as fallback) ──
@@ -429,7 +496,7 @@
       if (i !== lastI || events.length !== (state && state.events ? state.events.length : -1)) {
         const first = lastI === -1;
         lastI = i;
-        applyState({ ...snaps[i].state, events: events.slice().reverse() }, first);
+        applyState({ ...snaps[i].state, flightLogs: (tl.flightLogs || []).filter((l) => l.landedAt <= t), events: events.slice().reverse() }, first);
       }
       document.getElementById("pg").value = Math.round((v / total) * 1000);
       document.getElementById("clk").textContent = `${fmt(v)} / ${fmt(total)}`;
@@ -447,12 +514,16 @@
       <div class="controls" id="controls" hidden></div></div>
       <aside>
         <section><h2>LANDING SEQUENCE</h2><div id="seq"></div></section>
+        <section class="flight" id="flight"></section>
+        <section><h2>SAVINGS</h2><div id="savings"></div></section>
         <section><h2>ATC LOG</h2><ul class="log" id="log"></ul></section>
       </aside>
     </main>`;
     canvas = document.getElementById("scene");
     ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
+    canvas.addEventListener("click", (ev) => { const f = planeAt(ev); if (f) showFlight(f); });
+    canvas.addEventListener("mousemove", (ev) => canvas.classList.toggle("pick", !!planeAt(ev)));
     try { await document.fonts.load("8px 'Press Start 2P'"); } catch (_) {}
     const link = document.getElementById("replayLink");
     if (new URLSearchParams(location.search).has("replay")) {

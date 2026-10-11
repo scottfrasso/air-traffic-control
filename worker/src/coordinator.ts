@@ -2,16 +2,19 @@ import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
-import { checkerFor, type LandResult, type PairResult, type SingleResult } from "./checker";
+import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
   approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
   type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
+import { NoteWriter, takeBatch } from "./notes";
+import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
+import { computeSavings, type LogEvent } from "./savings";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { CoordinatorState, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import type { CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Stop polling after this long without a push or API activity, so idle DOs hibernate (and pick up new deploys). */
@@ -95,6 +98,8 @@ export class Coordinator extends DurableObject<Env> {
       signals: model.signals
         .filter((x) => x.resolved_at === null && ["semantic_conflict", "merge_conflict", "rebase_required"].includes(x.kind))
         .map(({ kind, fork, about_fork, symbol }) => ({ kind, fork, about_fork, symbol, resolved_at: null })),
+      savings: model.savings, // flight logs never change once written: the timeline carries them once
+
     });
     const last = this.sql.exec<{ state: string }>("SELECT state FROM snapshots ORDER BY id DESC LIMIT 1").toArray()[0]?.state;
     if (last !== compact) this.sql.exec("INSERT INTO snapshots(at, state) VALUES (?, ?)", Date.now(), compact);
@@ -126,7 +131,7 @@ export class Coordinator extends DurableObject<Env> {
   async timelineJson(): Promise<string> {
     const snapshots = this.sql.exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id").toArray();
     const events = this.sql.exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id").toArray();
-    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
+    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"flightLogs":${JSON.stringify(this.flightLogs())},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
       .map((e) => JSON.stringify({ id: e.id, at: e.at, kind: e.kind, fork: e.fork, detail: JSON.parse(e.detail) as unknown }))
       .join(",")}]}`;
   }
@@ -471,7 +476,7 @@ export class Coordinator extends DurableObject<Env> {
     const errs = r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
     const detail = r.result.ok ? "merges onto main and typechecks" : r.mainConflict ? `on main: ${errs}` : errs;
     if (r.baseHead && r.baseHead !== this.meta("baseline_head")) {
-      this.log("check.single.stale", { checkedOn: r.baseHead }, r.repo); // main moved during the check; a recheck follows
+      this.log("check.single.stale", { checkedOn: r.baseHead, timings: r.timings ?? [] }, r.repo); // main moved during the check; a recheck follows
       return;
     }
     this.setCheck(r.repo, r.forkSha, r.result.ok, detail, r.baseHead);
@@ -697,9 +702,19 @@ export class Coordinator extends DurableObject<Env> {
     this.setMeta("landing", JSON.stringify(lock));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
+      // The story up to the moment it lands. A bug in building it must never fail a landing: fall back to the basics.
+      let note: string;
+      try {
+        note = this.flightLogNote(me, baselineHead, true);
+      } catch (err) {
+        this.log("notes.build_failed", { error: (err as Error).message.slice(0, 300) }, fork);
+        note = minimalFlightLog(me.name, me.agent, baselineHead);
+      }
       // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
       const result = JSON.parse(
-        await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead } }),
+        await checkerFor(this.env, baseline, "land").run({
+          mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead },
+        }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
       if (result.retry) return { landed: false, fork, reason: result.reason ?? "retry", baselineHead, retry: true };
@@ -708,7 +723,9 @@ export class Coordinator extends DurableObject<Env> {
         const where = firstError ? `: ${describeError(firstError)}` : "";
         return deny(`Doesn't fit on current main (${result.reason ?? "landing refused"}${where}). Rebase onto main and fix.`, result.mainConflict ? "rebase_required" : "land_blocked");
       }
-      return this.onLanded(me, result.landedSha, baselineHead, !!result.merged);
+      const landed = await this.onLanded(me, result.landedSha, baselineHead, !!result.merged, note);
+      this.ctx.waitUntil(this.writeNotes()); // after the landing is recorded; the agent doesn't wait on git notes
+      return landed;
     } finally {
       if (mayRelease(parseLock(this.meta("landing")), token)) this.setMeta("landing", "");
     }
@@ -724,10 +741,14 @@ export class Coordinator extends DurableObject<Env> {
    * After a landing: announce it to everyone. Only PRs with an open conflict against the winner must go around;
    * the rest stay in line and are automatically re-checked on the new main (ATC merges them when they land).
    */
-  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean): Promise<LandResponse> {
+  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean, note: string): Promise<LandResponse> {
     const now = Date.now();
     this.setMeta("baseline_head", newHead);
     this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
+    this.sql.exec(
+      "INSERT OR REPLACE INTO flight_logs(fork, landed_sha, landed_at, note, noted, note_error) VALUES (?, ?, ?, ?, 0, NULL)",
+      winner.name, newHead, now, note,
+    );
     this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged }, winner.name);
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
@@ -773,6 +794,90 @@ export class Coordinator extends DurableObject<Env> {
     };
   }
 
+  // ── flight log (context preservation, ADR-0019) ─────────────────────────
+
+  private notesPending(): boolean {
+    return this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length > 0;
+  }
+
+  /**
+   * Write every flight log not yet in git (this landing's, plus any that failed before). One writer per Coordinator, so
+   * two notes pushes never race; a call while one runs makes it go round again. Retries with backoff; the reconcile
+   * alarm picks up anything left. Never throws.
+   */
+  private readonly noteWriter = new NoteWriter(() => this.writePendingNotes());
+  private writeNotes(): Promise<void> {
+    return this.noteWriter.run();
+  }
+
+  /** One attempt, in batches that fit a checker call; true if nothing is left pending. */
+  private async writePendingNotes(): Promise<boolean> {
+    for (;;) {
+      const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0 ORDER BY landed_at").toArray();
+      if (!pending.length) return true;
+      const batch = takeBatch(pending);
+      let error: string;
+      try {
+        const r = JSON.parse(
+          await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: batch.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
+        ) as Partial<NotesResult> & { error?: string };
+        // By the PRs sent, not by sha: a PR that added nothing shares its sha with the one before, and may not have been sent.
+        const written = new Set(r.written ?? []);
+        const done = batch.filter((p) => written.has(p.landed_sha));
+        for (const p of done) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE fork = ?", p.fork);
+        if (!r.error && done.length) {
+          this.log("notes.written", { forks: done.map((p) => p.fork) });
+          continue; // next batch
+        }
+        error = r.error ?? "no notes written";
+      } catch (err) {
+        error = (err as Error).message;
+      }
+      this.sql.exec("UPDATE flight_logs SET note_error = ? WHERE noted = 0", error.slice(0, 300));
+      this.log("notes.failed", { forks: batch.map((p) => p.fork), error: error.slice(0, 300) });
+      return false;
+    }
+  }
+
+  /** The PR's story so far, as the note ATC attaches to its landed commit. */
+  private flightLogNote(f: ForkRow, onto: string, landed: boolean): string {
+    const snapshots = this.sql
+      .exec<{ at: number; sequence: string | null }>("SELECT at, json_extract(state, '$.sequence') AS sequence FROM snapshots ORDER BY id")
+      .toArray()
+      .map((r): SequenceSnapshot => ({ at: r.at, sequence: r.sequence ? (JSON.parse(r.sequence) as SequenceSnapshot["sequence"]) : [] }));
+    snapshots.push({ at: Date.now(), sequence: this.sequence() }); // the latest clearance may not be recorded yet
+    return flightLogNote({
+      fork: f.name,
+      agent: f.agent,
+      diffLines: f.diff_lines,
+      intents: this.sql.exec<{ description: string }>("SELECT description FROM intents WHERE fork = ? ORDER BY id", f.name).toArray().map((r) => r.description),
+      signals: this.sql.exec<FlightSignal>("SELECT kind, about_fork, symbol, message, created_at FROM signals WHERE fork = ?", f.name).toArray(),
+      clearances: clearanceHistory(snapshots, f.name),
+      onto,
+      landed,
+    });
+  }
+
+  private flightLogs(): FlightLogEntry[] {
+    return this.sql
+      .exec<{ fork: string; landed_sha: string; landed_at: number; note: string; noted: number }>("SELECT fork, landed_sha, landed_at, note, noted FROM flight_logs ORDER BY landed_at")
+      .toArray()
+      .map((r) => ({ fork: r.fork, pr: prLabel(r.fork), landedSha: r.landed_sha, landedAt: r.landed_at, note: r.note, noted: r.noted === 1 }));
+  }
+
+  /**
+   * Why main looks the way it does: the flight log of every landed PR, oldest first. With `fork`, also that PR's
+   * log so far if it is still in flight.
+   */
+  async getHistory(fork?: string): Promise<{ baseline: string; baselineHead: string | null; landed: FlightLogEntry[]; inFlight?: { fork: string; pr: string; note: string } }> {
+    const out: { baseline: string; baselineHead: string | null; landed: FlightLogEntry[]; inFlight?: { fork: string; pr: string; note: string } } = {
+      baseline: this.baseline, baselineHead: this.meta("baseline_head"), landed: this.flightLogs(),
+    };
+    const row = fork ? this.fork(fork) : null;
+    if (row?.status === "active") out.inFlight = { fork: row.name, pr: prLabel(row.name), note: this.flightLogNote(row, this.meta("baseline_head") ?? "", false) };
+    return out;
+  }
+
   // ── overlaps ────────────────────────────────────────────────────────────
 
   /** File-level and symbol-level overlaps between every pair of active forks. */
@@ -813,7 +918,7 @@ export class Coordinator extends DurableObject<Env> {
   // ── reconcile (ADR-0006) ────────────────────────────────────────────────
 
   private async scheduleReconcile() {
-    if (this.activeForks().length === 0) return;
+    if (this.activeForks().length === 0 && !this.notesPending()) return;
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
   }
 
@@ -834,6 +939,7 @@ export class Coordinator extends DurableObject<Env> {
       }),
     );
     await this.requeuePairs();
+    if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
   }
 
@@ -845,7 +951,8 @@ export class Coordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     if (await this.reconcile()) this.touch();
     const idle = Date.now() - Number(this.meta("last_activity") ?? 0);
-    if (this.activeForks().length > 0 && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    // Notes are retried after the last landing too; once idle, any API call (ensure → scheduleReconcile) re-arms it.
+    if ((this.activeForks().length > 0 || this.notesPending()) && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     else this.log("reconcile.paused", { idleMs: idle });
   }
 
@@ -894,6 +1001,15 @@ export class Coordinator extends DurableObject<Env> {
         .exec<{ id: number; fork: string; description: string; files: string; symbols: string; created_at: number }>("SELECT * FROM intents ORDER BY id")
         .toArray()
         .map((i) => ({ ...i, files: JSON.parse(i.files) as string[], symbols: JSON.parse(i.symbols) as string[] })),
+      flightLogs: this.flightLogs(),
+      savings: computeSavings(
+        this.sql
+          .exec<{ at: number; kind: string; fork: string | null; detail: string }>(
+            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.single.stale', 'check.pair') ORDER BY id`,
+          )
+          .toArray()
+          .map((e): LogEvent => ({ ...e, detail: JSON.parse(e.detail) as unknown })),
+      ),
       events: this.sql
         .exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id DESC LIMIT 60")
         .toArray()

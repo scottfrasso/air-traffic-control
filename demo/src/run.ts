@@ -6,6 +6,7 @@
  *   4. The system emits a semantic-conflict signal to both before either requests landing.
  *   5. A requests landing and merges. B is told to rebase, fixes the call, and lands.
  *   6. Baseline typechecks at the end.
+ * Then: every landed PR's flight log is a git note on main (refs/notes/atc), and the run's savings in numbers.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -17,6 +18,7 @@ import { Repo } from "./lib/git.ts";
 import { say, sleep, waitFor } from "./lib/log.ts";
 import { agentAChangeSignature, agentBAddCaller, agentBFixCaller, TRAFFIC } from "./scenario.ts";
 import { seed } from "./seed.ts";
+import { savingsLine } from "../../worker/src/savings.ts";
 
 type LandResponse = { landed: boolean; reason?: string; retry?: boolean; baselineHead?: string; rebaseRequired?: string[]; atc?: string };
 const withTraffic = !process.argv.includes("--no-traffic");
@@ -146,6 +148,30 @@ try {
   check(readFileSync(join(final.dir, "src/pricing.ts"), "utf8").includes("discount: Discount") && checkout.includes('kind: "percent"'), "baseline contains A's signature change and B's fixed caller");
   if (traffic.length) check(["src/shipping.ts"].every((f) => existsSync(join(final.dir, f))) && readFileSync(join(final.dir, "src/money.ts"), "utf8").includes("formatCentsCompact"), "baseline contains all traffic PRs");
   say("system", `git log on baseline:\n${final.git(["log", "--oneline", "-6"]).out.split("\n").map((l) => `           ${l}`).join("\n")}`);
+
+  step(8, "Every landed PR's flight log is a git note on main (refs/notes/atc)");
+  // ATC writes notes right after answering the landing request, so give the last one a moment.
+  const end = await waitFor("flight log notes in git", async () => {
+    const st = await mesh.state();
+    return st.forks.filter((f) => f.status === "landed").every((f) => st.flightLogs?.some((l) => l.fork === f.name && l.noted)) ? st : null;
+  }, 60_000, 1000).catch(() => mesh.state());
+  final.git(["fetch", "-q", a.baselineRemote, "refs/notes/atc:refs/notes/atc"], { remote: a.baselineRemote });
+  const landedForks = end.forks.filter((f) => f.status === "landed");
+  const logs = end.flightLogs ?? [];
+  for (const f of landedForks) {
+    const log = logs.find((l) => l.fork === f.name);
+    const note = log ? final.git(["notes", "--ref=atc", "show", log.landedSha], { allowFail: true }) : { ok: false, out: "" };
+    check(!!log && note.ok && note.out.includes("ATC-Clearance:") && note.out === log.note, `${log?.pr ?? f.name} has its flight log on ${log?.landedSha.slice(0, 7) ?? "?"}`);
+  }
+  const bNote = logs.find((l) => l.fork === b.fork)?.note ?? "";
+  check(/^ATC-Signal: semantic_conflict with PR\d+ on applyDiscount$/m.test(bNote) && /^ATC-Go-Around: /m.test(bNote), `PR${b.pr}'s log records the conflict and the go-around`);
+  say("system", `git log --notes=atc -1 ${logs.find((l) => l.fork === b.fork)?.landedSha.slice(0, 7) ?? ""}:\n${final.git(["log", "--notes=atc", "-1", "--format=%h %s%n%N", logs.find((l) => l.fork === b.fork)?.landedSha ?? "HEAD"]).out.split("\n").map((l) => `           ${l}`).join("\n")}`);
+
+  if (end.savings) {
+    const s = end.savings;
+    say("system", `savings: ${savingsLine(s)}`);
+    say("system", `         typecheck cache hits ${s.cacheHits}/${s.typechecks}, avg wait to land ${s.waitMs.length ? Math.round(s.waitMs.reduce((x, y) => x + y, 0) / s.waitMs.length / 1000) : 0} s, run ${Math.round(s.elapsedMs / 1000)} s`);
+  }
 } catch (err) {
   failed = true;
   say("fail", (err as Error).message);

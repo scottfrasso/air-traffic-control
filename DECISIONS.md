@@ -22,6 +22,8 @@ the raw spike findings (milestone 1).
 | [0013](docs/adr/0013-incremental-checks.md) | Compute main once, check only deltas (repo cache, tree-hash results, incremental tsc) | Accepted |
 | [0014](docs/adr/0014-live-push-replay-webhooks.md) | Live WebSocket push, recorded replay, outbound webhooks, real agents | Accepted |
 | [0015](docs/adr/0015-merge-queue-landing.md) | Merge-queue landing; only real conflicts go around | Accepted |
+| [0018](docs/adr/0018-landing-reliability.md) | Land only what was checked: pinned heads, owned lock, current-head pair coverage | Accepted |
+| [0019](docs/adr/0019-flight-log-and-savings.md) | Flight log as a git note (refs/notes/atc); savings from the event log | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 

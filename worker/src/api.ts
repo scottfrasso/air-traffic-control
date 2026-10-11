@@ -70,6 +70,7 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
       return json(await stub.getClearance(fork));
     },
   ],
+  ["GET", /^\/history$/, async (stub, _r, url) => json(await stub.getHistory(url.searchParams.get("fork") ?? undefined))],
   ["GET", /^\/timeline$/, async (stub) => new Response(await stub.timelineJson(), { headers: { "content-type": "application/json" } })],
   ["GET", /^\/webhooks$/, async (stub) => json(await stub.listWebhooks())],
   [

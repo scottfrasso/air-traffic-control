@@ -5,6 +5,7 @@
 //   pair   typecheck fork A alone, fork B alone, then `git merge` B into A and typecheck the merge
 //   single typecheck one ref
 //   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
+//   notes  attach ATC's flight logs to landed commits as git notes under refs/notes/atc
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +18,8 @@ interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: strin
 type Input =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } };
+  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
+  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
 
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
@@ -35,10 +37,13 @@ let dir = repoDir; // git commands run here; typechecks run in throwaway worktre
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
 const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
-function git(args: string[], opts: { token?: string; allowFail?: boolean } = {}): { ok: boolean; out: string } {
+function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
   const auth = opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [];
   try {
-    return { ok: true, out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() };
+    return {
+      ok: true,
+      out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
+    };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
     const out = `${e.stdout ?? ""}${e.stderr ?? ""}`.trim();
@@ -150,7 +155,36 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
   }
 }
 
+/** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
+const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"];
+const NOTE_TIMEOUT_MS = 30_000;
+
+/**
+ * Add flight log notes to the baseline's refs/notes/atc. ATC calls this in the background after it has recorded the
+ * landing (one writer per Coordinator), and retries what fails. Idempotent: a note whose text is already there is
+ * skipped, so a retry after a push that did land can't duplicate it. The push is never forced, so nothing is overwritten.
+ * The local ref is per baseline.
+ */
+function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>): { mode: "notes"; written: string[]; error?: string } {
+  const local = `refs/notes/agentmesh-${base.name}`;
+  git(["update-ref", "-d", local], { allowFail: true });
+  const fetch = git([...LOW_SPEED, "fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS });
+  // Only "no notes yet" may start a new notes history; any other fetch error would make the push diverge.
+  if (!fetch.ok && !/couldn't find remote ref/i.test(fetch.out)) return { mode: "notes", written: [], error: `fetch refs/notes/atc: ${fetch.out.slice(0, 200)}` };
+  for (const n of notes) {
+    // Never replace a note: a PR that added nothing new lands on an existing commit that already has one. Append instead.
+    const existing = git(["notes", `--ref=${local}`, "show", n.sha], { allowFail: true });
+    if (existing.ok && existing.out.includes(n.note.trim())) continue; // already written (a retry after a push that landed)
+    const has = existing.ok;
+    const add = git(["notes", `--ref=${local}`, has ? "append" : "add", "-F", "-", n.sha], { allowFail: true, input: n.note });
+    if (!add.ok) return { mode: "notes", written: [], error: `notes add ${n.sha.slice(0, 7)}: ${add.out.slice(0, 200)}` };
+  }
+  const push = timed("push notes", () => git([...LOW_SPEED, "push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));
+  return push.ok ? { mode: "notes", written: notes.map((n) => n.sha) } : { mode: "notes", written: [], error: `push refs/notes/atc: ${push.out.slice(0, 200)}` };
+}
+
 function run(): unknown {
+  if (input.mode === "notes") return writeNotes(input.baseline, input.notes);
   if (input.mode === "single") {
     // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
     const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
