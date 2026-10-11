@@ -74,8 +74,8 @@ const holdVo = orderVo + d("order") + 0.4;
 const fix = holdVo + d("hold") - 0.8;
 const firstLand = fix + 2.4;
 const landVo = firstLand - 0.3;
-const lastLand = firstLand + 11;
-const b4End = Math.max(lastLand + 3.8, landVo + d("land") + 0.5);
+const lastLand = firstLand + 7; // ~1.75 s apart: the runway is clear 1.6 s after each touchdown
+const b4End = Math.max(lastLand + 2.2, landVo + d("land") + 0.5);
 /** Real seconds (since the first push) → video seconds, piecewise linear through the beat's anchors. */
 const ANCHORS: Array<[number, number]> = [[REAL.push, v0], [REAL.conflict, flag], [REAL.settled, orderVo], [REAL.fix, fix], [REAL.firstLand, firstLand], [REAL.lastLand, lastLand]];
 export function realToVideo(r: number): number {
