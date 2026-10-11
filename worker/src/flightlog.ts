@@ -43,7 +43,8 @@ const oneLine = (s: string, max = 200) => {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 3)}...` : t;
 };
-const about = (s: FlightSignal) => `${s.about_fork ? ` with ${prLabel(s.about_fork)}` : ""}${s.symbol ? ` on ${s.symbol}` : ""}`;
+// Symbols can come from agents (declared intents): keep them on one line so they can't forge a trailer.
+const about = (s: FlightSignal) => `${s.about_fork ? ` with ${oneLine(prLabel(s.about_fork), 80)}` : ""}${s.symbol ? ` on ${oneLine(s.symbol, 80)}` : ""}`;
 
 /** The note text ATC attaches to the landed commit. */
 export function flightLogNote(f: FlightLogInput): string {
@@ -61,7 +62,7 @@ export function flightLogNote(f: FlightLogInput): string {
   const steps = f.clearances.length > 8 ? [...f.clearances.slice(0, 3), ...f.clearances.slice(-5)] : f.clearances;
   for (const c of steps) lines.push(`ATC-Clearance: ${WORD[c.clearance] ?? c.clearance.toUpperCase()} (${oneLine(c.reason, 160)})`);
   for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at))
-    lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${prLabel(s.about_fork)} landed (conflict${s.symbol ? ` on ${s.symbol}` : ""})${f.landed ? "; landed after a new push" : ""}` : oneLine(s.message)}`);
+    lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${oneLine(prLabel(s.about_fork), 80)} landed (conflict${s.symbol ? ` on ${oneLine(s.symbol, 80)}` : ""})${f.landed ? "; landed after a new push" : ""}` : oneLine(s.message)}`);
   lines.push(`ATC-Diff-Lines: ${f.diffLines}`, f.landed ? `ATC-Landed-Onto: ${f.onto.slice(0, 12)}` : `ATC-In-Flight-On: ${f.onto.slice(0, 12)}`);
   return lines.join("\n");
 }

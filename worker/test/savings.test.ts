@@ -44,8 +44,13 @@ test("rebases asked for vs rebasing every open PR on every landing", () => {
   assert.equal(s.elapsedMs, 36_000);
 });
 
+test("PRs with nothing pushed don't count toward naive rebases", () => {
+  const s = computeSavings([ev(1, "fork.created", "a"), ev(2, "fork.created", "b"), ev(3, "push.received", "a"), ev(4, "land.merged", "a")]);
+  assert.equal(s.naiveRebases, 0);
+});
+
 test("abandoned PRs don't count toward naive rebases", () => {
-  const s = computeSavings([ev(1, "fork.created", "a"), ev(2, "fork.created", "b"), ev(3, "fork.abandoned", "b"), ev(4, "land.merged", "a")]);
+  const s = computeSavings([ev(1, "fork.created", "a"), ev(2, "fork.created", "b"), ev(2, "push.received", "b"), ev(3, "fork.abandoned", "b"), ev(4, "land.merged", "a")]);
   assert.equal(s.naiveRebases, 0);
 });
 

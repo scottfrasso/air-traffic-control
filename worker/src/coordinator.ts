@@ -788,6 +788,10 @@ export class Coordinator extends DurableObject<Env> {
 
   // ── flight log (context preservation, ADR-0019) ─────────────────────────
 
+  private notesPending(): boolean {
+    return this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length > 0;
+  }
+
   private notesRunning: Promise<void> | null = null;
   private notesAgain = false;
 
@@ -825,7 +829,9 @@ export class Coordinator extends DurableObject<Env> {
       const r = JSON.parse(
         await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: pending.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
       ) as Partial<NotesResult> & { error?: string };
-      for (const sha of r.written ?? []) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE landed_sha = ?", sha);
+      // By the PRs sent, not by sha: a PR that added nothing shares its sha with the one before, and may not have been sent.
+      const written = new Set(r.written ?? []);
+      for (const p of pending) if (written.has(p.landed_sha)) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE fork = ?", p.fork);
       if (!r.error) {
         this.log("notes.written", { forks: pending.map((p) => p.fork) });
         return true;
@@ -918,7 +924,7 @@ export class Coordinator extends DurableObject<Env> {
   // ── reconcile (ADR-0006) ────────────────────────────────────────────────
 
   private async scheduleReconcile() {
-    if (this.activeForks().length === 0) return;
+    if (this.activeForks().length === 0 && !this.notesPending()) return;
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
   }
 
@@ -939,7 +945,7 @@ export class Coordinator extends DurableObject<Env> {
       }),
     );
     await this.requeuePairs();
-    if (this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length) this.ctx.waitUntil(this.writeNotes());
+    if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
   }
 
@@ -951,8 +957,8 @@ export class Coordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     if (await this.reconcile()) this.touch();
     const idle = Date.now() - Number(this.meta("last_activity") ?? 0);
-    const notesPending = this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length > 0; // retry notes after the last landing too
-    if ((this.activeForks().length > 0 || notesPending) && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    // Notes are retried after the last landing too; once idle, any API call (ensure → scheduleReconcile) re-arms it.
+    if ((this.activeForks().length > 0 || this.notesPending()) && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     else this.log("reconcile.paused", { idleMs: idle });
   }
 
@@ -1005,7 +1011,7 @@ export class Coordinator extends DurableObject<Env> {
       savings: computeSavings(
         this.sql
           .exec<{ at: number; kind: string; fork: string | null; detail: string }>(
-            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.pair')`,
+            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.pair') ORDER BY id`,
           )
           .toArray()
           .map((e): LogEvent => ({ ...e, detail: JSON.parse(e.detail) as unknown })),

@@ -19,7 +19,8 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   - Clearances come from the recorded snapshots (ADR-0014), one per *change* of clearance, plus the current sequence
     (the latest may not be flushed yet). Long histories keep the first 3 and the last 5.
   - Signals keep only the kinds that tell the story (conflicts, signature changes, overlaps, failed checks), one line
-    per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`.
+    per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`. Every value,
+    including agent-declared symbols, is collapsed to one line so it can't forge a trailer.
 - **Written after the landing is recorded, in the background.** The Coordinator builds the note *before* landing (the
   story up to that moment) and stores it in `flight_logs` with `noted = 0` when it records the landing. It answers the
   agent, then (`ctx.waitUntil`) makes a separate checker call (`mode: "notes"`) with **every** log not yet in git. The
@@ -28,8 +29,10 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     leaving a PR that is on main but not recorded as landed. Now the landing is recorded first, and the agent never
     waits on notes.
   - One writer per Coordinator (an in-memory promise): two notes pushes never race; a landing during a write makes the
-    writer go round again. A failed write retries with backoff (2, 4, 8 s), and the reconcile alarm, which keeps running
-    while any note is pending, retries after that.
+    writer go round again. A failed write retries with backoff (2, 4, 8 s), then the reconcile alarm retries while any
+    note is pending (until the 10-minute idle cutoff; any later API call re-arms it).
+  - Idempotent: a note whose text is already on the commit is skipped, so a retry after a push that did land (but whose
+    result ATC never saw) can't duplicate it. Rows are marked written by the PRs sent, not by sha.
   - A note is never replaced: a PR that added nothing new lands on a commit that already has a note, so ATC appends.
   - Only "couldn't find remote ref" counts as "no notes yet". Any other fetch error skips the write, because starting a
     new notes history would diverge from the remote one. Transfers use `http.lowSpeedLimit/Time` so a stall fails within ~10 s.
@@ -47,7 +50,7 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   - time to signal = first conflicting pair result − the later of the two PRs' latest pushes before it (a conflict first
     found by a re-check after main moved is measured from that older push, so it can overstate); the summary line shows the max;
   - typecheck cache hits = cached `typecheck *` steps / all typecheck steps in single and pair checks (not pair-level hits);
-  - rebases = `rebase_required` signals; **naive** = for each landing, the number of other PRs still open;
+  - rebases = `rebase_required` signals; **naive** = for each landing, the number of other open PRs that have pushed work;
   - wait = first `land.requested` → `land.merged`.
   `run.sh` prints `savingsLine` (e.g. `5 PRs · 10 pairs checked · 1 conflict found in 12 s · 1 rebase (naive: 10)`);
   the dashboard has a SAVINGS panel.

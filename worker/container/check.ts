@@ -160,9 +160,10 @@ const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"
 const NOTE_TIMEOUT_MS = 30_000;
 
 /**
- * Add flight log notes to the baseline's refs/notes/atc. ATC calls this after it has recorded the landing (still under
- * the landing lock), so a slow or failed note never leaves a landed PR unrecorded. The push is never forced: if it is
- * rejected, nothing is overwritten and ATC retries those notes on the next landing. The local ref is per baseline.
+ * Add flight log notes to the baseline's refs/notes/atc. ATC calls this in the background after it has recorded the
+ * landing (one writer per Coordinator), and retries what fails. Idempotent: a note whose text is already there is
+ * skipped, so a retry after a push that did land can't duplicate it. The push is never forced, so nothing is overwritten.
+ * The local ref is per baseline.
  */
 function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>): { mode: "notes"; written: string[]; error?: string } {
   const local = `refs/notes/agentmesh-${base.name}`;
@@ -172,7 +173,9 @@ function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>):
   if (!fetch.ok && !/couldn't find remote ref/i.test(fetch.out)) return { mode: "notes", written: [], error: `fetch refs/notes/atc: ${fetch.out.slice(0, 200)}` };
   for (const n of notes) {
     // Never replace a note: a PR that added nothing new lands on an existing commit that already has one. Append instead.
-    const has = git(["notes", `--ref=${local}`, "show", n.sha], { allowFail: true }).ok;
+    const existing = git(["notes", `--ref=${local}`, "show", n.sha], { allowFail: true });
+    if (existing.ok && existing.out.includes(n.note.trim())) continue; // already written (a retry after a push that landed)
+    const has = existing.ok;
     const add = git(["notes", `--ref=${local}`, has ? "append" : "add", "-F", "-", n.sha], { allowFail: true, input: n.note });
     if (!add.ok) return { mode: "notes", written: [], error: `notes add ${n.sha.slice(0, 7)}: ${add.out.slice(0, 200)}` };
   }

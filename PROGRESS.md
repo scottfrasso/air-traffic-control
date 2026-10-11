@@ -20,9 +20,9 @@ Nothing.
   Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
-  landed PR has it (`shop-261011172919`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
+  landed PR has it (`shop-261011173839`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
 - **Savings in numbers (#17, ADR-0019):** computed from the event log; `run.sh` prints
-  `5 PRs · 10 pairs checked · 1 conflict found in 14 s · 1 rebase (naive: 10)` and the dashboard has a SAVINGS panel.
+  `5 PRs · 10 pairs checked · 1 conflict found in 21 s · 1 rebase (naive: 10)` and the dashboard has a SAVINGS panel.
 - **Merge-queue landing (ADR-0015):** ATC merges each PR onto the current main, typechecks that exact commit, and pushes. After a landing,
   only conflicting PRs go around; the rest are re-checked automatically.
 - **Real agents, concurrently:** two real Claude Code agents (colliding tasks) both landed with no human help; one was sent around

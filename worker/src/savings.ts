@@ -2,7 +2,7 @@
  * What ATC saved in one run, in numbers (issue #17, ADR-0019), computed from the event log alone so a replay shows
  * the same numbers as the live run.
  *
- * "Naive" is a rebase-on-every-main-move policy: each landing makes every other open PR rebase.
+ * "Naive" is a rebase-on-every-main-move policy: each landing makes every other open PR that has pushed work rebase.
  */
 
 export type LogEvent = { at: number; kind: string; fork: string | null; detail: unknown };
@@ -41,6 +41,8 @@ export function computeSavings(events: LogEvent[]): Savings {
   let first: number | null = null;
   let lastLanding: number | null = null;
 
+  const pushed = new Set<string>();
+  // Stable sort: events in the same millisecond keep log order (callers pass them by id).
   for (const e of [...events].sort((x, y) => x.at - y.at)) {
     const d = (e.detail ?? {}) as Detail;
     switch (e.kind) {
@@ -53,7 +55,7 @@ export function computeSavings(events: LogEvent[]): Savings {
         if (e.fork) open.delete(e.fork);
         break;
       case "push.received":
-        if (e.fork) lastPush.set(e.fork, e.at);
+        if (e.fork) (lastPush.set(e.fork, e.at), pushed.add(e.fork));
         break;
       case "land.requested":
         if (e.fork && !requested.has(e.fork)) requested.set(e.fork, e.at);
@@ -61,7 +63,7 @@ export function computeSavings(events: LogEvent[]): Savings {
       case "land.merged":
         if (!e.fork) break;
         open.delete(e.fork);
-        s.naiveRebases += open.size;
+        s.naiveRebases += [...open].filter((f) => pushed.has(f)).length; // a PR with nothing pushed has nothing to rebase
         s.landed++;
         if (requested.has(e.fork)) s.waitMs.push(e.at - requested.get(e.fork)!);
         lastLanding = e.at;
