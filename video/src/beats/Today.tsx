@@ -6,7 +6,7 @@ import { AbsoluteFill } from "remotion";
 import type { Scene } from "../scene/draw";
 import { clamp, GATES, glide, landing, LIVERY, path, smooth, TOWER, type Plane, type Pt } from "../scene/geometry";
 import { At, C, Caption, PIXEL, Popup, Stage, Tag } from "../scene/Stage";
-import { T } from "../timeline";
+import { T, voSeconds } from "../timeline";
 
 const D = T.todayEnd - T.todayStart;
 const at = (k: number) => T.todayStart + k * D; // a moment in the "today" beat, as a fraction of it
@@ -72,7 +72,7 @@ export function Today({ t }: { t: number }) {
     towerLight: red ? C.red : undefined,
     beams: sentAround && t < wave + 1.6 ? [{ from: [TOWER.x, TOWER.top - 4], to: [pb.x, pb.y], color: C.red }] : [],
   };
-  const ci = t > T.setupVo + 10.5 ? { color: C.green, text: "CI" } : undefined;
+  const ci = t > T.setupVo + 0.62 * voSeconds("setup") ? { color: C.green, text: "CI" } : undefined;
   const step = t >= holdStart && t < holdEnd ? STEPS[Math.min(2, Math.floor(((t - holdStart) / (holdEnd - holdStart)) * 3))] : null;
   const labelA = !rewinding && t < touchA + 1.0;
   const labelB = !rewinding && t > T.setupStart && t < touchB;
@@ -81,12 +81,12 @@ export function Today({ t }: { t: number }) {
     <Stage scene={scene} style={rewinding ? { filter: `saturate(${1 - 0.6 * Math.sin(Math.PI * k)}) contrast(1.1)` } : undefined}>
       {labelA && (
         <At x={pa.x} y={pa.y - 8} align="edge">
-          <Tag text="A: changes a function's parameters" light={ci} opacity={fade(t, T.setupVo + 3.0)} />
+          <Tag text="A: changes a function's parameters" light={ci} opacity={fade(t, T.setupVo + 0.24 * voSeconds("setup"))} />
         </At>
       )}
       {labelB && (
         <At x={pb.x} y={pb.y - 8} align="edge">
-          <Tag text={bText} bg={t >= wave && t < holdEnd ? "#8a1f1f" : undefined} light={ci} opacity={fade(t, T.setupVo + 5.6)} />
+          <Tag text={bText} bg={t >= wave && t < holdEnd ? "#8a1f1f" : undefined} light={ci} opacity={fade(t, T.setupVo + 0.42 * voSeconds("setup"))} />
         </At>
       )}
       {!rewinding && (
@@ -96,7 +96,7 @@ export function Today({ t }: { t: number }) {
           <At x={pb.x} y={pb.y}><Popup text="LANDED, LATE" color={C.amber} age={(t - touchB) / 2.2} /></At>
         </>
       )}
-      {t > T.setupVo + 12.2 && t < T.todayStart + 0.4 && <Caption opacity={fade(t, T.setupVo + 12.2)}>Git: no merge conflict</Caption>}
+      {t > T.setupVo + 0.8 * voSeconds("setup") && t < T.todayStart + 0.4 && <Caption opacity={fade(t, T.setupVo + 0.8 * voSeconds("setup"))}>Git: no merge conflict</Caption>}
       {t > T.todayStart + 0.4 && t < holdStart && <Caption opacity={fade(t, T.todayStart + 0.4)}><span style={{ color: C.amber }}>TODAY:</span> the two changes meet at merge time</Caption>}
       {t >= holdStart && t < at(0.63) && <Caption opacity={fade(t, holdStart)}>Go-around: rebase onto main, fix, rerun CI</Caption>}
       {t >= at(0.63) && t < T.todayEnd && <Caption opacity={fade(t, at(0.63))}>B's agent has finished, so a person does it</Caption>}
@@ -111,7 +111,7 @@ function Rewind({ k, t }: { k: number; t: number }) {
       <AbsoluteFill style={{ backgroundImage: "repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0 4px, transparent 4px 8px)", transform: `translateY(${(t * 120) % 8}px)` }} />
       <AbsoluteFill style={{ background: "rgba(15,21,48,0.18)" }} />
       <div style={{ position: "absolute", left: 64, top: 56, font: `56px/1 ${PIXEL}`, color: C.text, textShadow: "4px 4px 0 #0f1530", opacity: k < 1 ? (Math.floor(t * 3) % 2 ? 1 : 0.4) : 1 }}>◀◀ REWIND</div>
-      <Caption>Check the merge on every push instead</Caption>
+      <Caption>ATC checks the merge on every push instead</Caption>
     </AbsoluteFill>
   );
 }

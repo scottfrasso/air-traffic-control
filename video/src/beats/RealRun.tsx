@@ -121,7 +121,7 @@ export function RealRun({ t }: { t: number }) {
       })}
       <Clock r={r} />
       {t >= T.flag && t < T.orderVo && (
-        <Panel x={560} y={60} w={800} border={C.red}>
+        <Panel x={680} y={64} w={800} border={C.red}>
           <div style={{ font: `20px/1.4 ${PIXEL}`, color: C.red }}>BREAKS ONLY WHEN COMBINED</div>
           <div style={{ font: `36px/1.2 ${TERM}`, color: C.text, marginTop: 6 }}>{ERROR.replace(/^(\S+) (TS\d+) /, "$1  ")}</div>
         </Panel>

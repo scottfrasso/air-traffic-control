@@ -1,11 +1,11 @@
 /**
- * Every time in the video, in seconds, derived from the voice-over lengths (src/data/vo.json) and the
+ * Every time in the video (v8), in seconds, derived from the voice-over lengths (src/data/vo.json) and the
  * recorded run (src/data/run.json). Beat 4 maps the run's real clock onto video time piecewise, so each
  * real event lands on the line that describes it; the on-screen clock always shows real time.
  */
 import run from "./data/run.json";
 import vo from "./data/vo.json";
-import type { LineId } from "./data/script";
+import { LINES, type LineId } from "./data/script";
 
 export const FPS = 30;
 const d = (id: LineId) => vo[id].seconds;
@@ -53,15 +53,35 @@ export const REAL = {
 };
 export const RUN = run;
 
-// ── beat 0: what ATC is; beats 1–3: the go-around today ──
-const introVo = 0.5;
-const intro2Vo = introVo + d("intro") + 0.5;
-const setupStart = intro2Vo + d("intro2") + 0.8;
+// ── part 1: title, agenda, roadmap ──
+const openVo = 0.8;
+const titleVo = openVo + d("open") + 0.6;
+const agendaVo = titleVo + d("title") + 1.0;
+const roadmapVo = agendaVo + d("agenda") + 0.8;
+const p1End = roadmapVo + d("roadmap") + 1.2;
+
+// ── part 2a: the problem, plain graphics ──
+const fanVo = p1End + 0.6;
+const cleanVo = fanVo + d("fan") + 1.2;
+const lateVo = cleanVo + d("clean") + 1.6;
+const stormVo = lateVo + d("late") + 1.2;
+const questionVo = stormVo + d("storm") + 1.4;
+const probEnd = questionVo + d("question") + 1.4;
+
+// ── part 2b: the idea: the airport mapping and the clearances ──
+const mapVo = probEnd + 0.6;
+const clearVo = mapVo + d("map") + 1.0;
+const ideaEnd = clearVo + d("clearances") + 1.4;
+
+// ── the airport without a tower, then today's go-around and the rewind ──
+const chaosVo = ideaEnd + 0.3;
+const CHAOS = Math.max(d("chaos"), 8); // the planes' choreography, independent of how long the line is
+const setupStart = chaosVo + CHAOS + 2.2;
 const setupVo = setupStart + 0.3;
 const todayStart = setupVo + d("setup") + 0.3;
 const todayVo = todayStart + 0.1;
 const todayEnd = todayVo + d("today") + 1.8; // room for B to come back down and land
-const rewindEnd = todayEnd + Math.max(2.6, d("rewind") + 0.7);
+const rewindEnd = todayEnd + Math.max(2.6, d("rewind") + 0.9);
 
 // ── beat 4: the real run ──
 const b4 = rewindEnd;
@@ -94,25 +114,69 @@ export function videoToReal(v: number): number {
   return 0;
 }
 
-// ── beat 5: the airport, then the close ──
-const b5 = b4End;
+// ── real agents ──
+const agentsVo = b4End + 0.4;
+const agentsEnd = agentsVo + d("agents") + 1.2;
+
+// ── part 2d: how it's built ──
+const b5 = agentsEnd;
 const airportVo = b5 + 0.4;
 const durableVo = airportVo + d("airport") + 0.5;
 const sandboxVo = durableVo + d("durable") + 0.5;
-const closeStart = sandboxVo + d("sandbox") + 0.6;
+const workerVo = sandboxVo + d("sandbox") + 0.5;
+
+// ── part 3: recap, what's next, close ──
+const recapStart = workerVo + d("worker") + 1.0;
+const recapVo = recapStart + 0.6;
+const nextVo = recapVo + d("recap") + 0.8;
+const closeStart = nextVo + d("next") + 0.8;
 const closeVo = closeStart + 0.4;
-const end = closeVo + d("close") + 1.6;
+const end = closeVo + d("close") + 2.0;
 
 export const T = {
-  introVo, intro2Vo, setupStart, setupVo, todayStart, todayVo, todayEnd, rewindEnd,
+  openVo, titleVo, agendaVo, roadmapVo, p1End,
+  fanVo, cleanVo, lateVo, stormVo, questionVo, probEnd,
+  mapVo, clearVo, ideaEnd, chaosVo, CHAOS, setupStart, setupVo, todayStart, todayVo, todayEnd, rewindEnd,
   b4, real1Vo, v0, flag, real2Vo, orderVo, holdVo, fix, firstLand, landVo, lastLand, b4End,
-  b5, airportVo, durableVo, sandboxVo, closeStart, closeVo, end,
+  agentsVo, agentsEnd, b5, airportVo, durableVo, sandboxVo, workerVo, recapStart, recapVo, nextVo, closeStart, closeVo, end,
 };
 
 export const VO: Array<{ id: LineId; at: number }> = [
-  { id: "intro", at: introVo }, { id: "intro2", at: intro2Vo }, { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
+  { id: "open", at: openVo }, { id: "title", at: titleVo }, { id: "agenda", at: agendaVo }, { id: "roadmap", at: roadmapVo },
+  { id: "fan", at: fanVo }, { id: "clean", at: cleanVo }, { id: "late", at: lateVo }, { id: "storm", at: stormVo }, { id: "question", at: questionVo },
+  { id: "map", at: mapVo }, { id: "clearances", at: clearVo }, { id: "chaos", at: chaosVo },
+  { id: "setup", at: setupVo }, { id: "today", at: todayVo }, { id: "rewind", at: todayEnd + 0.5 },
   { id: "real1", at: real1Vo }, { id: "real2", at: real2Vo }, { id: "order", at: orderVo }, { id: "hold", at: holdVo }, { id: "land", at: landVo },
-  { id: "airport", at: airportVo }, { id: "durable", at: durableVo }, { id: "sandbox", at: sandboxVo }, { id: "close", at: closeVo },
+  { id: "agents", at: agentsVo },
+  { id: "airport", at: airportVo }, { id: "durable", at: durableVo }, { id: "sandbox", at: sandboxVo }, { id: "worker", at: workerVo },
+  { id: "recap", at: recapVo }, { id: "next", at: nextVo }, { id: "close", at: closeVo },
+];
+
+/** The video's sections, for the roadmap strip, and the three points with the stretch of video that shows each. */
+export const SECTIONS = [
+  { id: "PROBLEM", from: p1End, to: probEnd },
+  { id: "IDEA", from: probEnd, to: rewindEnd },
+  { id: "DEMO", from: rewindEnd, to: agentsEnd },
+  { id: "HOW", from: agentsEnd, to: recapStart },
+  { id: "RECAP", from: recapStart, to: closeStart },
+] as const;
+export const POINTS = [
+  { n: 1, title: "SEE EVERY CHANGE IN FLIGHT", proof: "Every push to a fork reaches ATC within seconds" },
+  { n: 2, title: "WARN ABOUT COLLISIONS EARLY", proof: "Caught one Git can't see, before anyone asked to merge" },
+  { n: 3, title: "DECIDE WHAT LANDS NEXT", proof: "1 of 5 changes redid work. 0 rebases." },
+] as const;
+export const POINT_AT: Array<{ n: number; from: number; to: number }> = [
+  { n: 1, from: b4, to: flag },
+  { n: 2, from: flag, to: orderVo },
+  { n: 3, from: orderVo, to: b4End },
 ];
 export const voFile = (id: LineId) => vo[id].file;
+/** Roughly when a phrase is spoken: the line's start plus its length scaled by where the phrase sits in the text. */
+export function cue(id: LineId, phrase: string): number {
+  const text: string = LINES[id];
+  const i = text.indexOf(phrase);
+  if (i < 0) throw new Error(`"${phrase}" is not in line ${id}`);
+  const v = VO.find((x) => x.id === id)!;
+  return v.at + (d(id) * i) / text.length;
+}
 export const voSeconds = d;

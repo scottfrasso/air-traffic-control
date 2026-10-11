@@ -1,9 +1,8 @@
-/** Beat 5: how it's built on Cloudflare, one card per product saying what it does and why it matters; then the close. */
-import { AbsoluteFill } from "remotion";
+/** How it's built on Cloudflare: one card per product saying what it does and why it matters. */
 import type { Scene } from "../scene/draw";
 import { clamp, glide, GROUND, HANGARS, LIVERY, SCALE, smooth, TOWER, type Plane } from "../scene/geometry";
 import { C, PIXEL, Stage, TERM } from "../scene/Stage";
-import { RUN, T } from "../timeline";
+import { T } from "../timeline";
 import { LIV, PRS, where } from "./RealRun";
 
 const TRAFFIC = [
@@ -25,7 +24,7 @@ export function Airport({ t }: { t: number }) {
     return { from: [x.plane.x, x.plane.y] as [number, number], to: [TOWER.x, TOWER.top - 4] as [number, number], color: C.cyan, progress: phase };
   });
   const inDurable = t >= T.durableVo && t < T.sandboxVo;
-  const inSandbox = t >= T.sandboxVo;
+  const inSandbox = t >= T.sandboxVo && t < T.workerVo;
   const scene: Scene = {
     t,
     planes: [...parked, ...traffic.map((x) => x.plane)],
@@ -33,24 +32,20 @@ export function Airport({ t }: { t: number }) {
     towerLight: inDurable && Math.floor(t * 3) % 2 === 0 ? C.cyan : undefined,
     checkLight: inSandbox ? (Math.floor(t * 3) % 2 ? C.green : "#2f8a45") : undefined,
   };
-  const closing = t >= T.closeStart;
-  const starts = [T.airportVo + 2.2, T.durableVo + 0.8, T.sandboxVo + 0.8];
+  const starts = [T.airportVo + 2.2, T.durableVo + 0.8, T.sandboxVo + 0.8, T.workerVo + 0.6];
   const current = starts.filter((x) => t >= x).length - 1;
   const glow = current === 0 ? clamp((t - starts[0]!) / 0.4) * (0.5 + 0.5 * Math.sin(t * 4)) : 0;
   return (
     <Stage scene={scene}>
-      {!closing && (
-        <>
-          {HANGARS.map((hx) => (
-            <div key={hx} style={{ position: "absolute", left: (hx - 3) * SCALE, top: (GROUND - 29) * SCALE, width: 50 * SCALE, height: 30 * SCALE, boxShadow: `0 0 40px 12px rgba(250,174,64,${0.5 * glow})`, background: `rgba(250,174,64,${0.12 * glow})` }} />
-          ))}
-          <div style={{ position: "absolute", left: 48, top: 40, font: `22px/1 ${PIXEL}`, color: C.orange, opacity: clamp((t - T.airportVo) / 0.4) }}>BUILT ON CLOUDFLARE</div>
-          <div style={{ position: "absolute", left: 960, top: 90, transform: "translateX(-50%)", width: 1400, display: "flex", flexDirection: "column", gap: 18 }}>
-            {CARDS.map((c, i) => t >= starts[i]! && <Card key={c.title} n={i + 1} {...c} opacity={clamp((t - starts[i]!) / 0.4)} active={i === current} />)}
-          </div>
-        </>
-      )}
-      {closing && <Close t={t} />}
+      <>
+        {HANGARS.map((hx) => (
+          <div key={hx} style={{ position: "absolute", left: (hx - 3) * SCALE, top: (GROUND - 29) * SCALE, width: 50 * SCALE, height: 30 * SCALE, boxShadow: `0 0 40px 12px rgba(250,174,64,${0.5 * glow})`, background: `rgba(250,174,64,${0.12 * glow})` }} />
+        ))}
+        <div style={{ position: "absolute", left: 48, top: 40, font: `22px/1 ${PIXEL}`, color: C.orange, opacity: clamp((t - T.airportVo) / 0.4) }}>BUILT ON CLOUDFLARE</div>
+        <div style={{ position: "absolute", left: 960, top: 84, transform: "translateX(-50%)", width: 1400, display: "flex", flexDirection: "column", gap: 14 }}>
+          {CARDS.map((c, i) => t >= starts[i]! && <Card key={c.title} n={i + 1} {...c} opacity={clamp((t - starts[i]!) / 0.4)} active={i === current} />)}
+        </div>
+      </>
     </Stage>
   );
 }
@@ -59,11 +54,12 @@ const CARDS = [
   { title: "ARTIFACTS", color: C.amber, what: "A Git fork for every agent.", why: "Agents work in parallel, and every push is an event ATC reacts to right away." },
   { title: "DURABLE OBJECT", color: C.cyan, what: "One per repo: every open PR, its check results, and the landing order.", why: "Recomputes the order the moment anything changes. Every agent gets the same answer." },
   { title: "SANDBOX", color: C.green, what: "Containers that run the test merges and builds, isolated from ATC.", why: "Fast: main is built once, only what changed is re-checked, results are cached." },
+  { title: "WORKER + WORKFLOWS", color: C.orange, what: "One Worker: the MCP server agents talk to, the API, this dashboard.", why: "Each push runs as a Workflow, so a check that fails halfway is retried, not lost." },
 ];
 
 function Card({ n, title, color, what, why, opacity, active }: { n: number; title: string; color: string; what: string; why: string; opacity: number; active: boolean }) {
   return (
-    <div style={{ opacity, display: "grid", gridTemplateColumns: "90px 1fr", padding: "18px 28px 16px", background: "rgba(15,21,48,0.95)", border: `6px solid ${active ? color : C.edge}`, boxShadow: "8px 8px 0 #0f1530" }}>
+    <div style={{ opacity, display: "grid", gridTemplateColumns: "90px 1fr", padding: "14px 28px 12px", background: "rgba(15,21,48,0.95)", border: `6px solid ${active ? color : C.edge}`, boxShadow: "8px 8px 0 #0f1530" }}>
       <div style={{ font: `56px/1 ${PIXEL}`, color }}>{n}</div>
       <div>
         <div style={{ font: `28px/1.2 ${PIXEL}`, color }}>{title}</div>
@@ -74,14 +70,3 @@ function Card({ n, title, color, what, why, opacity, active }: { n: number; titl
   );
 }
 
-function Close({ t }: { t: number }) {
-  const k = clamp((t - T.closeStart) / 0.6);
-  return (
-    <AbsoluteFill style={{ background: `rgba(15,21,48,${0.78 * k})`, alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 34, opacity: k }}>
-      <div style={{ font: `150px/1 ${PIXEL}`, color: C.orange, textShadow: "10px 10px 0 #000" }}>ATC</div>
-      <div style={{ font: `34px/1.3 ${PIXEL}`, color: C.amber }}>AIR TRAFFIC CONTROL FOR AI CODING AGENTS</div>
-      <div style={{ font: `40px/1.2 ${TERM}`, color: C.text, marginTop: 20 }}>Built on Cloudflare: Workers · Artifacts · Durable Objects · Workflows · Sandbox · MCP</div>
-      <div style={{ font: `30px/1.2 ${TERM}`, color: C.dim }}>The run in this video: {RUN.baseline}, recorded {RUN.recordedAt.slice(0, 10)}</div>
-    </AbsoluteFill>
-  );
-}

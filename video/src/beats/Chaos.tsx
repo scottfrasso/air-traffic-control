@@ -1,15 +1,13 @@
 /**
- * Beat 0: the metaphor. Each PR is a plane landing on main. On GitHub nobody is in the tower, so every PR lands
- * whenever it's ready; then the title: we built the controller. Illustration, not a recording.
+ * The airport without a tower: every change lands whenever it's ready, and some break main or are sent around.
+ * Illustration, not a recording.
  */
-import { AbsoluteFill } from "remotion";
 import type { Scene } from "../scene/draw";
 import { clamp, LIVERY, path, RUNWAY, TOUCHDOWN, TOWER, type Plane } from "../scene/geometry";
-import { At, C, Callout, Caption, PIXEL, Popup, Stage, Tag, TERM } from "../scene/Stage";
-import { T, voSeconds } from "../timeline";
+import { At, C, Callout, Caption, Popup, Stage, Tag } from "../scene/Stage";
+import { T } from "../timeline";
 
-const I = voSeconds("intro");
-const at = (k: number) => T.introVo + k * I;
+const at = (k: number) => T.chaosVo + k * T.CHAOS;
 const END = RUNWAY.x + RUNWAY.w - 14;
 
 type Fate = "land" | "around";
@@ -32,33 +30,20 @@ function fly(p: (typeof PLANES)[number], t: number): Plane {
 
 export function Chaos({ t }: { t: number }) {
   const planes = PLANES.map((p) => ({ p, plane: fly(p, t) }));
-  const titleK = clamp((t - T.intro2Vo + 0.2) / 0.6);
-  const scene: Scene = { t, planes: planes.map((x) => x.plane), towerLight: t > T.intro2Vo + 0.6 && Math.floor(t * 3) % 2 === 0 ? C.cyan : undefined };
+  const scene: Scene = { t, planes: planes.map((x) => x.plane) };
   const show = (k: number) => clamp((t - at(k)) / 0.4);
   return (
     <Stage scene={scene}>
-      {titleK < 1 &&
-        planes.map(({ p, plane }) => (
-          <div key={p.id}>
-            {t < at(p.arrive) && <At x={plane.x} y={plane.y - 8} align="edge"><Tag text={p.pr} opacity={show(p.enter + 0.08) * (1 - titleK)} /></At>}
-            {p.pop && <At x={plane.x} y={plane.y}><Popup text={p.pop} color={p.fate === "land" ? C.amber : C.red} age={(t - at(p.arrive)) / 2.2} /></At>}
-          </div>
-        ))}
-      {titleK < 1 && <Callout x={TOWER.x} y={TOWER.top - 8} rise={40} title="NO CONTROLLER" color={C.red} opacity={show(0.33) * (1 - titleK)} />}
-      {titleK < 1 && t < at(0.33) && <Caption opacity={show(0.02)}>Each pull request is a plane landing on <span style={{ color: C.amber }}>main</span></Caption>}
-      {titleK < 1 && t >= at(0.55) && <Caption opacity={show(0.55) * (1 - titleK)}><span style={{ color: C.amber }}>GITHUB:</span> every PR lands when it's ready</Caption>}
-      {titleK > 0 && <Title k={titleK} fadeOut={clamp((t - T.setupStart + 0.5) / 0.5)} />}
+      {planes.map(({ p, plane }) => (
+        <div key={p.id}>
+          {t < at(p.arrive) && <At x={plane.x} y={plane.y - 8} align="edge"><Tag text={p.pr} opacity={show(p.enter + 0.08)} /></At>}
+          {p.pop && <At x={plane.x} y={plane.y}><Popup text={p.pop} color={p.fate === "land" ? C.amber : C.red} age={(t - at(p.arrive)) / 2.2} /></At>}
+        </div>
+      ))}
+      <Callout x={TOWER.x} y={TOWER.top - 8} rise={40} title="NO CONTROLLER" color={C.red} opacity={show(0.33)} />
+      {t < at(0.33) && <Caption opacity={show(0.02)}>Each change is a plane landing on <span style={{ color: C.amber }}>main</span></Caption>}
+      {t >= at(0.55) && <Caption opacity={show(0.55)}><span style={{ color: C.amber }}>NO TOWER:</span> every change lands when it's ready</Caption>}
     </Stage>
   );
 }
 
-function Title({ k, fadeOut }: { k: number; fadeOut: number }) {
-  return (
-    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 36, opacity: k * (1 - fadeOut), background: `rgba(15,21,48,${0.55 * k})` }}>
-      <div style={{ font: `150px/1 ${PIXEL}`, color: C.orange, textShadow: "10px 10px 0 #0f1530" }}>ATC</div>
-      <div style={{ font: `30px/1.4 ${PIXEL}`, color: C.amber }}>AIR TRAFFIC CONTROL</div>
-      <div style={{ font: `48px/1.2 ${TERM}`, color: C.text }}>for AI coding agents merging pull requests into one repo</div>
-      <div style={{ font: `26px/1.2 ${PIXEL}`, color: C.orange, marginTop: 10 }}>BUILT ON CLOUDFLARE</div>
-    </AbsoluteFill>
-  );
-}

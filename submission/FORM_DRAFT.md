@@ -57,7 +57,7 @@ Why this fit: forks are cheap and programmatic in Artifacts, so a fork per agent
 
 ## Demo video
 
-`submission/atc-demo.mp4`. **Must be re-cut to 5–10 min first** (currently 2:57). See `VIDEO_STORYBOARD_V8.md`.
+`submission/atc-demo-v8.mp4` (6:52). Script: `VIDEO_SCRIPT_V8.md`.
 
 ## Open source repository URL (2048)
 
