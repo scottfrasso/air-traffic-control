@@ -3,7 +3,10 @@ import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type PairResult, type SingleResult } from "./checker";
-import { approachQueue, isGreen, landingOrder } from "./landing";
+import {
+  approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
+  type PairCheckRow, type PairQueueRow,
+} from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
 import { SCHEMA } from "./schema";
@@ -239,26 +242,37 @@ export class Coordinator extends DurableObject<Env> {
     }
     if (fork.head_sha === sha) return;
     this.sql.exec("UPDATE forks SET head_sha = ?, check_status = 'pending' WHERE name = ?", sha, repo);
+    this.sql.exec("INSERT INTO head_seen(fork, sha, at) VALUES (?, ?, ?) ON CONFLICT(fork) DO UPDATE SET sha = excluded.sha, at = excluded.at", repo, sha, Date.now());
     this.log("push.received", { sha, source, commits: isPushed(event) ? event.payload.commits.map((c) => c.message) : undefined }, repo);
     // A new push is a fresh attempt: drop any go-around/blocked notes; the checks on this push decide.
     this.resolveSignals({ fork: repo, kind: "rebase_required" });
     this.resolveSignals({ fork: repo, kind: "land_blocked" });
+    this.resolveSignals({ fork: repo, kind: "check_failed" });
+    this.resolveSignals({ about_fork: repo, kind: "check_failed" });
     await this.startPipeline(repo, sha);
   }
 
   /**
    * kind "push": full pipeline (index, overlap signals, PR-on-main check, pair merges).
    * kind "recheck": main moved; only re-verify that the PR still merges onto the new main and typechecks.
+   * kind "pairs": a pair check was lost or went stale; re-run just those pairs at the current heads.
    */
-  private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" = "push") {
+  /** Returns false if the instance couldn't be created (usually: the same push was already started). */
+  private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" | "pairs" = "push", others: Array<{ name: string; sha: string }> = []): Promise<boolean> {
     const main = this.meta("baseline_head") ?? "";
-    const id = `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
+    const raw =
+      kind === "pairs"
+        ? `p${Date.now()}-${sha.slice(0, 12)}-${others.map((o) => o.sha.slice(0, 12)).join("-")}-${fork}` // unique part first: ids are cut at 100 chars
+        : `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}`;
+    const id = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
     try {
-      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind } });
+      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind, others } });
       this.log("pipeline.started", { sha, instance: id }, fork);
+      return true;
     } catch (err) {
       // Same push seen twice (event + reconcile, or queue redelivery) → instance already exists.
       this.log("pipeline.duplicate", { sha, error: (err as Error).message }, fork);
+      return false;
     }
   }
 
@@ -403,10 +417,46 @@ export class Coordinator extends DurableObject<Env> {
   // ── speculative checks (milestone 4) ───────────────────────────────────
 
   /** What the pipeline should check for a push: the other active forks to merge with. */
-  async checkPlan(fork: string, sha: string): Promise<{ current: boolean; others: string[] }> {
+  async checkPlan(fork: string, sha: string): Promise<{ current: boolean; others: Array<{ name: string; sha: string }> }> {
     const row = this.fork(fork);
     if (!row || row.status !== "active" || row.head_sha !== sha) return { current: false, others: [] };
-    return { current: true, others: this.activeForks().filter((f) => f.name !== fork && f.head_sha !== f.base_sha).map((f) => f.name) };
+    const others = this.activeForks().filter((f) => f.name !== fork && f.head_sha !== f.base_sha);
+    for (const o of others) this.markPairQueued(row, o);
+    return { current: true, others: others.map((f) => ({ name: f.name, sha: f.head_sha })) };
+  }
+
+  private markPairQueued(x: ForkRow, y: ForkRow) {
+    const [a, b] = x.name < y.name ? [x, y] : [y, x];
+    this.sql.exec(
+      `INSERT INTO pair_queue(fork_a, fork_b, sha_a, sha_b, queued_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, queued_at = excluded.queued_at`,
+      a.name, b.name, a.head_sha, b.head_sha, Date.now(),
+    );
+  }
+
+  /** Pairs of active PRs whose current heads have no speculative-merge result yet (issue #5). */
+  private outstandingPairs() {
+    return outstandingPairs(this.activeForks(), this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b FROM pair_checks").toArray());
+  }
+
+  /** Re-queue pair checks that are missing or stale (a result was dropped as not current, or a check was lost). */
+  private async requeuePairs() {
+    const queue = this.sql.exec<PairQueueRow>("SELECT * FROM pair_queue").toArray();
+    const seen = new Map(this.sql.exec<{ fork: string; sha: string; at: number }>("SELECT * FROM head_seen").toArray().map((r) => [r.fork, r]));
+    const indexing = new Map(
+      this.activeForks()
+        .filter((f) => f.processed_sha !== f.head_sha)
+        .map((f) => [f.name, seen.get(f.name)?.sha === f.head_sha ? seen.get(f.name)!.at : 0] as const),
+    );
+    const due = pairsToQueue(this.outstandingPairs(), queue, Date.now(), indexing);
+    // Mark every due pair before the first await, so an interleaved requeue doesn't start any of them twice.
+    for (const need of due) this.markPairQueued(this.fork(need.a)!, this.fork(need.b)!);
+    for (const need of due) {
+      const prev = queue.find((q) => q.fork_a === need.a && q.fork_b === need.b);
+      this.log("check.pair.requeued", { a: need.a, b: need.b, reason: indexing.has(need.a) || indexing.has(need.b) ? "indexing stuck" : prev ? "stale or lost" : "never checked" }, null);
+      if (!(await this.startPipeline(need.a, need.shaA, "pairs", [{ name: need.b, sha: need.shaB }])))
+        this.sql.exec("DELETE FROM pair_queue WHERE fork_a = ? AND fork_b = ? AND sha_a = ? AND sha_b = ?", need.a, need.b, need.shaA, need.shaB);
+    }
   }
 
   private setCheck(fork: string, sha: string, ok: boolean, detail: string, base: string | null) {
@@ -439,11 +489,10 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Store a pair result; a merge-only typecheck failure becomes a semantic-conflict signal to both forks. */
   async applyPair(json: string): Promise<{ status: string }> {
-    const r = JSON.parse(json) as PairResult;
+    const r = JSON.parse(json) as PairResult & { error?: string };
+    if (r.error) throw new Error(`pair check failed: ${r.error}`); // the step retries; after that, applyPairFailure
 
-    const a = this.fork(r.a);
-    const b = this.fork(r.b);
-    const fresh = a?.head_sha === r.aloneA.sha && b?.head_sha === r.aloneB.sha;
+    const fresh = pairResultIsCurrent(this.activeForks(), r.a, r.aloneA.sha, r.b, r.aloneB.sha);
     const breaking: Record<string, string[]> = {};
     for (const row of this.sql
       .exec<{ fork: string; name: string }>("SELECT fork, name FROM symbol_changes WHERE change IN ('signature_changed', 'removed') AND fork IN (?, ?)", r.a, r.b)
@@ -451,6 +500,13 @@ export class Coordinator extends DurableObject<Env> {
       breaking[row.fork] = [...(breaking[row.fork] ?? []), row.name];
     const v = analyzePair(r, breaking);
 
+    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError), timings: r.timings ?? [] }, null);
+    if (!fresh) {
+      // Not for both PRs' current heads: recording it would overwrite a newer result, or mark a push ATC hasn't
+      // seen yet as checked without raising its conflicts. Drop it and make sure the current heads get checked.
+      await this.requeuePairs();
+      return { status: `${v.status} (stale)` };
+    }
     const [x, y] = [r.a, r.b].sort() as [string, string];
     this.sql.exec(
       `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -458,8 +514,7 @@ export class Coordinator extends DurableObject<Env> {
       x, y, x === r.a ? r.aloneA.sha : r.aloneB.sha, x === r.a ? r.aloneB.sha : r.aloneA.sha, v.status,
       JSON.stringify({ newErrors: v.newErrors, symbol: v.symbol, changer: v.changer, conflicts: v.conflicts }), Date.now(),
     );
-    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError), timings: r.timings ?? [] }, null);
-    if (!fresh) return { status: `${v.status} (stale)` };
+    for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const) this.resolveSignals({ fork: me, kind: "check_failed", about_fork: other });
 
     if (v.status === "clean" || v.status === "inherited_failure") {
       for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const) {
@@ -495,6 +550,29 @@ export class Coordinator extends DurableObject<Env> {
     return { status: v.status };
   }
 
+  /**
+   * A pair check that kept failing (container error, timeout). Record it as checked with status "error" so it can't
+   * block landing forever, and tell both PRs. The land-time typecheck on main still catches a real conflict.
+   */
+  async applyPairFailure(a: string, shaA: string, b: string, shaB: string, error: string): Promise<void> {
+    this.log("check.pair.failed", { a, b, shaA, shaB, error: error.slice(0, 300) }, null);
+    if (!pairResultIsCurrent(this.activeForks(), a, shaA, b, shaB)) return; // a newer push re-queues it anyway
+    // A duplicate run (re-queued while the first was slow) failing must not overwrite a real result.
+    if (!mayRecordPairFailure(this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b, status FROM pair_checks").toArray(), a, shaA, b, shaB)) return;
+    const [x, sx, y, sy] = a < b ? [a, shaA, b, shaB] : [b, shaB, a, shaA];
+    this.sql.exec(
+      `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, 'error', ?, ?)
+       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, status = excluded.status, detail = excluded.detail, checked_at = excluded.checked_at`,
+      x, y, sx, sy, JSON.stringify({ error: error.slice(0, 500) }), Date.now(),
+    );
+    for (const [me, other] of [[a, b], [b, a]] as const)
+      this.emitSignal({
+        fork: me, kind: "check_failed", about_fork: other, symbol: null,
+        message: `ATC couldn't check your PR against ${other} (${error.slice(0, 120)}). Landing isn't blocked on it; the typecheck on main at landing still applies.`,
+        data: { error: error.slice(0, 500) }, dedupe_key: `check_failed:${me}:${other}:${shaA}:${shaB}`,
+      });
+  }
+
   // ── ATC sequence ────────────────────────────────────────────────────────
 
   private conflictMap(): Map<string, Conflict[]> {
@@ -526,7 +604,7 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   sequence(): SequenceEntry[] {
-    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap());
+    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()));
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -600,18 +678,28 @@ export class Coordinator extends DurableObject<Env> {
         : deny(`Your PR does not typecheck at ${me.head_sha.slice(0, 7)}: ${detail}`.trim());
     }
 
+    // Never land before every pair check against the other PRs' current heads is in (issue #5).
+    if (forksWaitingOnPairs(this.outstandingPairs()).has(fork)) {
+      await this.requeuePairs();
+      return { landed: false, fork, reason: "Still checking your PR against the other open PRs; retry in a few seconds.", baselineHead, retry: true };
+    }
+
     const ahead = this.rivals(fork).filter((r) => landingOrder(r, me, baselineHead) < 0);
     if (ahead.length) {
       const r = ahead[0]!;
       return deny(`${r.name} conflicts with your fork and is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Wait for it to land, then rebase.`);
     }
 
-    if (this.meta("landing") && Number(this.meta("landing")) > Date.now() - 120_000) return { landed: false, fork, reason: "Another landing is in progress; retry shortly.", baselineHead, retry: true };
-    this.setMeta("landing", String(Date.now()));
+    // One landing at a time (issue #3): a token so a landing that outlived its lock can't release someone else's.
+    const token = crypto.randomUUID();
+    const lock = takeLock(parseLock(this.meta("landing")), Date.now(), token);
+    if (!lock) return { landed: false, fork, reason: "Another landing is in progress; retry shortly.", baselineHead, retry: true };
+    this.setMeta("landing", JSON.stringify(lock));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
+      // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
       const result = JSON.parse(
-        await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: forkRef, baseline: { ...baseRef, expectedHead: baselineHead } }),
+        await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead } }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
       if (result.retry) return { landed: false, fork, reason: result.reason ?? "retry", baselineHead, retry: true };
@@ -622,7 +710,7 @@ export class Coordinator extends DurableObject<Env> {
       }
       return this.onLanded(me, result.landedSha, baselineHead, !!result.merged);
     } finally {
-      this.setMeta("landing", "");
+      if (mayRelease(parseLock(this.meta("landing")), token)) this.setMeta("landing", "");
     }
   }
 
@@ -745,6 +833,7 @@ export class Coordinator extends DurableObject<Env> {
         }
       }),
     );
+    await this.requeuePairs();
     return found;
   }
 

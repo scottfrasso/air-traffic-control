@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS pair_checks(
   detail TEXT NOT NULL, checked_at INTEGER NOT NULL,
   PRIMARY KEY(fork_a, fork_b));
 
+-- Pair checks started (by a push pipeline or a re-queue) and not yet known to be done; one row per pair.
+CREATE TABLE IF NOT EXISTS pair_queue(
+  fork_a TEXT NOT NULL, fork_b TEXT NOT NULL, sha_a TEXT NOT NULL, sha_b TEXT NOT NULL,
+  queued_at INTEGER NOT NULL,
+  PRIMARY KEY(fork_a, fork_b));
+
+-- When each fork's current head was first seen (to tell "being indexed" from "stuck").
+CREATE TABLE IF NOT EXISTS head_seen(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
+
 -- Recorded airspace snapshots for replay (one per state change, de-duplicated).
 CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, state TEXT NOT NULL);
 

@@ -8,15 +8,16 @@
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { landGuard } from "./guard.ts";
 
-interface RepoRef { name: string; remote: string; token: string; sha?: string }
+interface RepoRef { name: string; remote: string; token: string }
 interface TsError { file: string; line: number; col: number; code: string; message: string; lineText: string }
 interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: string; cached?: boolean; ms?: number }
 
 type Input =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef; baseline: RepoRef & { expectedHead: string } };
+  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } };
 
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
@@ -197,8 +198,9 @@ function run(): unknown {
   }
   // land: merge queue. Put the PR on top of the current main, typecheck that exact commit, push it.
   const baseHead = fetchMain(input.baseline, "base");
-  if (baseHead !== input.baseline.expectedHead) return { mode: "land", landed: false, retry: true, reason: `main moved to ${baseHead.slice(0, 7)} while landing; retry` };
   const forkHead = fetchMain(input.fork, "fork");
+  const moved = landGuard(baseHead, input.baseline.expectedHead, forkHead, input.fork.expectedHead);
+  if (moved) return { mode: "land", landed: false, retry: true, reason: moved, forkHead, baseHead };
   const onto = ontoBase(forkHead, baseHead, `Land ${prOf(input.fork.name)} via ATC`);
   if ("conflicts" in onto) return { mode: "land", landed: false, mainConflict: true, reason: `merge conflict with main in ${onto.conflicts.join(", ")}`, forkHead, baseHead };
   const check = typecheck(onto.sha, "land", mainBuildInfo(baseHead));

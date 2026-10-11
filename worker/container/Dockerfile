@@ -8,6 +8,6 @@ RUN git config --system user.email atc@agentmesh.dev \
   && git config --system user.name "ATC" \
   && git config --system init.defaultBranch main \
   && git config --system advice.detachedHead false
-COPY check.ts /opt/agentmesh/check.ts
+COPY check.ts guard.ts /opt/agentmesh/
 RUN mkdir -p /work
 CMD ["sleep", "infinity"]

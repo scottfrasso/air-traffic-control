@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { CHECK_TIMEOUT_S } from "./landing";
 
 /** What container/check.ts accepts (tokens are short-lived Artifacts repo tokens). */
 export interface RepoRef {
@@ -9,7 +10,7 @@ export interface RepoRef {
 export type CheckInput =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef; baseline: RepoRef & { expectedHead: string } };
+  | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string } };
 
 export interface TsError {
   file: string;
@@ -86,7 +87,7 @@ export class Checker extends DurableObject<Env> {
   /** Run one check; returns the JSON result as a string (keeps the RPC boundary simple). */
   async run(input: CheckInput): Promise<string> {
     const c = await this.container();
-    const proc = await c.exec(["timeout", "--kill-after=5", "240", "node", "/opt/agentmesh/check.ts"], {
+    const proc = await c.exec(["timeout", "--kill-after=5", String(CHECK_TIMEOUT_S), "node", "/opt/agentmesh/check.ts"], {
       env: { CHECK_INPUT: JSON.stringify(input), PATH: "/usr/local/bin:/usr/bin:/bin" },
     });
     const out = await proc.output();
