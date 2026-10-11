@@ -17,7 +17,7 @@ test("clearance history skips snapshots the PR isn't in", () => {
 });
 
 const input = (over: Partial<FlightLogInput> = {}): FlightLogInput => ({
-  fork: B, agent: "b", diffLines: 12, intents: ["Add member pricing at checkout"], onto: "abcdef1234567890",
+  fork: B, agent: "b", diffLines: 12, landed: true, intents: ["Add member pricing at checkout"], onto: "abcdef1234567890",
   signals: [
     { kind: "semantic_conflict", about_fork: A, symbol: "applyDiscount", message: "long", created_at: 2 },
     { kind: "semantic_conflict", about_fork: A, symbol: "applyDiscount", message: "refreshed", created_at: 3 },
@@ -47,6 +47,13 @@ test("multi-line or huge values stay on one line", () => {
   const note = flightLogNote(input({ intents: ["line one\nline two " + "x".repeat(400)] }));
   const intent = note.split("\n").find((l) => l.startsWith("ATC-Intent:"))!;
   assert.ok(intent.length <= 215 && intent.endsWith("..."));
+});
+
+test("an in-flight log doesn't claim a landing", () => {
+  const note = flightLogNote(input({ landed: false }));
+  assert.doesNotMatch(note, /landed after a new push|ATC-Landed-Onto/);
+  assert.match(note, /^ATC-Go-Around: sent around after PR1 landed \(conflict on applyDiscount\)$/m);
+  assert.match(note, /^ATC-In-Flight-On: abcdef123456$/m);
 });
 
 test("intents are deduped and capped", () => {

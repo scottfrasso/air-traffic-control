@@ -1,6 +1,6 @@
 # ADR-0019: Flight log as a git note on the landed commit; savings computed from the event log
 
-- Status: Accepted. Extends ADR-0014 (recorded snapshots now carry flight logs and savings) and ADR-0015 (the land step also writes a note).
+- Status: Accepted. Extends ADR-0014 (snapshots carry savings; the timeline carries flight logs) and ADR-0015 (a note follows each landing).
 - Date: 2026-10-11. Issues #15 (context preservation) and #17 (savings in numbers).
 
 ## Context
@@ -20,12 +20,18 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     (the latest may not be flushed yet). Long histories keep the first 3 and the last 5.
   - Signals keep only the kinds that tell the story (conflicts, signature changes, overlaps, failed checks), one line
     per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`.
-- **Written in the land step, under the landing lock.** The Coordinator builds the note *before* landing and passes the
-  same text to the container (`land.note`) and to `flight_logs`. After pushing main, the container fetches
-  `refs/notes/atc` into a per-baseline local ref, adds the note (on stdin), and pushes without force. Landings are
-  serialized, so the push fast-forwards; if it's rejected, nothing is overwritten. Each note git call has a 20 s limit:
-  main is already pushed, and a stalled note must not use up the checker's budget (a killed land step leaves a PR that
-  is on main but not recorded as landed until the agent asks again).
+- **Written after the landing is recorded, under the landing lock.** The Coordinator builds the note *before* landing (the
+  story up to that moment) and stores it in `flight_logs` with `noted = 0` when it records the landing. Then, still holding
+  the lock, it makes a separate checker call (`mode: "notes"`) with **every** log not yet in git, so a note that failed
+  on an earlier landing is retried. The container fetches `refs/notes/atc` into a per-baseline local ref, adds the notes
+  (on stdin), and pushes without force. Landings are serialized, so the push fast-forwards; if it's rejected, nothing is
+  overwritten.
+  - Why a separate call: work after the main push inside the land call could be killed by the checker's hard timeout,
+    leaving a PR that is on main but not recorded as landed. Now the landing is recorded first.
+  - Only "couldn't find remote ref" counts as "no notes yet". Any other fetch error skips the write, because starting a
+    new notes history would diverge from the remote one. Transfers use `http.lowSpeedLimit/Time` so a stall fails within ~10 s.
+  - An in-flight log (`get_history` with `fork`) never claims a landing: no "landed after a new push", and
+    `ATC-In-Flight-On` instead of `ATC-Landed-Onto`.
   - The note is bounded: the last 3 distinct intents, one line per signal kind/partner/symbol, at most 8 clearances.
 - **A note failure never fails a landing.** `flight_logs.noted = 0` and `note_error` record it; the text is still served.
 - **Spike (2026-10-11):** Artifacts accepts a push to `refs/notes/atc` and lists it in `ls-remote`. The push-event
@@ -44,10 +50,12 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   the dashboard has a SAVINGS panel.
 
 ## Consequences
-- One extra fetch and push per landing (inside the lock), a fraction of a second.
+- One extra checker call per landing (inside the lock): a fetch, `git notes add` and a push, about a second.
 - Notes are not copied by a plain `git clone`; readers must fetch `refs/notes/atc` (documented in `get_history`).
 - Savings are recomputed from the filtered event log on every flush: linear in the run's events, fine for the demo and
-  tens of PRs; cache by last event id before a large synthetic load run. Snapshots carry savings (small) but not flight
+  tens of PRs; cache by last event id before a large synthetic load run. Savings in snapshots also mean a snapshot on
+  nearly every check, and `flightLogNote` scans every snapshot's sequence: both want a `clearance_changes` table and
+  cached counters before a large run. Snapshots carry savings (small) but not flight
   logs: those never change once written, so `GET /timeline` returns them once and the replay shows each from its `landedAt`.
-- The land step's note path is covered by `run.sh` step 8, not by a container-level unit test.
+- The notes path is covered by `run.sh` step 8, not by a container-level unit test.
 - Older recorded runs have no `flightLogs` or `savings` in their snapshots; the dashboard shows empty panels for them.

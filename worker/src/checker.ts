@@ -10,7 +10,8 @@ export interface RepoRef {
 export type CheckInput =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string }; note?: string };
+  | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string } }
+  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
 
 export interface TsError {
   file: string;
@@ -63,8 +64,12 @@ export interface LandResult {
   previousHead?: string;
   baseHead?: string;
   typecheck?: Typecheck;
-  /** Whether the flight log note reached refs/notes/atc (a failure never undoes the landing). */
-  note?: { ok: boolean; error?: string };
+}
+export interface NotesResult {
+  mode: "notes";
+  /** Landed commits whose flight log note reached refs/notes/atc. */
+  written: string[];
+  error?: string;
 }
 
 const decoder = new TextDecoder();

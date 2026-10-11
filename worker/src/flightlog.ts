@@ -17,8 +17,10 @@ export interface FlightLogInput {
   intents: string[];
   signals: FlightSignal[];
   clearances: ClearanceStep[];
-  /** Main commit the PR lands onto. */
+  /** Main commit the PR lands onto (or current main, while in flight). */
   onto: string;
+  /** False for an in-flight PR's log so far: it must not claim a landing. */
+  landed: boolean;
 }
 
 const WORD: Record<string, string> = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD" };
@@ -59,7 +61,7 @@ export function flightLogNote(f: FlightLogInput): string {
   const steps = f.clearances.length > 8 ? [...f.clearances.slice(0, 3), ...f.clearances.slice(-5)] : f.clearances;
   for (const c of steps) lines.push(`ATC-Clearance: ${WORD[c.clearance] ?? c.clearance.toUpperCase()} (${oneLine(c.reason, 160)})`);
   for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at))
-    lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${prLabel(s.about_fork)} landed (conflict${s.symbol ? ` on ${s.symbol}` : ""}); landed after a new push` : oneLine(s.message)}`);
-  lines.push(`ATC-Diff-Lines: ${f.diffLines}`, `ATC-Landed-Onto: ${f.onto.slice(0, 12)}`);
+    lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${prLabel(s.about_fork)} landed (conflict${s.symbol ? ` on ${s.symbol}` : ""})${f.landed ? "; landed after a new push" : ""}` : oneLine(s.message)}`);
+  lines.push(`ATC-Diff-Lines: ${f.diffLines}`, f.landed ? `ATC-Landed-Onto: ${f.onto.slice(0, 12)}` : `ATC-In-Flight-On: ${f.onto.slice(0, 12)}`);
   return lines.join("\n");
 }

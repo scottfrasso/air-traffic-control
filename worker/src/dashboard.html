@@ -422,9 +422,10 @@
     const r = canvas.getBoundingClientRect();
     const x = (ev.clientX - r.left) * (W / r.width), y = (ev.clientY - r.top) * (H / r.height);
     const logged = new Set((state && state.flightLogs || []).map((l) => l.fork));
+    const shown = state ? targets() : new Map(); // only planes at a gate: older landings are parked out of sight
     let best = null, bestD = 16;
     for (const [name, p] of planes) {
-      if (!logged.has(name)) continue;
+      if (!logged.has(name) || !shown.has(name)) continue;
       const d = Math.hypot(p.x - x, p.y - y);
       if (d < bestD) { best = name; bestD = d; }
     }

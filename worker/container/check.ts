@@ -4,8 +4,8 @@
 // Modes:
 //   pair   typecheck fork A alone, fork B alone, then `git merge` B into A and typecheck the merge
 //   single typecheck one ref
-//   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it,
-//          then attach ATC's flight log to the landed commit as a git note under refs/notes/atc
+//   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
+//   notes  attach ATC's flight logs to landed commits as git notes under refs/notes/atc
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,7 +18,8 @@ interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: strin
 type Input =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string }; note?: string };
+  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
+  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
 
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
@@ -154,25 +155,31 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
   }
 }
 
-/**
- * Append a flight log note for `sha` to the baseline's refs/notes/atc. Landings are serialized by ATC's lock, so a
- * plain (non-force) push is enough; if it is rejected, the note is reported missing and nothing is overwritten.
- * The local ref is per baseline, so it never mixes notes from two runs. Main is already pushed, so every call here is
- * time-limited: a stalled note must not use up the checker's budget and leave a landed PR unrecorded by ATC.
- */
-const NOTE_TIMEOUT_MS = 20_000;
+/** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
+const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"];
+const NOTE_TIMEOUT_MS = 30_000;
 
-function writeNote(base: RepoRef, sha: string, note: string): { ok: boolean; error?: string } {
+/**
+ * Add flight log notes to the baseline's refs/notes/atc. ATC calls this after it has recorded the landing (still under
+ * the landing lock), so a slow or failed note never leaves a landed PR unrecorded. The push is never forced: if it is
+ * rejected, nothing is overwritten and ATC retries those notes on the next landing. The local ref is per baseline.
+ */
+function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>): { mode: "notes"; written: string[]; error?: string } {
   const local = `refs/notes/agentmesh-${base.name}`;
   git(["update-ref", "-d", local], { allowFail: true });
-  git(["fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }); // a new baseline has no notes yet
-  const add = git(["notes", `--ref=${local}`, "add", "-f", "-F", "-", sha], { allowFail: true, input: note, timeoutMs: NOTE_TIMEOUT_MS });
-  if (!add.ok) return { ok: false, error: add.out.slice(0, 200) };
-  const push = timed("push note", () => git(["push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));
-  return push.ok ? { ok: true } : { ok: false, error: push.out.slice(0, 200) };
+  const fetch = git([...LOW_SPEED, "fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS });
+  // Only "no notes yet" may start a new notes history; any other fetch error would make the push diverge.
+  if (!fetch.ok && !/couldn't find remote ref/i.test(fetch.out)) return { mode: "notes", written: [], error: `fetch refs/notes/atc: ${fetch.out.slice(0, 200)}` };
+  for (const n of notes) {
+    const add = git(["notes", `--ref=${local}`, "add", "-f", "-F", "-", n.sha], { allowFail: true, input: n.note });
+    if (!add.ok) return { mode: "notes", written: [], error: `notes add ${n.sha.slice(0, 7)}: ${add.out.slice(0, 200)}` };
+  }
+  const push = timed("push notes", () => git([...LOW_SPEED, "push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));
+  return push.ok ? { mode: "notes", written: notes.map((n) => n.sha) } : { mode: "notes", written: [], error: `push refs/notes/atc: ${push.out.slice(0, 200)}` };
 }
 
 function run(): unknown {
+  if (input.mode === "notes") return writeNotes(input.baseline, input.notes);
   if (input.mode === "single") {
     // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
     const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
@@ -229,8 +236,7 @@ function run(): unknown {
   if (!check.ok) return { mode: "land", landed: false, mainConflict: true, reason: "PR merged onto current main fails typecheck", forkHead, baseHead, typecheck: check };
   const push = git(["push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
   if (!push.ok) return { mode: "land", landed: false, retry: true, reason: `push to main failed (${push.out.slice(0, 120)}); retry`, forkHead, baseHead };
-  const note = input.note ? writeNote(input.baseline, onto.sha, input.note) : undefined;
-  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, note, timings };
+  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }
 
 try {

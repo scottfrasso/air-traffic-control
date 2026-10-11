@@ -88,7 +88,7 @@ function createServer(env: Env) {
         fork: z.string().optional().describe("Your fork name, to include your in-flight PR's log"),
       }),
     },
-    async ({ repo, fork }) => text(await (await coordinatorFor(env, repo)).getHistory(fork)),
+    async ({ repo, fork }) => text(await (await coordinatorFor(env, fork ? baselineOf(fork) : repo)).getHistory(fork)),
   );
 
   server.registerTool(

@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { forkName, headOf, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
-import { checkerFor, type LandResult, type PairResult, type SingleResult } from "./checker";
+import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
   approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
   type PairCheckRow, type PairQueueRow,
@@ -701,11 +701,11 @@ export class Coordinator extends DurableObject<Env> {
     this.setMeta("landing", JSON.stringify(lock));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
-      const note = this.flightLogNote(me, baselineHead);
+      const note = this.flightLogNote(me, baselineHead, true); // the story up to the moment it lands
       // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
       const result = JSON.parse(
         await checkerFor(this.env, baseline, "land").run({
-          mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead }, note,
+          mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead },
         }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
@@ -715,7 +715,9 @@ export class Coordinator extends DurableObject<Env> {
         const where = firstError ? `: ${describeError(firstError)}` : "";
         return deny(`Doesn't fit on current main (${result.reason ?? "landing refused"}${where}). Rebase onto main and fix.`, result.mainConflict ? "rebase_required" : "land_blocked");
       }
-      return this.onLanded(me, result.landedSha, baselineHead, !!result.merged, { text: note, ...(result.note ?? { ok: false, error: "checker did not report a note" }) });
+      const landed = await this.onLanded(me, result.landedSha, baselineHead, !!result.merged, note);
+      await this.writeNotes(); // after the landing is recorded, still under the lock: notes never race each other
+      return landed;
     } finally {
       if (mayRelease(parseLock(this.meta("landing")), token)) this.setMeta("landing", "");
     }
@@ -731,15 +733,15 @@ export class Coordinator extends DurableObject<Env> {
    * After a landing: announce it to everyone. Only PRs with an open conflict against the winner must go around;
    * the rest stay in line and are automatically re-checked on the new main (ATC merges them when they land).
    */
-  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean, note: { text: string; ok: boolean; error?: string }): Promise<LandResponse> {
+  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean, note: string): Promise<LandResponse> {
     const now = Date.now();
     this.setMeta("baseline_head", newHead);
     this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
     this.sql.exec(
-      "INSERT OR REPLACE INTO flight_logs(fork, landed_sha, landed_at, note, noted, note_error) VALUES (?, ?, ?, ?, ?, ?)",
-      winner.name, newHead, now, note.text, note.ok ? 1 : 0, note.ok ? null : (note.error ?? null),
+      "INSERT OR REPLACE INTO flight_logs(fork, landed_sha, landed_at, note, noted, note_error) VALUES (?, ?, ?, ?, 0, NULL)",
+      winner.name, newHead, now, note,
     );
-    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged, noted: note.ok, noteError: note.error }, winner.name);
+    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged }, winner.name);
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
     this.resolveSignals({ fork: winner.name });
@@ -786,8 +788,27 @@ export class Coordinator extends DurableObject<Env> {
 
   // ── flight log (context preservation, ADR-0019) ─────────────────────────
 
+  /** Write every flight log not yet in git (this landing's, plus any that failed before). Never throws. */
+  private async writeNotes() {
+    const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0").toArray();
+    if (!pending.length) return;
+    let error: string;
+    try {
+      const r = JSON.parse(
+        await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: pending.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
+      ) as NotesResult & { error?: string };
+      for (const sha of r.written) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE landed_sha = ?", sha);
+      if (!r.error) return this.log("notes.written", { forks: pending.map((p) => p.fork) });
+      error = r.error;
+    } catch (err) {
+      error = (err as Error).message;
+    }
+    this.sql.exec("UPDATE flight_logs SET note_error = ? WHERE noted = 0", error.slice(0, 300));
+    this.log("notes.failed", { forks: pending.map((p) => p.fork), error: error.slice(0, 300) });
+  }
+
   /** The PR's story so far, as the note ATC attaches to its landed commit. */
-  private flightLogNote(f: ForkRow, onto: string): string {
+  private flightLogNote(f: ForkRow, onto: string, landed: boolean): string {
     const snapshots = this.sql
       .exec<{ at: number; sequence: string | null }>("SELECT at, json_extract(state, '$.sequence') AS sequence FROM snapshots ORDER BY id")
       .toArray()
@@ -801,6 +822,7 @@ export class Coordinator extends DurableObject<Env> {
       signals: this.sql.exec<FlightSignal>("SELECT kind, about_fork, symbol, message, created_at FROM signals WHERE fork = ?", f.name).toArray(),
       clearances: clearanceHistory(snapshots, f.name),
       onto,
+      landed,
     });
   }
 
@@ -820,7 +842,7 @@ export class Coordinator extends DurableObject<Env> {
       baseline: this.baseline, baselineHead: this.meta("baseline_head"), landed: this.flightLogs(),
     };
     const row = fork ? this.fork(fork) : null;
-    if (row?.status === "active") out.inFlight = { fork: row.name, pr: prLabel(row.name), note: this.flightLogNote(row, this.meta("baseline_head") ?? "") };
+    if (row?.status === "active") out.inFlight = { fork: row.name, pr: prLabel(row.name), note: this.flightLogNote(row, this.meta("baseline_head") ?? "", false) };
     return out;
   }
 
