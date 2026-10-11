@@ -75,6 +75,8 @@ Nothing.
 
 ## Next
 
+- **Code review follow-ups (2026-10-11): GitHub issues #1–#11.** Recommended first: #1 (pin the fork head when landing), #2 (stuck pending), #3 (landing lock), #6 (clearance wording). Each issue has file:line references, a suggested fix and acceptance criteria. The video is final, so redeploying the Worker is fine.
+
 1. Make the video: see `handover/03-video.md` (Remotion + ElevenLabs; footage from `demo/src/tools/record-replay.ts`).
 2. Optional: logo asset in the hero cloud; route checks by fork to raise the cache hit rate.
 
