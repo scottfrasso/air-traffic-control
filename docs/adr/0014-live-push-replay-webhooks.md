@@ -11,6 +11,7 @@
   `{type: "atc.event", baseline, event}`, with `x-atc-signature: sha256=<HMAC>` when a secret is set.
 - **Recording:** each flush also stores a compact snapshot (forks, sequence, open conflict and rebase signals), but only when it differs
   from the last one. `GET /timeline` returns all snapshots plus all events.
+  Since ADR-0019 a snapshot also carries the landed PRs' flight logs and the run's savings, so replays show both.
 - **Replay:** `/r/<baseline>?replay` plays the recording through the same renderer, with idle gaps compressed to 2.5 s and speeds
   1x/2x/4x/8x, plus pause and restart. Event popups (PUSH, CONFLICT!, LANDED, REBASE…) come from the real recorded events.
 - **Real agents:** `start_work` returns ready-to-run git commands (with tokens) and a short protocol. `demo/src/live.ts` seeds a

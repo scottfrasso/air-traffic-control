@@ -1,3 +1,4 @@
+import type { Savings } from "../../../worker/src/savings.ts";
 import { config } from "./env.ts";
 
 export interface ForkCredentials {
@@ -61,5 +62,7 @@ export interface StateResponse {
   overlaps: Array<{ kind: string; forks: [string, string]; path: string; symbol: string | null; detail: string }>;
   signals?: Signal[];
   sequence?: Array<{ fork: string; pr: string; position: number; clearance: string; reason: string }>;
+  flightLogs?: Array<{ fork: string; pr: string; landedSha: string; note: string; noted: boolean }>;
+  savings?: Savings;
   events: Array<{ at: number; kind: string; fork: string | null; detail: unknown }>;
 }

@@ -7,7 +7,8 @@ How to work with ATC:
 1. Call `atc` → `start_work` with `repo: "{{BASELINE}}"` and `agent: "{{AGENT}}"`. You get a PR number, git remotes, tokens,
    and ready-to-run `commands` (clone, push, rebaseOntoBaseline, typecheck). Use those commands exactly; they carry the auth.
 2. Run `commands.clone` in your current directory and work inside the created `prN` folder.
-3. Before editing, call `declare_intent` with your fork, a one-line description, the files you'll modify, and the exported
+3. To see why main looks the way it does (what landed before you, and why), call `get_history` with the repo.
+   Before editing, call `declare_intent` with your fork, a one-line description, the files you'll modify, and the exported
    symbols you'll change or depend on. Read any overlaps it returns.
 4. Implement the task. Keep the change small and focused. Run `commands.typecheck` and make it pass.
 5. Commit and run `commands.push`.

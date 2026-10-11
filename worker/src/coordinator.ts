@@ -9,9 +9,11 @@ import {
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
+import { clearanceHistory, flightLogNote, type FlightSignal, type SequenceSnapshot } from "./flightlog";
+import { computeSavings, type LogEvent } from "./savings";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { CoordinatorState, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import type { CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Stop polling after this long without a push or API activity, so idle DOs hibernate (and pick up new deploys). */
@@ -95,6 +97,8 @@ export class Coordinator extends DurableObject<Env> {
       signals: model.signals
         .filter((x) => x.resolved_at === null && ["semantic_conflict", "merge_conflict", "rebase_required"].includes(x.kind))
         .map(({ kind, fork, about_fork, symbol }) => ({ kind, fork, about_fork, symbol, resolved_at: null })),
+      flightLogs: model.flightLogs,
+      savings: model.savings,
     });
     const last = this.sql.exec<{ state: string }>("SELECT state FROM snapshots ORDER BY id DESC LIMIT 1").toArray()[0]?.state;
     if (last !== compact) this.sql.exec("INSERT INTO snapshots(at, state) VALUES (?, ?)", Date.now(), compact);
@@ -697,9 +701,12 @@ export class Coordinator extends DurableObject<Env> {
     this.setMeta("landing", JSON.stringify(lock));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
+      const note = this.flightLogNote(me, baselineHead);
       // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
       const result = JSON.parse(
-        await checkerFor(this.env, baseline, "land").run({ mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead } }),
+        await checkerFor(this.env, baseline, "land").run({
+          mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead }, note,
+        }),
       ) as LandResult & { error?: string };
       if (result.error) return deny(`Landing failed: ${result.error}`);
       if (result.retry) return { landed: false, fork, reason: result.reason ?? "retry", baselineHead, retry: true };
@@ -708,7 +715,7 @@ export class Coordinator extends DurableObject<Env> {
         const where = firstError ? `: ${describeError(firstError)}` : "";
         return deny(`Doesn't fit on current main (${result.reason ?? "landing refused"}${where}). Rebase onto main and fix.`, result.mainConflict ? "rebase_required" : "land_blocked");
       }
-      return this.onLanded(me, result.landedSha, baselineHead, !!result.merged);
+      return this.onLanded(me, result.landedSha, baselineHead, !!result.merged, { text: note, ...(result.note ?? { ok: false, error: "checker did not report a note" }) });
     } finally {
       if (mayRelease(parseLock(this.meta("landing")), token)) this.setMeta("landing", "");
     }
@@ -724,11 +731,15 @@ export class Coordinator extends DurableObject<Env> {
    * After a landing: announce it to everyone. Only PRs with an open conflict against the winner must go around;
    * the rest stay in line and are automatically re-checked on the new main (ATC merges them when they land).
    */
-  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean): Promise<LandResponse> {
+  private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean, note: { text: string; ok: boolean; error?: string }): Promise<LandResponse> {
     const now = Date.now();
     this.setMeta("baseline_head", newHead);
     this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
-    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged }, winner.name);
+    this.sql.exec(
+      "INSERT OR REPLACE INTO flight_logs(fork, landed_sha, landed_at, note, noted, note_error) VALUES (?, ?, ?, ?, ?, ?)",
+      winner.name, newHead, now, note.text, note.ok ? 1 : 0, note.ok ? null : (note.error ?? null),
+    );
+    this.log("land.merged", { head: newHead, previousHead, diffLines: winner.diff_lines, mergedByATC: merged, noted: note.ok, noteError: note.error }, winner.name);
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
     this.resolveSignals({ fork: winner.name });
@@ -771,6 +782,46 @@ export class Coordinator extends DurableObject<Env> {
       rebaseRequired: goAround,
       atc: `ATC: ${prLabel(winner.name)}, landed at ${newHead.slice(0, 7)}${merged ? " (merged onto main by ATC)" : ""}.${goAround.length ? ` ${goAround.map(prLabel).join(", ")} must go around.` : " No one has to go around."}`,
     };
+  }
+
+  // ── flight log (context preservation, ADR-0019) ─────────────────────────
+
+  /** The PR's story so far, as the note ATC attaches to its landed commit. */
+  private flightLogNote(f: ForkRow, onto: string): string {
+    const snapshots = this.sql
+      .exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id")
+      .toArray()
+      .map((r): SequenceSnapshot => ({ at: r.at, sequence: (JSON.parse(r.state) as { sequence?: SequenceSnapshot["sequence"] }).sequence ?? [] }));
+    snapshots.push({ at: Date.now(), sequence: this.sequence() }); // the latest clearance may not be recorded yet
+    return flightLogNote({
+      fork: f.name,
+      agent: f.agent,
+      diffLines: f.diff_lines,
+      intents: this.sql.exec<{ description: string }>("SELECT description FROM intents WHERE fork = ? ORDER BY id", f.name).toArray().map((r) => r.description),
+      signals: this.sql.exec<FlightSignal>("SELECT kind, about_fork, symbol, message, created_at FROM signals WHERE fork = ?", f.name).toArray(),
+      clearances: clearanceHistory(snapshots, f.name),
+      onto,
+    });
+  }
+
+  private flightLogs(): FlightLogEntry[] {
+    return this.sql
+      .exec<{ fork: string; landed_sha: string; landed_at: number; note: string; noted: number }>("SELECT fork, landed_sha, landed_at, note, noted FROM flight_logs ORDER BY landed_at")
+      .toArray()
+      .map((r) => ({ fork: r.fork, pr: prLabel(r.fork), landedSha: r.landed_sha, landedAt: r.landed_at, note: r.note, noted: r.noted === 1 }));
+  }
+
+  /**
+   * Why main looks the way it does: the flight log of every landed PR, oldest first. With `fork`, also that PR's
+   * log so far if it is still in flight.
+   */
+  async getHistory(fork?: string): Promise<{ baseline: string; baselineHead: string | null; landed: FlightLogEntry[]; inFlight?: { fork: string; pr: string; note: string } }> {
+    const out: { baseline: string; baselineHead: string | null; landed: FlightLogEntry[]; inFlight?: { fork: string; pr: string; note: string } } = {
+      baseline: this.baseline, baselineHead: this.meta("baseline_head"), landed: this.flightLogs(),
+    };
+    const row = fork ? this.fork(fork) : null;
+    if (row?.status === "active") out.inFlight = { fork: row.name, pr: prLabel(row.name), note: this.flightLogNote(row, this.meta("baseline_head") ?? "") };
+    return out;
   }
 
   // ── overlaps ────────────────────────────────────────────────────────────
@@ -894,6 +945,15 @@ export class Coordinator extends DurableObject<Env> {
         .exec<{ id: number; fork: string; description: string; files: string; symbols: string; created_at: number }>("SELECT * FROM intents ORDER BY id")
         .toArray()
         .map((i) => ({ ...i, files: JSON.parse(i.files) as string[], symbols: JSON.parse(i.symbols) as string[] })),
+      flightLogs: this.flightLogs(),
+      savings: computeSavings(
+        this.sql
+          .exec<{ at: number; kind: string; fork: string | null; detail: string }>(
+            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.pair')`,
+          )
+          .toArray()
+          .map((e): LogEvent => ({ ...e, detail: JSON.parse(e.detail) as unknown })),
+      ),
       events: this.sql
         .exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id DESC LIMIT 60")
         .toArray()

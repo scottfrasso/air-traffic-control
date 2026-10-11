@@ -4,7 +4,8 @@
 // Modes:
 //   pair   typecheck fork A alone, fork B alone, then `git merge` B into A and typecheck the merge
 //   single typecheck one ref
-//   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
+//   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it,
+//          then attach ATC's flight log to the landed commit as a git note under refs/notes/atc
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +18,7 @@ interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: strin
 type Input =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } };
+  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string }; note?: string };
 
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
@@ -150,6 +151,21 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
   }
 }
 
+/**
+ * Append a flight log note for `sha` to the baseline's refs/notes/atc. Landings are serialized by ATC's lock, so a
+ * plain (non-force) push is enough; if it is rejected, the note is reported missing and nothing is overwritten.
+ * The local ref is per baseline: one warm container serves several baselines.
+ */
+function writeNote(base: RepoRef, sha: string, note: string): { ok: boolean; error?: string } {
+  const local = `refs/notes/agentmesh-${base.name}`;
+  git(["update-ref", "-d", local], { allowFail: true });
+  git(["fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true }); // a new baseline has no notes yet
+  const add = git(["notes", `--ref=${local}`, "add", "-f", "-m", note, sha], { allowFail: true });
+  if (!add.ok) return { ok: false, error: add.out.slice(0, 200) };
+  const push = timed("push note", () => git(["push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true }));
+  return push.ok ? { ok: true } : { ok: false, error: push.out.slice(0, 200) };
+}
+
 function run(): unknown {
   if (input.mode === "single") {
     // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
@@ -207,7 +223,8 @@ function run(): unknown {
   if (!check.ok) return { mode: "land", landed: false, mainConflict: true, reason: "PR merged onto current main fails typecheck", forkHead, baseHead, typecheck: check };
   const push = git(["push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
   if (!push.ok) return { mode: "land", landed: false, retry: true, reason: `push to main failed (${push.out.slice(0, 120)}); retry`, forkHead, baseHead };
-  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
+  const note = input.note ? writeNote(input.baseline, onto.sha, input.note) : undefined;
+  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, note, timings };
 }
 
 try {
