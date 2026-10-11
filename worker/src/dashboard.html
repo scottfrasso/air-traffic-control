@@ -415,7 +415,7 @@
     }
     const body = esc(log.note).replace(/^(ATC-[A-Za-z-]+:)/gm, '<span class="k">$1</span>');
     el.innerHTML = `<h2>FLIGHT LOG · ${esc(log.pr)} <button type="button" id="closeFlight">CLOSE</button></h2><pre>${body}</pre>
-      <p class="hint">${log.noted ? `git note on ${esc(log.landedSha.slice(0, 7))}: git log --notes=atc` : "Note not written to git; kept by ATC."}</p>`;
+      <p class="hint">${log.noted ? `git note on ${esc(log.landedSha.slice(0, 7))}: git log --notes=atc` : "Writing the git note..."}</p>`;
     document.getElementById("closeFlight").onclick = () => showFlight(null);
   }
   function planeAt(ev) {

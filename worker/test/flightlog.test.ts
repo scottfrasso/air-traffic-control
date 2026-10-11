@@ -72,6 +72,19 @@ test("an agent-declared symbol can't forge a trailer", () => {
   assert.equal(note.split("\n").filter((l) => l.startsWith("ATC-Clearance:")).length, 0);
 });
 
+test("signal lines are capped", () => {
+  const signals = Array.from({ length: 30 }, (_, i) => ({ kind: "intent_overlap", about_fork: A, symbol: `s${i}`, message: "", created_at: i }));
+  const lines = flightLogNote(input({ signals })).split("\n").filter((l) => l.startsWith("ATC-Signal:"));
+  assert.equal(lines.length, 13);
+  assert.equal(lines.at(-1), "ATC-Signal: ... and 18 more");
+});
+
+test("no empty values or trailing whitespace (git would strip them and the copies would differ)", () => {
+  const note = flightLogNote(input({ intents: ["", "   "], signals: [{ kind: "intent_overlap", about_fork: A, symbol: " ", message: "", created_at: 1 }] }));
+  assert.ok(!note.includes("ATC-Intent:"));
+  assert.ok(note.split("\n").every((l) => l === l.trimEnd()));
+});
+
 test("a long clearance history keeps how it started and how it ended", () => {
   const clearances = Array.from({ length: 12 }, (_, i) => ({ at: i, clearance: i % 2 ? "hold" : "checking", reason: `r${i}` }));
   const lines = flightLogNote(input({ clearances })).split("\n").filter((l) => l.startsWith("ATC-Clearance:"));

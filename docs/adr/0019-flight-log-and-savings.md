@@ -38,7 +38,9 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     new notes history would diverge from the remote one. Transfers use `http.lowSpeedLimit/Time` so a stall fails within ~10 s.
   - An in-flight log (`get_history` with `fork`) never claims a landing: no "landed after a new push", and
     `ATC-In-Flight-On` instead of `ATC-Landed-Onto`.
-  - The note is bounded: the last 3 distinct intents, one line per signal kind/partner/symbol, at most 8 clearances.
+  - The note is bounded: the last 3 distinct intents, at most 12 signal lines (one per kind/partner/symbol, then
+    "and N more"), at most 8 clearances, the last 3 go-arounds. Empty values and trailing whitespace are dropped, because
+    git strips them and ATC's copy must equal git's for the idempotent retry.
 - **A note failure never fails a landing.** `flight_logs.noted = 0` and `note_error` record it; the text is still served.
 - **Spike (2026-10-11):** Artifacts accepts a push to `refs/notes/atc` and lists it in `ls-remote`. The push-event
   consumer only acts on `refs/heads/main`, so a notes push can't move ATC's idea of main.
@@ -65,4 +67,7 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   cached counters before a large run. Snapshots carry savings (small) but not flight
   logs: those never change once written, so `GET /timeline` returns them once and the replay shows each from its `landedAt`.
 - The notes path is covered by `run.sh` step 8, not by a container-level unit test.
+- Follow-ups from review: use a per-call local notes ref, so two writers in one container (possible only if an RPC
+  drops while the container keeps running) can't share it; throttle retries and failure logs when a notes push fails
+  permanently; consider deduping clearances on clearance + reason (a HOLD behind PR1, then behind PR3, shows once).
 - Older recorded runs have no `flightLogs` or `savings` in their snapshots; the dashboard shows empty panels for them.

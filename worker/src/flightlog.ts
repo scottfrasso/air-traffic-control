@@ -39,6 +39,8 @@ export function clearanceHistory(snapshots: SequenceSnapshot[], fork: string): C
   return out;
 }
 
+const MAX_SIGNALS = 12;
+
 const oneLine = (s: string, max = 200) => {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 3)}...` : t;
@@ -51,18 +53,16 @@ export function flightLogNote(f: FlightLogInput): string {
   const pr = prLabel(f.fork);
   const lines = [`ATC flight log: ${pr} (agent ${oneLine(f.agent, 40)})`, "", `ATC-PR: ${pr}`, `ATC-Agent: ${oneLine(f.agent)}`];
   // Latest distinct intents only: an agent re-declaring in a loop must not grow the note without bound.
-  for (const i of [...new Set(f.intents.map((x) => oneLine(x)).reverse())].slice(0, 3).reverse()) lines.push(`ATC-Intent: ${i}`);
-  const seen = new Set<string>();
-  for (const s of [...f.signals].sort((a, b) => a.created_at - b.created_at)) {
-    if (!STORY_KINDS.has(s.kind)) continue;
-    const line = `ATC-Signal: ${s.kind}${about(s)}`;
-    if (!seen.has(line)) (seen.add(line), lines.push(line));
-  }
+  for (const i of [...new Set(f.intents.map((x) => oneLine(x)).filter(Boolean).reverse())].slice(0, 3).reverse()) lines.push(`ATC-Intent: ${i}`);
+  const signalLines = [...new Set([...f.signals].sort((a, b) => a.created_at - b.created_at).filter((s) => STORY_KINDS.has(s.kind)).map((s) => `ATC-Signal: ${s.kind}${about(s)}`))];
+  lines.push(...signalLines.slice(0, MAX_SIGNALS));
+  if (signalLines.length > MAX_SIGNALS) lines.push(`ATC-Signal: ... and ${signalLines.length - MAX_SIGNALS} more`);
   // The capped list keeps the first steps and the last ones: how it started and how it got cleared.
   const steps = f.clearances.length > 8 ? [...f.clearances.slice(0, 3), ...f.clearances.slice(-5)] : f.clearances;
   for (const c of steps) lines.push(`ATC-Clearance: ${WORD[c.clearance] ?? c.clearance.toUpperCase()} (${oneLine(c.reason, 160)})`);
-  for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at))
+  for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at).slice(-3))
     lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${oneLine(prLabel(s.about_fork), 80)} landed (conflict${s.symbol ? ` on ${oneLine(s.symbol, 80)}` : ""})${f.landed ? "; landed after a new push" : ""}` : oneLine(s.message)}`);
   lines.push(`ATC-Diff-Lines: ${f.diffLines}`, f.landed ? `ATC-Landed-Onto: ${f.onto.slice(0, 12)}` : `ATC-In-Flight-On: ${f.onto.slice(0, 12)}`);
-  return lines.join("\n");
+  // git strips trailing whitespace from notes; do the same so ATC's copy and git's stay identical (idempotent retries).
+  return lines.map((l) => l.trimEnd()).join("\n");
 }
