@@ -56,7 +56,7 @@ export const mayRelease = (current: LandingLock | null, token: string) => curren
 
 // ── pair coverage ────────────────────────────────────────────────────────
 
-export type PairCheckRow = { fork_a: string; fork_b: string; sha_a: string; sha_b: string };
+export type PairCheckRow = { fork_a: string; fork_b: string; sha_a: string; sha_b: string; status?: string };
 export type PairQueueRow = PairCheckRow & { queued_at: number };
 export type PairNeed = { a: string; b: string; shaA: string; shaB: string };
 
@@ -66,8 +66,7 @@ export const PAIR_RETRY_MS = LANDING_LOCK_MS;
 /**
  * Every pair of active PRs with pushed changes must have a speculative-merge result for their CURRENT heads.
  * Returns the pairs that don't (never checked, or checked at older heads). Names are sorted: a < b.
- * PRs whose latest push isn't indexed yet are left out: they can't land anyway, and their push pipeline
- * queues their pairs, so a PR stuck there must not block the PRs it pairs with.
+ * A PR whose latest push is still being indexed counts too: its partners wait for that pair (issue #5).
  */
 export function outstandingPairs(forks: ForkRow[], checks: PairCheckRow[]): PairNeed[] {
   const ready = forks.filter(needsPairChecks).sort((x, y) => (x.name < y.name ? -1 : 1)); // same order as pair_checks rows
@@ -77,7 +76,7 @@ export function outstandingPairs(forks: ForkRow[], checks: PairCheckRow[]): Pair
     .filter((p) => !done.has(pairKey(p.a, p.b, p.shaA, p.shaB)));
 }
 
-const needsPairChecks = (f: ForkRow) => f.status === "active" && f.head_sha !== f.base_sha && f.processed_sha === f.head_sha;
+const needsPairChecks = (f: ForkRow) => f.status === "active" && f.head_sha !== f.base_sha;
 const pairKey = (a: string, b: string, shaA: string, shaB: string) => `${a}|${b}|${shaA}|${shaB}`;
 
 /** Forks with at least one outstanding pair: they can't be cleared or land yet. */
@@ -93,11 +92,23 @@ export function pairResultIsCurrent(forks: ForkRow[], a: string, shaA: string, b
   return head(a) === shaA && head(b) === shaB;
 }
 
-/** Outstanding pairs that aren't already queued at the same heads within the retry window. */
-export function pairsToQueue(needs: PairNeed[], queue: PairQueueRow[], now: number, retryMs = PAIR_RETRY_MS): PairNeed[] {
+/**
+ * Outstanding pairs to start now: not already queued at the same heads within the retry window, and with neither PR
+ * still being indexed (`indexing`: fork → when its unindexed head was seen; its push pipeline queues those pairs).
+ * A PR stuck in indexing past the retry window gets its pairs checked directly, so it can't block its partners forever.
+ */
+export function pairsToQueue(needs: PairNeed[], queue: PairQueueRow[], now: number, indexing = new Map<string, number>(), retryMs = PAIR_RETRY_MS): PairNeed[] {
   const q = new Map(queue.map((r) => [`${r.fork_a}|${r.fork_b}`, r]));
+  const recent = (at: number | undefined) => at !== undefined && at > now - retryMs;
   return needs.filter((n) => {
     const r = q.get(`${n.a}|${n.b}`);
-    return !(r && r.sha_a === n.shaA && r.sha_b === n.shaB && r.queued_at > now - retryMs);
+    if (r && r.sha_a === n.shaA && r.sha_b === n.shaB && recent(r.queued_at)) return false;
+    return !recent(indexing.get(n.a)) && !recent(indexing.get(n.b));
   });
+}
+
+/** A pair check that failed for good may be recorded as "error" only if no real result exists at the same heads. */
+export function mayRecordPairFailure(checks: PairCheckRow[], a: string, shaA: string, b: string, shaB: string): boolean {
+  const [x, sx, y, sy] = a < b ? [a, shaA, b, shaB] : [b, shaB, a, shaA];
+  return !checks.some((c) => c.fork_a === x && c.fork_b === y && c.sha_a === sx && c.sha_b === sy && c.status !== "error");
 }

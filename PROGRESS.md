@@ -11,7 +11,7 @@ Nothing.
 ## Works (verified against deployed Cloudflare resources)
 
 - **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order **without rebasing**, about 60 s
-  (last run 2026-10-11, `shop-261011101521`, after the landing-reliability fixes).
+  (last run 2026-10-11, `shop-261011102223`, after the landing-reliability fixes).
 - **Landing reliability (#1, #3, #5, 2026-10-11):** the land check pins the fork head ATC checked and retries if the fork moved;
   the landing lock is token-owned and outlives the checker timeout; every pair of open PRs must have a speculative-merge result
   for their **current** heads before either is cleared or lands (missing or stale pairs are re-queued by the reconcile alarm,
@@ -43,7 +43,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 36 unit tests, strict TypeScript in every package.
+  clean before the first push), 37 unit tests, strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 

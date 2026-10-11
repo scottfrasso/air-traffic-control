@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landingOrder, mayRelease, outstandingPairs, PAIR_RETRY_MS, pairResultIsCurrent,
+  approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, PAIR_RETRY_MS, pairResultIsCurrent,
   pairsToQueue, parseLock, takeLock, type PairCheckRow, type PairQueueRow,
 } from "../src/landing";
 import type { ForkRow } from "../src/types";
@@ -56,10 +56,12 @@ function airspace(...names: string[]) {
   const forks = new Map(names.map((n) => [n, fork(n, { head_sha: `${n}0`, processed_sha: `${n}0` })]));
   const checks: PairCheckRow[] = [];
   const queue: PairQueueRow[] = [];
+  const seenAt = new Map<string, number>();
   const all = () => [...forks.values()];
   return {
-    push(n: string, sha: string, indexed = true) {
+    push(n: string, sha: string, indexed = true, at = 0) {
       forks.set(n, { ...forks.get(n)!, head_sha: sha, processed_sha: indexed ? sha : forks.get(n)!.processed_sha });
+      seenAt.set(n, at);
     },
     /** applyPair: record only results for both current heads. */
     result(a: string, shaA: string, b: string, shaB: string) {
@@ -72,7 +74,8 @@ function airspace(...names: string[]) {
     },
     /** requeuePairs: returns what would be started, and marks it queued. */
     requeue(now: number) {
-      const due = pairsToQueue(outstandingPairs(all(), checks), queue, now);
+      const indexing = new Map(all().filter((f) => f.processed_sha !== f.head_sha).map((f) => [f.name, seenAt.get(f.name) ?? 0] as const));
+      const due = pairsToQueue(outstandingPairs(all(), checks), queue, now, indexing);
       for (const d of due) {
         const i = queue.findIndex((q) => q.fork_a === d.a && q.fork_b === d.b);
         const row = { fork_a: d.a, fork_b: d.b, sha_a: d.shaA, sha_b: d.shaB, queued_at: now };
@@ -115,12 +118,22 @@ test("a lost pair check is re-queued after the retry window, not before", () => 
   assert.equal(s.requeue(1_000 + PAIR_RETRY_MS + 1).length, 1); // no result: assume lost
 });
 
-test("a PR whose push never gets indexed doesn't block the PRs it pairs with (review finding 3)", () => {
+test("partners wait while a push is indexed; a PR stuck in indexing gets its pairs checked directly (review findings)", () => {
   const s = airspace("a", "b");
   s.push("a", "a1");
-  s.push("b", "b1", false); // b's pipeline failed: head moved, never processed
+  s.push("b", "b1", false, 1_000); // b's push seen at t=1000, not indexed yet
+  assert.deepEqual([...s.waiting()].sort(), ["a", "b"]); // a can't be cleared or land past an unchecked (a, b1)
+  assert.deepEqual(s.requeue(2_000), []); // b's own push pipeline will queue it
+  assert.deepEqual(s.requeue(1_000 + PAIR_RETRY_MS + 1), [{ a: "a", b: "b", shaA: "a1", shaB: "b1" }]); // stuck: check it anyway
+  assert.equal(s.result("a", "a1", "b", "b1"), true);
   assert.deepEqual([...s.waiting()], []);
-  assert.deepEqual(s.requeue(0), []);
+});
+
+test("a failed duplicate check can't overwrite a real result at the same heads", () => {
+  const real = [{ fork_a: "a", fork_b: "b", sha_a: "a1", sha_b: "b1", status: "clean" }];
+  assert.equal(mayRecordPairFailure(real, "b", "b1", "a", "a1"), false);
+  assert.equal(mayRecordPairFailure(real, "a", "a2", "b", "b1"), true); // different heads
+  assert.equal(mayRecordPairFailure([{ ...real[0]!, status: "error" }], "a", "a1", "b", "b1"), true);
 });
 
 test("forks with no pushed changes, or not active, need no pair checks", () => {

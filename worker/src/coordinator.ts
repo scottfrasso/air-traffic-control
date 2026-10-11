@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type PairResult, type SingleResult } from "./checker";
 import {
-  approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
+  approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
   type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -242,6 +242,7 @@ export class Coordinator extends DurableObject<Env> {
     }
     if (fork.head_sha === sha) return;
     this.sql.exec("UPDATE forks SET head_sha = ?, check_status = 'pending' WHERE name = ?", sha, repo);
+    this.sql.exec("INSERT INTO head_seen(fork, sha, at) VALUES (?, ?, ?) ON CONFLICT(fork) DO UPDATE SET sha = excluded.sha, at = excluded.at", repo, sha, Date.now());
     this.log("push.received", { sha, source, commits: isPushed(event) ? event.payload.commits.map((c) => c.message) : undefined }, repo);
     // A new push is a fresh attempt: drop any go-around/blocked notes; the checks on this push decide.
     this.resolveSignals({ fork: repo, kind: "rebase_required" });
@@ -441,11 +442,18 @@ export class Coordinator extends DurableObject<Env> {
   /** Re-queue pair checks that are missing or stale (a result was dropped as not current, or a check was lost). */
   private async requeuePairs() {
     const queue = this.sql.exec<PairQueueRow>("SELECT * FROM pair_queue").toArray();
-    for (const need of pairsToQueue(this.outstandingPairs(), queue, Date.now())) {
-      const [a, b] = [this.fork(need.a)!, this.fork(need.b)!];
+    const seen = new Map(this.sql.exec<{ fork: string; sha: string; at: number }>("SELECT * FROM head_seen").toArray().map((r) => [r.fork, r]));
+    const indexing = new Map(
+      this.activeForks()
+        .filter((f) => f.processed_sha !== f.head_sha)
+        .map((f) => [f.name, seen.get(f.name)?.sha === f.head_sha ? seen.get(f.name)!.at : 0] as const),
+    );
+    const due = pairsToQueue(this.outstandingPairs(), queue, Date.now(), indexing);
+    // Mark every due pair before the first await, so an interleaved requeue doesn't start any of them twice.
+    for (const need of due) this.markPairQueued(this.fork(need.a)!, this.fork(need.b)!);
+    for (const need of due) {
       const prev = queue.find((q) => q.fork_a === need.a && q.fork_b === need.b);
-      this.markPairQueued(a, b); // before the await, so an interleaved requeue doesn't start it twice
-      this.log("check.pair.requeued", { a: need.a, b: need.b, reason: prev ? "stale or lost" : "never checked" }, null);
+      this.log("check.pair.requeued", { a: need.a, b: need.b, reason: indexing.has(need.a) || indexing.has(need.b) ? "indexing stuck" : prev ? "stale or lost" : "never checked" }, null);
       if (!(await this.startPipeline(need.a, need.shaA, "pairs", [{ name: need.b, sha: need.shaB }])))
         this.sql.exec("DELETE FROM pair_queue WHERE fork_a = ? AND fork_b = ? AND sha_a = ? AND sha_b = ?", need.a, need.b, need.shaA, need.shaB);
     }
@@ -549,6 +557,8 @@ export class Coordinator extends DurableObject<Env> {
   async applyPairFailure(a: string, shaA: string, b: string, shaB: string, error: string): Promise<void> {
     this.log("check.pair.failed", { a, b, shaA, shaB, error: error.slice(0, 300) }, null);
     if (!pairResultIsCurrent(this.activeForks(), a, shaA, b, shaB)) return; // a newer push re-queues it anyway
+    // A duplicate run (re-queued while the first was slow) failing must not overwrite a real result.
+    if (!mayRecordPairFailure(this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b, status FROM pair_checks").toArray(), a, shaA, b, shaB)) return;
     const [x, sx, y, sy] = a < b ? [a, shaA, b, shaB] : [b, shaB, a, shaA];
     this.sql.exec(
       `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, 'error', ?, ?)
