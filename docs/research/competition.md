@@ -1,6 +1,8 @@
 # Competition research
 
-_Collected 2026-10-11. Sources at the bottom._
+_Collected 2026-10-11. Sources at the bottom. Re-check the official rules PDF if anything here is in doubt; it wins over this file._
+
+Related: [ADR-0017](../adr/0017-competition-requirements.md) (what the rules force on us), the GitHub issues labelled `competition`.
 
 ## The competition
 
@@ -62,7 +64,7 @@ All fields are required unless marked optional. There are no visible character c
 | Demo | **Instructions to run your project** | textarea | **4000**. "Include prerequisites, setup steps, and the command that starts the project." |
 | — | ☐ Built using Cloudflare Workers and Artifacts · ☐ Follows the competition terms | checkboxes | both required |
 
-There is a review step before the upload starts, and the page has a Turnstile check. Drafted answers are in [`FORM_DRAFT.md`](FORM_DRAFT.md).
+There is a review step before the upload starts, and the page has a Turnstile check. Drafted answers are in [`submission/FORM_DRAFT.md`](../../submission/FORM_DRAFT.md).
 
 ## What others are building (GitHub, as of 2026-10-11; every repo had 0 stars)
 
@@ -99,7 +101,7 @@ The video and form must say this plainly.
 ## Recommended changes, by impact on score
 
 1. **Re-cut the video to 6–8 min** (required). Use the "tell them what you'll tell them, tell them, tell them what you told them"
-   structure. Add problem graphics before the airport. Storyboard: [`VIDEO_STORYBOARD_V8.md`](VIDEO_STORYBOARD_V8.md).
+   structure. Add problem graphics before the airport. Script: [`submission/VIDEO_SCRIPT_V8.md`](../../submission/VIDEO_SCRIPT_V8.md).
 2. **Make the repo public and push `main`** (required). Run the TruffleHog scan on the full history again first.
 3. **Context preservation (25% bucket, cheap win):** when ATC lands a PR, write a git note or trailer on the landed commit with
    the agent's declared intent, the signals it received, its clearance history and why it went around. Show it in the video as
