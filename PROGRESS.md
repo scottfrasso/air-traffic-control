@@ -5,8 +5,8 @@ _Last updated 2026-10-11. Next session: start with [`handover/04-next.md`](hando
 ## Before submitting (found 2026-10-11, see docs/research/competition.md)
 
 - Priority work is tracked in GitHub issues labelled `competition`. P0: #12 public repo, #13 video, #14 public replay, #20 submit.
-- **Video must be 5–10 min** (official rules §4). v8 draft `submission/atc-demo-v8.mp4` is 6:52 and **awaits the owner's review**.
-  v7 (`atc-demo.mp4`, 2:57) is too short; don't submit it.
+- **Video must be 5–10 min** (official rules §4). v8 `submission/atc-demo.mp4` (6:52) was **approved 2026-10-11**
+  and replaced v7. Re-render only if #15/#17 add something worth showing.
 - **Repo must be public** (open-source requirement). `scottfrasso/air-traffic-control` is private and `main` is unpushed.
   Owner's call (2026-10-11): **stay private until more work is done**; go public by 10-13 after a full-history secret scan.
 - A human fills in the form (automated entry is prohibited). Answers are drafted in `submission/FORM_DRAFT.md`.
@@ -91,7 +91,7 @@ Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
 2. #15 flight log on the landed commit (context preservation), then #17 savings in numbers.
 3. #14 public read-only replay link; fill `<PUBLIC_REPLAY_URL>` in `submission/FORM_DRAFT.md`.
 4. If time: #18 one-command deploy, #16 review clearance.
-5. Video final (#13) with the owner's feedback; swap it in as `atc-demo.mp4` and fix the README link.
+5. Video is approved (#13). Optional: re-render with a #15/#17 beat in place of the recap's "next" line.
 6. Secret scan, push, go public (#12) when the owner says so; the owner submits the form (#20) by 10-14 23:59 PDT.
 
 Other code-review follow-ups (#2, #4, #6–#11) are not competition-critical.

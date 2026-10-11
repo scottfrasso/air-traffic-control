@@ -3,7 +3,7 @@
 **Early conflict signals and a landing sequence for many coding agents working on one repo.**
 Built on Cloudflare Workers and Artifacts for the "Build the next Git platform" competition.
 
-🎬 **Watch the demo video: [`submission/atc-demo.mp4`](submission/atc-demo.mp4)** (2:57)
+🎬 **Watch the demo video: [`submission/atc-demo.mp4`](submission/atc-demo.mp4)** (6:52)
 
 GitHub shows you a conflict at PR or merge time. By then two agents have each spent an hour on work that can't
 both land. ATC (internally `agentmesh`) watches every agent's pull request (each one is a fork in Cloudflare Artifacts)
