@@ -9,7 +9,8 @@ import {
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
-import { clearanceHistory, flightLogNote, type FlightSignal, type SequenceSnapshot } from "./flightlog";
+import { NoteWriter, takeBatch } from "./notes";
+import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
 import { computeSavings, type LogEvent } from "./savings";
 import { SCHEMA } from "./schema";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
@@ -475,7 +476,7 @@ export class Coordinator extends DurableObject<Env> {
     const errs = r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
     const detail = r.result.ok ? "merges onto main and typechecks" : r.mainConflict ? `on main: ${errs}` : errs;
     if (r.baseHead && r.baseHead !== this.meta("baseline_head")) {
-      this.log("check.single.stale", { checkedOn: r.baseHead }, r.repo); // main moved during the check; a recheck follows
+      this.log("check.single.stale", { checkedOn: r.baseHead, timings: r.timings ?? [] }, r.repo); // main moved during the check; a recheck follows
       return;
     }
     this.setCheck(r.repo, r.forkSha, r.result.ok, detail, r.baseHead);
@@ -701,7 +702,14 @@ export class Coordinator extends DurableObject<Env> {
     this.setMeta("landing", JSON.stringify(lock));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
-      const note = this.flightLogNote(me, baselineHead, true); // the story up to the moment it lands
+      // The story up to the moment it lands. A bug in building it must never fail a landing: fall back to the basics.
+      let note: string;
+      try {
+        note = this.flightLogNote(me, baselineHead, true);
+      } catch (err) {
+        this.log("notes.build_failed", { error: (err as Error).message.slice(0, 300) }, fork);
+        note = minimalFlightLog(me.name, me.agent, baselineHead);
+      }
       // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
       const result = JSON.parse(
         await checkerFor(this.env, baseline, "land").run({
@@ -792,57 +800,43 @@ export class Coordinator extends DurableObject<Env> {
     return this.sql.exec("SELECT 1 FROM flight_logs WHERE noted = 0 LIMIT 1").toArray().length > 0;
   }
 
-  private notesRunning: Promise<void> | null = null;
-  private notesAgain = false;
-
   /**
    * Write every flight log not yet in git (this landing's, plus any that failed before). One writer per Coordinator, so
    * two notes pushes never race; a call while one runs makes it go round again. Retries with backoff; the reconcile
    * alarm picks up anything left. Never throws.
    */
+  private readonly noteWriter = new NoteWriter(() => this.writePendingNotes());
   private writeNotes(): Promise<void> {
-    if (this.notesRunning) {
-      this.notesAgain = true;
-      return this.notesRunning;
-    }
-    this.notesRunning = (async () => {
-      try {
-        for (let attempt = 0; attempt < 4; attempt++) {
-          this.notesAgain = false;
-          const ok = await this.writePendingNotes();
-          if (ok && !this.notesAgain) return;
-          if (!ok) await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
-        }
-      } finally {
-        this.notesRunning = null;
-      }
-    })();
-    return this.notesRunning;
+    return this.noteWriter.run();
   }
 
-  /** One attempt; true if nothing is left pending. */
+  /** One attempt, in batches that fit a checker call; true if nothing is left pending. */
   private async writePendingNotes(): Promise<boolean> {
-    const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0 ORDER BY landed_at").toArray();
-    if (!pending.length) return true;
-    let error: string;
-    try {
-      const r = JSON.parse(
-        await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: pending.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
-      ) as Partial<NotesResult> & { error?: string };
-      // By the PRs sent, not by sha: a PR that added nothing shares its sha with the one before, and may not have been sent.
-      const written = new Set(r.written ?? []);
-      for (const p of pending) if (written.has(p.landed_sha)) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE fork = ?", p.fork);
-      if (!r.error) {
-        this.log("notes.written", { forks: pending.map((p) => p.fork) });
-        return true;
+    for (;;) {
+      const pending = this.sql.exec<{ fork: string; landed_sha: string; note: string }>("SELECT fork, landed_sha, note FROM flight_logs WHERE noted = 0 ORDER BY landed_at").toArray();
+      if (!pending.length) return true;
+      const batch = takeBatch(pending);
+      let error: string;
+      try {
+        const r = JSON.parse(
+          await checkerFor(this.env, this.baseline, "land").run({ mode: "notes", baseline: await this.repoRef(this.baseline, "write"), notes: batch.map((p) => ({ sha: p.landed_sha, note: p.note })) }),
+        ) as Partial<NotesResult> & { error?: string };
+        // By the PRs sent, not by sha: a PR that added nothing shares its sha with the one before, and may not have been sent.
+        const written = new Set(r.written ?? []);
+        const done = batch.filter((p) => written.has(p.landed_sha));
+        for (const p of done) this.sql.exec("UPDATE flight_logs SET noted = 1, note_error = NULL WHERE fork = ?", p.fork);
+        if (!r.error && done.length) {
+          this.log("notes.written", { forks: done.map((p) => p.fork) });
+          continue; // next batch
+        }
+        error = r.error ?? "no notes written";
+      } catch (err) {
+        error = (err as Error).message;
       }
-      error = r.error;
-    } catch (err) {
-      error = (err as Error).message;
+      this.sql.exec("UPDATE flight_logs SET note_error = ? WHERE noted = 0", error.slice(0, 300));
+      this.log("notes.failed", { forks: batch.map((p) => p.fork), error: error.slice(0, 300) });
+      return false;
     }
-    this.sql.exec("UPDATE flight_logs SET note_error = ? WHERE noted = 0", error.slice(0, 300));
-    this.log("notes.failed", { forks: pending.map((p) => p.fork), error: error.slice(0, 300) });
-    return false;
   }
 
   /** The PR's story so far, as the note ATC attaches to its landed commit. */
@@ -1011,7 +1005,7 @@ export class Coordinator extends DurableObject<Env> {
       savings: computeSavings(
         this.sql
           .exec<{ at: number; kind: string; fork: string | null; detail: string }>(
-            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.pair') ORDER BY id`,
+            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.single.stale', 'check.pair') ORDER BY id`,
           )
           .toArray()
           .map((e): LogEvent => ({ ...e, detail: JSON.parse(e.detail) as unknown })),

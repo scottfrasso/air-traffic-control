@@ -71,14 +71,16 @@ export function computeSavings(events: LogEvent[]): Savings {
       case "signal.rebase_required":
         s.rebases++;
         break;
+      // Every typecheck a background check ran counts, current or stale (it cost the same). Landing typechecks don't.
       case "check.single":
+      case "check.single.stale":
       case "check.pair": {
         for (const t of d.timings ?? []) {
           if (!t.step?.startsWith("typecheck")) continue;
           s.typechecks++;
           if (t.cached) s.cacheHits++;
         }
-        if (e.kind === "check.single" || !d.a || !d.b || d.fresh === false) break;
+        if (e.kind !== "check.pair" || !d.a || !d.b || d.fresh === false) break;
         s.pairRuns++;
         const key = [d.a, d.b].sort().join("|");
         pairs.add(key);

@@ -41,8 +41,10 @@ export function clearanceHistory(snapshots: SequenceSnapshot[], fork: string): C
 
 const MAX_SIGNALS = 12;
 
+// Control characters (and bidi overrides, which can make a line read differently from what it says) become spaces.
+const CONTROL = /[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 const oneLine = (s: string, max = 200) => {
-  const t = s.replace(/\s+/g, " ").trim();
+  const t = s.replace(CONTROL, " ").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 3)}...` : t;
 };
 // Symbols can come from agents (declared intents): keep them on one line so they can't forge a trailer.
@@ -65,4 +67,12 @@ export function flightLogNote(f: FlightLogInput): string {
   lines.push(`ATC-Diff-Lines: ${f.diffLines}`, f.landed ? `ATC-Landed-Onto: ${f.onto.slice(0, 12)}` : `ATC-In-Flight-On: ${f.onto.slice(0, 12)}`);
   // git strips trailing whitespace from notes; do the same so ATC's copy and git's stay identical (idempotent retries).
   return lines.map((l) => l.trimEnd()).join("\n");
+}
+
+/** The fallback note if building the full one fails: who landed, onto what. A landing never waits on a good story. */
+export function minimalFlightLog(fork: string, agent: string, onto: string): string {
+  const pr = prLabel(fork);
+  return [`ATC flight log: ${pr} (agent ${oneLine(agent, 40)})`, "", `ATC-PR: ${pr}`, `ATC-Agent: ${oneLine(agent)}`, `ATC-Landed-Onto: ${onto.slice(0, 12)}`]
+    .map((l) => l.trimEnd())
+    .join("\n");
 }

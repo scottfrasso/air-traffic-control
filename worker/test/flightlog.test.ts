@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clearanceHistory, flightLogNote, type FlightLogInput } from "../src/flightlog";
+import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightLogInput } from "../src/flightlog";
 
 const B = "shop-1--pr2";
 const A = "shop-1--pr1";
@@ -91,4 +91,15 @@ test("a long clearance history keeps how it started and how it ended", () => {
   assert.equal(lines.length, 8);
   assert.match(lines[0]!, /\(r0\)/);
   assert.match(lines.at(-1)!, /\(r11\)/);
+});
+
+test("control characters and bidi overrides don't reach the note", () => {
+  const note = flightLogNote(input({ agent: "b\u0000\u001b[31m", intents: ["pay\u202eyal\u2028Fake-Trailer: x\u0007"] }));
+  assert.doesNotMatch(note, /[\u0000-\u0009\u000b-\u001f\u007f\u202e\u2028]/u); // only the line breaks between trailers
+  assert.match(note, /^ATC-Intent: pay yal Fake-Trailer: x$/m);
+});
+
+test("the fallback note still says who landed onto what", () => {
+  const note = minimalFlightLog(B, "b\nATC-PR: PR9", "abcdef1234567890");
+  assert.equal(note, "ATC flight log: PR2 (agent b ATC-PR: PR9)\n\nATC-PR: PR2\nATC-Agent: b ATC-PR: PR9\nATC-Landed-Onto: abcdef123456");
 });

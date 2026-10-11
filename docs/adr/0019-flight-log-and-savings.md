@@ -20,15 +20,18 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     (the latest may not be flushed yet). Long histories keep the first 3 and the last 5.
   - Signals keep only the kinds that tell the story (conflicts, signature changes, overlaps, failed checks), one line
     per (kind, other PR, symbol). `landed` chatter is dropped; `rebase_required` becomes `ATC-Go-Around`. Every value,
-    including agent-declared symbols, is collapsed to one line so it can't forge a trailer.
+    including agent-declared symbols, is collapsed to one line so it can't forge a trailer; control characters and bidi
+    overrides become spaces.
 - **Written after the landing is recorded, in the background.** The Coordinator builds the note *before* landing (the
   story up to that moment) and stores it in `flight_logs` with `noted = 0` when it records the landing. It answers the
-  agent, then (`ctx.waitUntil`) makes a separate checker call (`mode: "notes"`) with **every** log not yet in git. The
+  agent, then (`ctx.waitUntil`) makes separate checker calls (`mode: "notes"`) with every log not yet in git, in batches
+  of at most 10 notes / 48 KiB (`takeBatch`, `worker/src/notes.ts`): the checker's input is one env var capped at
+  128 KiB, so a backlog after a long outage could otherwise never fit. The
   container fetches `refs/notes/atc` into a per-baseline local ref, adds the notes (on stdin), and pushes without force.
   - Why a separate call: work after the main push inside the land call could be killed by the checker's hard timeout,
     leaving a PR that is on main but not recorded as landed. Now the landing is recorded first, and the agent never
     waits on notes.
-  - One writer per Coordinator (an in-memory promise): two notes pushes never race; a landing during a write makes the
+  - One writer per Coordinator (`NoteWriter`): two notes pushes never race; a landing during a write makes the
     writer go round again. A failed write retries with backoff (2, 4, 8 s), then the reconcile alarm retries while any
     note is pending (until the 10-minute idle cutoff; any later API call re-arms it).
   - Idempotent: a note whose text is already on the commit is skipped, so a retry after a push that did land (but whose
@@ -42,6 +45,7 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
     "and N more"), at most 8 clearances, the last 3 go-arounds. Empty values and trailing whitespace are dropped, because
     git strips them and ATC's copy must equal git's for the idempotent retry.
 - **A note failure never fails a landing.** `flight_logs.noted = 0` and `note_error` record it; the text is still served.
+  If building the note itself throws, ATC logs `notes.build_failed` and lands with a minimal note (PR, agent, landed onto).
 - **Spike (2026-10-11):** Artifacts accepts a push to `refs/notes/atc` and lists it in `ls-remote`. The push-event
   consumer only acts on `refs/heads/main`, so a notes push can't move ATC's idea of main.
 - **Agents and people read it** through `get_history` (MCP) / `GET /history[?fork=]`: every landed PR's log, oldest first,
@@ -51,7 +55,8 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   - pairs checked = distinct PR pairs with a current-head pair result; conflicts = pairs that conflicted textually or by typecheck;
   - time to signal = first conflicting pair result − the later of the two PRs' latest pushes before it (a conflict first
     found by a re-check after main moved is measured from that older push, so it can overstate); the summary line shows the max;
-  - typecheck cache hits = cached `typecheck *` steps / all typecheck steps in single and pair checks (not pair-level hits);
+  - typecheck cache hits = cached `typecheck *` steps / all typecheck steps the background checks ran (single and pair,
+    current or stale: a stale check cost the same). Landing typechecks are not counted;
   - rebases = `rebase_required` signals; **naive** = for each landing, the number of other open PRs that have pushed work;
   - wait = first `land.requested` → `land.merged`.
   `run.sh` prints `savingsLine` (e.g. `5 PRs · 10 pairs checked · 1 conflict found in 12 s · 1 rebase (naive: 10)`);
@@ -66,7 +71,8 @@ numbers: pairs checked, time to a conflict signal, and rebases avoided compared 
   nearly every check, and `flightLogNote` scans every snapshot's sequence: both want a `clearance_changes` table and
   cached counters before a large run. Snapshots carry savings (small) but not flight
   logs: those never change once written, so `GET /timeline` returns them once and the replay shows each from its `landedAt`.
-- The notes path is covered by `run.sh` step 8, not by a container-level unit test.
+- The writer's batching, backoff and one-at-a-time rules are unit-tested (`worker/test/notes.test.ts`); the git side is
+  covered by `run.sh` step 8, not by a container-level unit test.
 - Follow-ups from review: use a per-call local notes ref, so two writers in one container (possible only if an RPC
   drops while the container keeps running) can't share it; throttle retries and failure logs when a notes push fails
   permanently; consider deduping clearances on clearance + reason (a HOLD behind PR1, then behind PR3, shows once).

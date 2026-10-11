@@ -14,6 +14,7 @@ const run: LogEvent[] = [
   ev(16_500, "check.pair", null, { a: "p3", b: "p2", status: "clean", fresh: true, timings: [tc(true)] }),
   ev(16_600, "check.pair", null, { a: "p2", b: "p3", status: "clean", fresh: false, timings: [] }), // stale: not counted
   ev(17_000, "check.single", "p1", { timings: [tc(true), { step: "fetch base", ms: 3 }] }),
+  ev(17_500, "check.single.stale", "p2", { timings: [tc(false)] }), // ran, then main moved: still a typecheck paid for
   ev(20_000, "land.requested", "p1"), ev(22_000, "land.merged", "p1"),
   ev(22_100, "signal.rebase_required", "p2"),
   ev(25_000, "push.received", "p2"),
@@ -28,7 +29,7 @@ test("counts pairs, conflicts and cache hits", () => {
   assert.equal(s.pairsChecked, 3);
   assert.equal(s.pairRuns, 4);
   assert.equal(s.conflicts, 1);
-  assert.equal(s.typechecks, 7);
+  assert.equal(s.typechecks, 8);
   assert.equal(s.cacheHits, 4);
 });
 
