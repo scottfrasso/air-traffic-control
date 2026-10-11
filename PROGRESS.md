@@ -2,6 +2,13 @@
 
 _Last updated 2026-10-10._
 
+## Before submitting (found 2026-10-11, see submission/RESEARCH.md)
+
+- **Video must be 5–10 min** (official rules §4). The v7 cut is 2:57. Re-cut per `submission/VIDEO_STORYBOARD_V8.md`.
+- **Repo must be public** (open-source requirement). `scottfrasso/air-traffic-control` is private and `main` is unpushed.
+- A human fills in the form (automated entry is prohibited). Answers are drafted in `submission/FORM_DRAFT.md`.
+- A public read-only replay URL for judges is still TODO (it goes in the form's run instructions).
+
 ## Blocked
 
 Nothing.

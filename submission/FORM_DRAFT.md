@@ -1,0 +1,104 @@
+# Submission form draft
+
+Form: https://www.cloudflare.com/git-competition/submit. **A human must fill it in and submit it** (rules forbid automated entry).
+Paste each block as plain text. Limits are the form's `maxlength`; check them with `submission/check-form.sh`.
+
+## Team
+
+- **Team name:** ATC
+- **Primary contact name / email:** Scott Frasso / _(fill in)_
+- **Team location:** _(city, state/province, country; must be US or Canada)_
+- **First attendee:** Scott Frasso / _(email)_
+- **Second attendee:** _(optional)_
+
+## Project name (160)
+
+ATC: Air Traffic Control for coding agents
+
+## Project vision (2000)
+
+<!-- vision:start -->
+We rethought the merge. Today a conflict between two pieces of work shows up at merge time, after both are finished. With many agents on one repo, that means hours of work that can't all land, and every agent rebasing whenever main moves.
+
+ATC treats every agent's change as a plane in flight and runs the airspace. Each agent works in its own fork in Cloudflare Artifacts and just pushes with git. On every push ATC does three things:
+
+1. It indexes what the change touches (files, exported symbols, signatures) and tells the agent who else is working nearby. Agents can also declare intent before they start.
+
+2. It speculatively merges the change with every other in-flight change and runs the type checker on the result. The hard case is two changes in different files that git merges cleanly and that each pass alone, but that break together. ATC finds it within seconds and tells both agents which symbol and which other change, before either one asks to land.
+
+3. It keeps one landing sequence. Every change gets one clearance with one reason: cleared, follow, hold, go around (rebase on the new main), or standby. The change closest to landing wins, and ties go to the smaller diff, which is cheaper to redo. ATC itself merges each change onto the current main and checks that exact commit. When something lands, only the changes that really conflict with it go around. Everyone else is re-checked automatically and lands with no rebase.
+
+Why it matters: rebases stop growing with the number of agents and grow only with real conflicts. Agents get context early, as signals rather than commands, through an MCP server, so a real Claude Code session can join with one command. And people get one screen, the runway, that shows what is in flight, what collides, and what lands next.
+
+It works today on deployed Cloudflare resources: a scripted five-agent run, and two real Claude Code agents with colliding tasks that both landed with no human help, with main green at the end.
+<!-- vision:end -->
+
+## How you used Cloudflare (2000)
+
+<!-- cloudflare:start -->
+Everything runs on Cloudflare: one Worker plus the services it binds.
+
+Artifacts: all repo storage. One baseline repo per project and one fork per agent, created with the Workers binding (fork, createToken). Agents use plain git over HTTPS with repo-scoped tokens. The coordinator reads forks without cloning, using log, readTree and readBlob, to diff each fork against its true merge base.
+
+Artifacts event subscriptions + Queues: every fork has a "pushed" subscription that delivers to a queue. The Worker's queue consumer hands each push to the coordinator, so pushes drive everything. No polling, no webhooks to host.
+
+Workers: one Worker serves the HTTP API, the MCP endpoint, the dashboard and the queue consumer.
+
+Durable Objects (SQLite): one Coordinator per repo holds the in-flight index (touched files, symbol deltas, imports), intents, signals, pair-check results, the landing sequence and an event log. It pushes every change to dashboards over hibernatable WebSockets and records snapshots for replay.
+
+Workflows: one durable, retried pipeline per push: index the fork, update signals, then run speculative merges against every other fork.
+
+Containers (Sandbox SDK model): a Checker Durable Object owns a container with node, git and tsc. It runs the speculative merge plus typecheck for each pair, and the landing merge onto current main. It caches results by git tree hash and keeps main's incremental TypeScript state, so a pair check is usually one tsc run.
+
+Agents SDK (MCP): a stateless MCP server with start_work, declare_intent, get_signals, get_clearance and request_land. A Claude Code session joins with one "claude mcp add" command.
+
+Why this fit: forks are cheap and programmatic in Artifacts, so a fork per agent costs nothing. Push events plus Workflows make every push a durable check. A Durable Object gives each repo one consistent place to decide the landing order, which is what keeps it fast and race-free.
+<!-- cloudflare:end -->
+
+## Demo video
+
+`submission/atc-demo.mp4`. **Must be re-cut to 5–10 min first** (currently 2:57). See `VIDEO_STORYBOARD_V8.md`.
+
+## Open source repository URL (2048)
+
+https://github.com/scottfrasso/air-traffic-control (**make it public and push `main` before submitting**)
+
+## Instructions to run your project (4000)
+
+<!-- instructions:start -->
+Fastest look (no setup): open the public replay of a recorded run: <PUBLIC_REPLAY_URL>. It replays the real event log through the runway dashboard at 1x to 8x.
+
+Run the full demo against your own Cloudflare account:
+
+Prerequisites
+- A Cloudflare account on Workers Paid (Artifacts open beta, Containers, Workflows, Queues)
+- Node 24 (local scripts only need Node 22+), pnpm 10, git, Docker (to build the checker container image)
+- An API token with Artifacts Edit and Queues Edit
+
+Setup
+1. git clone https://github.com/scottfrasso/air-traffic-control && cd air-traffic-control && pnpm install
+2. In worker/wrangler.jsonc set CF_ACCOUNT_ID, and after step 3 set PUSH_QUEUE_ID.
+3. cd worker && pnpm exec wrangler queues create agentmesh-push-events
+4. Create the Artifacts namespace "agentmesh" (one REST call, shown in README "Deploy your own").
+5. pnpm exec wrangler secret put AGENTMESH_API_KEY (any random string; it protects /api, /mcp and the dashboard)
+6. pnpm exec wrangler secret put CF_API_TOKEN (Queues Edit; used to create per-fork push subscriptions)
+7. pnpm exec wrangler deploy
+8. Back at the repo root, create .env with CLOUDFLARE_API_TOKEN=... and AGENTMESH_API_KEY=... (same value as step 5). Also set CLOUDFLARE_ACCOUNT_ID, and AGENTMESH_URL to your Worker URL.
+
+Start it
+./demo/run.sh
+
+This runs the acceptance test end to end in about a minute against real Artifacts. Five scripted agents fork the repo. One changes a function's signature and another adds a new caller in a different file. Plain git reports no conflict, and ATC signals a semantic conflict to both before either asks to land. The first lands, only the second goes around and fixes its call, the three independent changes land with no rebase, and main typechecks. It prints a dashboard link; paste the API key once.
+
+Real coding agents
+pnpm --dir demo exec tsx src/live.ts 4
+This creates a fresh repo and prints 4 agent prompts plus the "claude mcp add" command. Paste each prompt into its own Claude Code session. Details: handover/02-run-real-claude-code-agents.md
+
+Tests: cd worker && pnpm test
+Clean up: pnpm --dir demo exec tsx src/teardown.ts
+<!-- instructions:end -->
+
+## Checkboxes
+
+- ☐ I confirm this project was built using Cloudflare Workers and Artifacts.
+- ☐ I confirm this submission follows the competition terms.
