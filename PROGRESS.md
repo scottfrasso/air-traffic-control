@@ -1,12 +1,14 @@
 # PROGRESS
 
-_Last updated 2026-10-10._
+_Last updated 2026-10-11. Next session: start with [`handover/04-next.md`](handover/04-next.md)._
 
 ## Before submitting (found 2026-10-11, see docs/research/competition.md)
 
-- Priority work is tracked in GitHub issues labelled `competition`. P0: #12 public repo, #13 video v8, #14 public replay, #20 submit.
-- **Video must be 5–10 min** (official rules §4). The v7 cut is 2:57. v8 script: `submission/VIDEO_SCRIPT_V8.md`.
+- Priority work is tracked in GitHub issues labelled `competition`. P0: #12 public repo, #13 video, #14 public replay, #20 submit.
+- **Video must be 5–10 min** (official rules §4). v8 draft `submission/atc-demo-v8.mp4` is 6:52 and **awaits the owner's review**.
+  v7 (`atc-demo.mp4`, 2:57) is too short; don't submit it.
 - **Repo must be public** (open-source requirement). `scottfrasso/air-traffic-control` is private and `main` is unpushed.
+  Owner's call (2026-10-11): **stay private until more work is done**; go public by 10-13 after a full-history secret scan.
 - A human fills in the form (automated entry is prohibited). Answers are drafted in `submission/FORM_DRAFT.md`.
 - A public read-only replay URL for judges is still TODO (it goes in the form's run instructions).
 
@@ -76,17 +78,23 @@ Nothing.
 ## Cut / not done
 
 - **Stretch:** blast-radius estimation from ticket descriptions and scheduling overlapping tickets. Not started.
-- **Second demo variant with two real coding agents over MCP.** The tools are built and exercised by a scripted MCP client
-  (`m3-signals.ts`), but there's no recorded run with two LLM agents.
+- **Recording of the two-real-agent run.** The run happened (2026-10-10, ADR-0015) but wasn't recorded; the video shows a
+  summary card instead.
 - Cloudflare logo in the dashboard's hero cloud (slot reserved; waiting on the owner's asset).
 - An LLM to phrase ATC's reasons: rejected for now. The ordering and reasons are deterministic so the demo is repeatable.
 
 ## Next
 
-- **Code review follow-ups (2026-10-11): GitHub issues #1–#11.** Recommended first: #1 (pin the fork head when landing), #2 (stuck pending), #3 (landing lock), #6 (clearance wording). Each issue has file:line references, a suggested fix and acceptance criteria. The video is final, so redeploying the Worker is fine.
+Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
 
-1. Make the video: see `handover/03-video.md` (Remotion + ElevenLabs; footage from `demo/src/tools/record-replay.ts`).
-2. Optional: logo asset in the hero cloud; route checks by fork to raise the cache hit rate.
+1. Landing reliability bugs #1, #3, #5.
+2. #15 flight log on the landed commit (context preservation), then #17 savings in numbers.
+3. #14 public read-only replay link; fill `<PUBLIC_REPLAY_URL>` in `submission/FORM_DRAFT.md`.
+4. If time: #18 one-command deploy, #16 review clearance.
+5. Video final (#13) with the owner's feedback; swap it in as `atc-demo.mp4` and fix the README link.
+6. Secret scan, push, go public (#12) when the owner says so; the owner submits the form (#20) by 10-14 23:59 PDT.
+
+Other code-review follow-ups (#2, #4, #6–#11) are not competition-critical.
 
 ## Tools
 

@@ -14,7 +14,9 @@ on Cloudflare Workers + Artifacts. Deadline: 2026-10-14.
 - Judging: 50% originality/quality, 25% concurrency/coordination/context/review/conflicts, 25% ease of use.
   Prefer work that moves one of those scores.
 - Hard requirements: 5–10 min demo video, public repo with LICENSE, a person submits the form (no automated entry).
-- Priority work is in GitHub issues labelled `competition` (`P0` > `P1` > `P2`).
+- Priority work is in GitHub issues labelled `competition` (`P0` > `P1` > `P2`). The current plan, in order, is in
+  `handover/04-next.md` (local only; `handover/` is gitignored) and summarised under Next in `PROGRESS.md`.
+- The repo stays private and unpushed until the owner says otherwise. Never submit the form or change repo visibility yourself.
 - Put new research in `docs/research/` so it isn't looked up twice.
 
 ## Documentation sources — use these, never guess an API
