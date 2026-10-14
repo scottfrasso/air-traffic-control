@@ -577,7 +577,12 @@ export class Coordinator extends DurableObject<Env> {
     this.log("check.pair.failed", { a, b, shaA, shaB, error: error.slice(0, 300), ...(outcome.record ? { attempt: outcome.attempts, final: outcome.final } : { dropped: outcome.why }) }, null);
     if (!outcome.record) return; // heads moved (a newer push re-queues it), or a real result is already in
     this.savePairCheck(outcome.row);
-    if (!outcome.final) return;
+    if (!outcome.final) {
+      // The retry runs from the reconcile alarm: keep it running even if no agent is calling the API right now.
+      this.touch();
+      await this.scheduleReconcile();
+      return;
+    }
     for (const [me, other] of [[a, b], [b, a]] as const)
       this.emitSignal({
         fork: me, kind: "check_failed", about_fork: other, symbol: null,
