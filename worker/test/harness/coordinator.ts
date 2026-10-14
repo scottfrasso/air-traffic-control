@@ -51,8 +51,14 @@ export function airport(baseline = "base-repo") {
           const h = forced ?? heads.get(repo);
           return h ? [{ hash: h }] : [];
         },
+        createToken: async () => ({ plaintext: "token" }),
+        info: async () => ({ remote: `https://artifacts.example/${repo}` }),
         [Symbol.dispose]: () => undefined,
       }),
+    },
+    /** The checker container: tests answer each run (land, notes) through `checker`. */
+    CHECKER: {
+      getByName: () => ({ run: async (input: { mode: string }) => JSON.stringify(await self.checker(input)) }),
     },
     PUSH_PIPELINE: {
       create: async (opts: (typeof pipelines)[number]) => {
@@ -76,6 +82,11 @@ export function airport(baseline = "base-repo") {
     },
     /** Override what Artifacts answers for one read of `repo` (to model a stale or racing read). */
     onHeadRead: undefined as undefined | ((repo: string) => Promise<string | undefined>),
+    /** What the checker container answers. Default: a landing succeeds onto main, notes are written. */
+    checker: async (input: { mode: string; fork?: { expectedHead?: string } }): Promise<unknown> =>
+      input.mode === "land"
+        ? { mode: "land", landed: true, landedSha: `landed-${input.fork?.expectedHead ?? "x"}`, forkHead: input.fork?.expectedHead, merged: true }
+        : { mode: "notes", written: [] },
     /** Add an active fork the way createFork leaves it (without going through Artifacts). */
     addFork(name: string, base = heads.get(baseline)!) {
       q(

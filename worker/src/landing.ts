@@ -294,3 +294,25 @@ const firstLine = (s: string) => s.split("\n")[0]!.slice(0, 160);
 
 /** Workflows refuses an instance id that already exists with code 10405: that is a duplicate start, not a failure. */
 export const isDuplicateInstance = (message: string) => /10405|already[ _]exists/i.test(message);
+
+// ── after a landing (issue #11) ──────────────────────────────────────────
+
+export type OpenConflict = { fork: string; about_fork: string; symbol: string | null; message: string };
+export type AfterLanding = {
+  /** PRs with an open conflict against the winner: they go around (rebase onto the new main, fix, push). */
+  goAround: Array<{ fork: string; symbol: string | null; finding: string }>;
+  /** Everyone else stays in line and is re-checked on the new main (ADR-0015). */
+  stayInLine: string[];
+};
+
+/** Who goes around after `winner` lands: only the active PRs with an open conflict against it. */
+export function afterLanding(winner: string, active: ForkRow[], conflicts: OpenConflict[]): AfterLanding {
+  const out: AfterLanding = { goAround: [], stayInLine: [] };
+  for (const f of active) {
+    if (f.name === winner) continue;
+    const c = conflicts.find((x) => x.fork === f.name && x.about_fork === winner);
+    if (c) out.goAround.push({ fork: f.name, symbol: c.symbol, finding: c.message });
+    else out.stayInLine.push(f.name);
+  }
+  return out;
+}
