@@ -68,6 +68,8 @@ export type GateInput = {
   goAround?: string;
   /** Some pair check against another PR's current head isn't in yet. */
   waitingOnPairs: boolean;
+  /** Review gate on and this PR's latest push isn't approved: why it waits (issue #16). */
+  awaitingReview?: string;
   /** This PR's own checks errored (see `checkErrored`): will ATC run them again by itself? */
   checkRetriesLeft?: boolean;
   /** Active PRs with an open conflict against this one. */
@@ -82,7 +84,7 @@ export type Gate =
   | { kind: "deny"; reason: string; signal: "rebase_required" | "land_blocked" | null };
 
 /** May this PR land now? The checks run in this order; the first that fails decides (ADR-0011, issues #3 and #5). */
-export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, checkRetriesLeft = true }: GateInput): Gate {
+export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, awaitingReview, checkRetriesLeft = true }: GateInput): Gate {
   if (goAround) return { kind: "deny", reason: goAround, signal: null };
   if (checkErrored(me)) {
     const why = firstLine(me.check_detail ?? "unknown error");
@@ -111,6 +113,8 @@ export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, c
       reason: `Conflicts with ${r.name}, which is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Lands after ${r.name}. Fix it now to avoid a go-around.`,
       signal: "land_blocked",
     };
+  // Last: everything else says it may land, and only a review is missing. Retry, so the agent polls until it's approved.
+  if (awaitingReview) return { kind: "retry", reason: awaitingReview };
   return { kind: "land" };
 }
 
@@ -318,6 +322,28 @@ export function afterLanding(winner: string, active: ForkRow[], conflicts: OpenC
     const c = conflicts.find((x) => x.fork === f.name && x.about_fork === winner);
     if (c) out.goAround.push({ fork: f.name, symbol: c.symbol, finding: c.message });
     else out.stayInLine.push(f.name);
+// ── review gate (issue #16) ──────────────────────────────────────────────
+
+export type ReviewRow = { fork: string; sha: string; verdict: "approve" | "request_changes"; reviewer: string; note: string; at: number };
+
+/**
+ * With the review gate on, a PR with pushed changes must be approved at its CURRENT head before it is cleared or
+ * lands. Returns fork → why it waits. A new push needs a new approval: what was reviewed is no longer what would land.
+ */
+export function reviewWaits(forks: ForkRow[], reviews: ReviewRow[], required: boolean): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!required) return out;
+  const latest = new Map(reviews.map((r) => [r.fork, r]));
+  for (const f of forks) {
+    if (f.status !== "active" || f.head_sha === f.base_sha) continue;
+    const r = latest.get(f.name);
+    if (r?.sha === f.head_sha && r.verdict === "approve") continue;
+    out.set(
+      f.name,
+      r?.sha === f.head_sha
+        ? `Changes requested by ${r.reviewer}${r.note ? `: ${r.note.slice(0, 160)}` : ""}. Push a fix; it needs a new review.`
+        : `Waiting for review of ${f.head_sha.slice(0, 7)}.${r ? " The last approval was for an older push." : ""}`,
+    );
   }
   return out;
 }

@@ -61,6 +61,8 @@ export interface CoordinatorState {
   overlaps: Overlap[];
   /** Active forks in landing order: index 0 is next to land. */
   approach: string[];
+  /** Review gate on (issue #16): PRs need an approval at their head before they're cleared. */
+  reviewRequired: boolean;
   /** ATC landing sequence with one clearance + reason per PR. */
   sequence: import("./atc").SequenceEntry[];
   signals: SignalRow[];

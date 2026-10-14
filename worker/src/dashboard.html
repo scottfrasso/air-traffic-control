@@ -51,6 +51,10 @@
   .c-hold, .c-fix { color: var(--amber); }
   .c-go_around { color: var(--red); }
   .c-checking { color: var(--cyan); }
+  .c-review { color: var(--amber); }
+  .seq button.approve { grid-column: 3; justify-self: start; margin-top: 6px; font: 9px/1 "Press Start 2P", monospace; color: var(--green); background: transparent; border: 2px solid var(--green); cursor: pointer; padding: 5px 8px; white-space: nowrap; }
+  .seq button.approve:hover { background: var(--green); color: var(--bg, #0f1530); }
+  .seq button.approve:disabled { opacity: 0.5; cursor: default; }
   .landed { color: var(--dim); margin-top: 10px; }
   .landed b { color: var(--green); font-weight: normal; }
   .landed button { padding: 0 2px; font: inherit; color: var(--green); background: none; border: 0; border-bottom: 2px dotted var(--green); cursor: pointer; }
@@ -113,6 +117,7 @@
   const app = document.getElementById("app");
   const live = document.getElementById("live");
   const baselineEl = document.getElementById("baseline");
+  const replaying = new URLSearchParams(location.search).has("replay"); // read-only: no review buttons
   const repo = decodeURIComponent((location.pathname.match(/^\/r\/([^/]+)/) || [])[1] || new URLSearchParams(location.search).get("repo") || "");
   let key = "";
   try { key = localStorage.getItem("agentmesh-key") || ""; } catch (_) {}
@@ -153,8 +158,8 @@
   function targets() {
     const out = new Map();
     const seq = state.sequence || [];
-    const approach = seq.filter((e) => ["cleared", "follow", "checking"].includes(e.clearance));
-    const holding = seq.filter((e) => !["cleared", "follow", "checking"].includes(e.clearance));
+    const approach = seq.filter((e) => ["cleared", "follow", "checking", "review"].includes(e.clearance));
+    const holding = seq.filter((e) => !["cleared", "follow", "checking", "review"].includes(e.clearance));
     approach.forEach((e, i) => {
       if (i >= SLOTS) { holding.push(e); return; }
       const d = 30 + i * 50;
@@ -347,7 +352,7 @@
   }
 
   // ── ATC panel ──────────────────────────────────────────────────────────
-  const WORD = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD" };
+  const WORD = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD", review: "REVIEW" };
 
   function logLine(e) {
     const d = e.detail || {};
@@ -367,13 +372,23 @@
     baselineEl.innerHTML = `runway <b>${esc(state.baseline)}</b> at <b>${esc((state.baselineHead || "").slice(0, 7))}</b>`;
     const seq = state.sequence || [];
     const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
-      <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span></li>`).join("");
+      <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span>${
+        e.clearance === "review" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" title="Approve this PR's latest push">APPROVE</button>` : ""}</li>`).join("");
     const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at);
     const logged = new Set((state.flightLogs || []).map((l) => l.fork));
     const names = landed.map((f) => logged.has(f.name) ? `<button type="button" data-flight="${esc(f.name)}" title="Show flight log">${esc(pr(f.name))}</button>` : `<b>${esc(pr(f.name))}</b>`);
     document.getElementById("seq").innerHTML = (rows ? `<ul class="seq">${rows}</ul>` : `<p class="empty">No traffic. PRs appear when agents start work.</p>`)
       + (landed.length ? `<p class="landed">Landed: ${names.join(", ")}</p>` : "");
     document.querySelectorAll("[data-flight]").forEach((b) => (b.onclick = () => showFlight(b.dataset.flight)));
+    // A person reviewing on the runway (issue #16): approve the PR's current head.
+    document.querySelectorAll("[data-approve]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/reviews`, {
+        method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ fork: b.dataset.approve, verdict: "approve", reviewer: "a person on the dashboard" }),
+      });
+      if (!res.ok) b.disabled = false;
+    }));
     renderSavings();
     renderFlight();
     const lines = state.events.map((e) => [e, logLine(e)]).filter(([, l]) => l).slice(0, 10)

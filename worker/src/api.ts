@@ -54,6 +54,25 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   ],
   [
     "POST",
+    /^\/reviews$/,
+    async (stub, request) => {
+      const b = await body<{ fork?: string; verdict?: string; note?: string; reviewer?: string }>(request);
+      if (!b.fork) throw new HttpError(400, "fork is required");
+      if (b.verdict !== "approve" && b.verdict !== "request_changes") throw new HttpError(400, 'verdict must be "approve" or "request_changes"');
+      return json(await stub.review(b.fork, b.verdict, b.note ?? "", b.reviewer ?? "reviewer"));
+    },
+  ],
+  [
+    "POST",
+    /^\/settings$/,
+    async (stub, request) => {
+      const b = await body<{ review?: boolean }>(request);
+      if (typeof b.review !== "boolean") throw new HttpError(400, "review (boolean) is required");
+      return json(await stub.setReviewRequired(b.review));
+    },
+  ],
+  [
+    "POST",
     /^\/land$/,
     async (stub, request) => {
       const { fork } = await body<{ fork?: string }>(request);

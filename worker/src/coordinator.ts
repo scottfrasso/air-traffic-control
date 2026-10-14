@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  afterLanding, approachQueue, checkRetriesLeft, LANDING_LOCK_MS, type OpenConflict, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  afterLanding, approachQueue, checkRetriesLeft, LANDING_LOCK_MS, type OpenConflict, forksToRecheck, reviewWaits, type ReviewRow, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -782,7 +782,7 @@ export class Coordinator extends DurableObject<Env> {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const forks = this.activeForks();
     const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
-    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp);
+    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp, this.reviewWaits());
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -793,6 +793,51 @@ export class Coordinator extends DurableObject<Env> {
     const e = this.sequence().find((x) => x.fork === fork);
     if (!e) return { fork, pr: prLabel(fork), position: null, clearance: row.status, message: `ATC: ${prLabel(fork)} is ${row.status}.` };
     return { fork, pr: e.pr, position: e.position, clearance: e.clearance, message: clearanceMessage(e) };
+  }
+
+  // ── review gate (issue #16, ADR-0023) ───────────────────────────────────
+
+  private reviewRequired() {
+    return this.meta("review_required") === "1";
+  }
+
+  /** Turn the review gate on or off for this baseline (off by default, so the demo is unchanged). */
+  async setReviewRequired(on: boolean): Promise<{ reviewRequired: boolean }> {
+    this.setMeta("review_required", on ? "1" : "0");
+    this.log("review.gate", { on });
+    return { reviewRequired: on };
+  }
+
+  private reviewWaits(): Map<string, string> {
+    return reviewWaits(this.activeForks(), this.sql.exec<ReviewRow>("SELECT * FROM reviews").toArray(), this.reviewRequired());
+  }
+
+  /**
+   * A reviewer (an agent through MCP, or a person on the dashboard) approves or requests changes on a PR's CURRENT
+   * head. A later push needs a new review. The author is told through a signal; the note goes into the flight log.
+   */
+  async review(fork: string, verdict: "approve" | "request_changes", note: string, reviewer: string): Promise<{ fork: string; sha: string; verdict: string; clearance?: string }> {
+    const row = this.fork(fork);
+    if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
+    if (row.head_sha === row.base_sha) throw new Error(`${prLabel(fork)} has no pushed changes to review`);
+    const who = reviewer.trim().slice(0, 60) || "reviewer";
+    const text = note.trim().slice(0, 500);
+    this.sql.exec(
+      `INSERT INTO reviews(fork, sha, verdict, reviewer, note, at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(fork) DO UPDATE SET sha = excluded.sha, verdict = excluded.verdict, reviewer = excluded.reviewer, note = excluded.note, at = excluded.at`,
+      fork, row.head_sha, verdict, who, text, Date.now(),
+    );
+    this.log(verdict === "approve" ? "review.approved" : "review.changes_requested", { sha: row.head_sha, reviewer: who, note: text }, fork);
+    this.resolveSignals({ fork, kind: "review" });
+    this.emitSignal({
+      fork, kind: "review", about_fork: null, symbol: null,
+      message: verdict === "approve"
+        ? `${who} approved ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."}`
+        : `${who} requested changes on ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."} Push a fix; it needs a new review.`,
+      data: { verdict, reviewer: who, note: text, sha: row.head_sha }, dedupe_key: `review:${fork}:${row.head_sha}:${verdict}:${Date.now()}`,
+    });
+    this.touch();
+    return { fork, sha: row.head_sha, verdict, clearance: this.sequence().find((e) => e.fork === fork)?.clearance };
   }
 
   // ── landing gate (milestone 5) ─────────────────────────────────────────
@@ -842,6 +887,7 @@ export class Coordinator extends DurableObject<Env> {
     const gate = landGate({
       me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork), rivals: this.rivals(fork),
       checkRetriesLeft: checkRetriesLeft(me, this.sql.exec<CheckRun>("SELECT * FROM check_runs WHERE fork = ?", fork).toArray()[0]),
+      awaitingReview: this.reviewWaits().get(fork),
     });
     if (gate.kind === "deny") return deny(gate.reason, gate.signal);
     if (gate.kind === "retry") {
@@ -1010,6 +1056,9 @@ export class Coordinator extends DurableObject<Env> {
       clearances: clearanceHistory(snapshots, f.name),
       onto,
       landed,
+      review: this.reviewRequired()
+        ? this.sql.exec<{ verdict: string; reviewer: string; note: string }>("SELECT verdict, reviewer, note FROM reviews WHERE fork = ? AND sha = ?", f.name, f.head_sha).toArray()[0]
+        : undefined,
     });
   }
 
@@ -1179,6 +1228,7 @@ export class Coordinator extends DurableObject<Env> {
       })),
       overlaps: this.overlaps(),
       approach: approachQueue(this.activeForks(), this.meta("baseline_head") ?? ""),
+      reviewRequired: this.reviewRequired(),
       sequence: this.sequence(),
       signals: this.sql
         .exec<SignalRow & { data: string }>("SELECT * FROM signals ORDER BY id DESC LIMIT 100")

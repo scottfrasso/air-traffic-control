@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS pair_queue(
 -- The latest check pipeline (push or re-check) started per fork, to restart stuck or failed ones (issue #2).
 CREATE TABLE IF NOT EXISTS check_runs(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, started_at INTEGER NOT NULL, restarts INTEGER NOT NULL);
 
+-- The latest review of each PR (issue #16, ADR-0023): which head it was for, and the verdict.
+CREATE TABLE IF NOT EXISTS reviews(
+  fork TEXT PRIMARY KEY, sha TEXT NOT NULL, verdict TEXT NOT NULL, reviewer TEXT NOT NULL, note TEXT NOT NULL, at INTEGER NOT NULL);
+
 -- When each fork's current head was first seen (to tell "being indexed" from "stuck").
 CREATE TABLE IF NOT EXISTS head_seen(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
 

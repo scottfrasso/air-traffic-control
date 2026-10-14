@@ -31,6 +31,7 @@ the raw spike findings (milestone 1).
 | [0022](docs/adr/0022-coordinator-tests-in-node.md) | Coordinator DO tests in plain Node on node:sqlite | Accepted |
 | [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted |
 | [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Accepted |
+| [0023](docs/adr/0023-review-gate.md) | Optional review gate: REVIEW clearance, approval per head | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
