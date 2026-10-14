@@ -1,6 +1,6 @@
 # PROGRESS
 
-_Last updated 2026-10-11. Next session: start with [`handover/04-next.md`](handover/04-next.md)._
+_Last updated 2026-10-15. The competition entry is submitted; the repo is public._
 
 ## Before submitting (found 2026-10-11, see docs/research/competition.md)
 
@@ -114,17 +114,18 @@ Nothing.
 
 ## Next
 
-Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
+Done on 2026-10-14/15, one PR at a time (each: independent review until "merge", green CI, deployed and `./demo/run.sh`
+passing; production always equal to `main` after a merge):
+#25 public replay (#14) · #27, #29 the 60-second cut · #28 pair-check errors (#5) · #30, #31, #35 no PR stays pending,
+main never moves backwards (#2, #4) · #32 clearance wording (#6) · #33 queue consumer + DLQ (#7) · #34 checker lock (#8) ·
+#36 checks share work (#9) · #37 tests (#11) · #38 review gate (#16) · #39, #41 one-command deploy (#18) ·
+#40 and this PR, tidy-up and the Coordinator split (#10).
 
-1. ~~Landing reliability bugs #1, #3, #5.~~ Done 2026-10-11 (#22).
-2. ~~#15 flight log on the landed commit (context preservation), then #17 savings in numbers.~~ Done 2026-10-11 (#23);
-   still to do: a 10–15 s flight-log beat and a recap with the real numbers in the video.
-3. ~~#14 public read-only replay link.~~ Done 2026-10-14 (ADR-0020): https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay
-4. If time: #18 one-command deploy, #16 review clearance.
-5. Video is approved (#13). Optional: re-render with a #15/#17 beat in place of the recap's "next" line.
-6. Secret scan, push, go public (#12) when the owner says so; the owner submits the form (#20) by 10-14 23:59 PDT.
-
-Other code-review follow-ups (#2, #4, #6–#11) are not competition-critical.
+Open:
+- #19 compare competing attempts: a design is on the issue (about half a day of work).
+- #21 finals prep (not code; only if ATC is selected on 10-16).
+- Ideas left by reviews: per-container cap on concurrent tsc runs (ADR-0013 limits); passing ATC's known "alone"
+  results into pair checks; a second-account run of `pnpm setup:cloudflare`.
 
 ## Tools
 

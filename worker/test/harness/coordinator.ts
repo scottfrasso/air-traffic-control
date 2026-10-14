@@ -25,8 +25,10 @@ function sqlStorage(db: DatabaseSync) {
   };
 }
 
-export function airport(baseline = "base-repo", vars: Record<string, string> = {}) {
+/** `prepare`: runs on the empty database before the Coordinator is built (e.g. an old schema, to test migrations). */
+export function airport(baseline = "base-repo", vars: Record<string, string> = {}, prepare?: (db: DatabaseSync) => void) {
   const db = new DatabaseSync(":memory:");
+  prepare?.(db);
   const heads = new Map<string, string>([[baseline, "main0"]]);
   const pipelines: Array<{ id: string; params: { fork: string; sha: string; kind: string; others: Array<{ name: string; sha: string }> } }> = [];
   let alarm: number | null = null;

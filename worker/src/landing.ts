@@ -38,13 +38,14 @@ export const CHECK_TIMEOUT_S = 240;
 /** One landing at a time per baseline. Outlives the checker's hard timeout, so a slow landing can't be overtaken. */
 export const LANDING_LOCK_MS = (CHECK_TIMEOUT_S + 60) * 1000;
 
-export type LandingLock = { token: string; at: number };
+/** `fork`: the PR being landed (locks written before it was recorded have none). */
+export type LandingLock = { token: string; at: number; fork?: string };
 
 export function parseLock(raw: string | null): LandingLock | null {
   if (!raw) return null;
   try {
     const l = JSON.parse(raw) as Partial<LandingLock>;
-    return typeof l.token === "string" && typeof l.at === "number" ? { token: l.token, at: l.at } : null;
+    return typeof l.token === "string" && typeof l.at === "number" ? { token: l.token, at: l.at, ...(typeof l.fork === "string" ? { fork: l.fork } : {}) } : null;
   } catch {
     return null; // legacy "<timestamp>" value or garbage: treat as free
   }

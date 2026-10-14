@@ -128,7 +128,7 @@ async function main() {
   setEnv("AGENTMESH_API_KEY", randomBytes(32).toString("hex"), true, true);
   setEnv("CLOUDFLARE_ACCOUNT_ID", acct);
   // The key run.sh will send: the shell's if set (run.sh prefers it), else .env's.
-  const apiKey = process.env.AGENTMESH_API_KEY || readEnv().AGENTMESH_API_KEY || "<generated>"; // "" counts as unset, as in need()
+  const apiKey = process.env.AGENTMESH_API_KEY || readEnv().AGENTMESH_API_KEY || "<generated>"; // "" counts as unset (run.sh's need() then reports it missing)
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
   const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
   if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
@@ -161,6 +161,7 @@ async function main() {
     };
     process.on("SIGINT", forward);
     process.on("SIGTERM", forward);
+    process.on("SIGHUP", forward); // the terminal closed: still stop wrangler and remove the secrets
     let out = "";
     child.stdout.on("data", (chunk: Buffer) => {
       process.stdout.write(chunk); // live progress
@@ -172,11 +173,12 @@ async function main() {
     });
     process.off("SIGINT", forward);
     process.off("SIGTERM", forward);
+    process.off("SIGHUP", forward);
     if (exit.error) throw new Error(`couldn't run wrangler: ${exit.error.message}`);
-    const sig = interrupted ?? exit.signal;
+    const sig = exit.code === 0 ? null : (interrupted ?? exit.signal); // finished anyway: report the deploy, not the signal
     if (sig) {
       say(`deploy interrupted (${sig})`);
-      process.exitCode = sig === "SIGINT" ? 130 : 143;
+      process.exitCode = sig === "SIGINT" ? 130 : sig === "SIGHUP" ? 129 : 143;
       return;
     }
     if (exit.code !== 0) throw new Error(`wrangler deploy failed (exit ${exit.code})`);

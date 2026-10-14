@@ -20,6 +20,9 @@ Containers and Workflows, which local workerd can't fully provide, and adding vi
   separately against temporary git repos (`worker/test/container.test.ts`: pairs, a textual conflict, the
   environment-failure rule, the lock, land onto main, a stale expected head, and a main conflict at land).
 - `pnpm test` at the repo root runs every package's tests (`pnpm -r --if-present test`).
+- The Coordinator's read side (`readmodel.ts`: read model, overlaps, snapshots, timeline, flight-log list) and its
+  signal store (`signalstore.ts`) are functions of `SqlStorage`, split out of `coordinator.ts` with no behaviour change
+  (issue #10); the class keeps the write paths and the decisions that need its state.
 
 ## Consequences
 - Coordinator behaviour (meta, signals, the pipelines it starts) is now testable without deploying.

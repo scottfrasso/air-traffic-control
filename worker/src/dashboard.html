@@ -373,7 +373,7 @@
     const seq = state.sequence || [];
     const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
       <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span>${
-        e.clearance === "review" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}</li>`).join("");
+        (state.awaitingReview || []).includes(e.fork) && e.clearance !== "go_around" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}</li>`).join("");
     const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at);
     const logged = new Set((state.flightLogs || []).map((l) => l.fork));
     const names = landed.map((f) => logged.has(f.name) ? `<button type="button" data-flight="${esc(f.name)}" title="Show flight log">${esc(pr(f.name))}</button>` : `<b>${esc(pr(f.name))}</b>`);
@@ -386,7 +386,7 @@
       const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/reviews`, {
         method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify({ fork: b.dataset.approve, sha: b.dataset.sha, verdict: "approve", reviewer: "a person on the dashboard" }), // the head shown
-      });
+      }).catch((err) => new Response(JSON.stringify({ error: `network error: ${err.message}` }), { status: 599 }));
       if (!res.ok) { // e.g. the PR moved since this was drawn: say why, then let the next refresh redraw it
         b.disabled = false;
         b.textContent = "REFUSED";
