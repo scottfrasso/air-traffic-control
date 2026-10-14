@@ -13,7 +13,7 @@ import { PointBadge, SectionStrip } from "./scene/Overlay";
 import { FPS, T, VO, voFile } from "./timeline";
 
 /** v8: say what you'll show (Opening), show it (Problem → Idea → Chaos/Today → RealRun → Agents → Airport), recap it. */
-function Beat({ t }: { t: number }) {
+export function Beat({ t }: { t: number }) {
   if (t < T.p1End) return <Opening t={t} />;
   if (t < T.probEnd) return <Problem t={t} />;
   if (t < T.ideaEnd) return <Idea t={t} />;

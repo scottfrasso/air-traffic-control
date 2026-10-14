@@ -3,7 +3,12 @@
  * Part 1 says what the video will show, part 2 shows it, part 3 recaps it. The demo's chunks are anchored to
  * real events from the recorded run.
  */
-export const VOICE = { id: "XrExE9yKIg1WjnnlVkGX", name: "Matilda (American English)", model: "eleven_multilingual_v2" };
+export const VOICES = {
+  matilda: { id: "XrExE9yKIg1WjnnlVkGX", name: "Matilda (American English)", model: "eleven_multilingual_v2" },
+  // The professional clone (HsvQCt45cDuuTZeIGRvB) needs a Creator-tier plan; this is the instant clone.
+  scott: { id: "UmenmBo9KC1QmixclBqv", name: "Scott (instant voice clone)", model: "eleven_multilingual_v2" },
+} as const;
+export type VoiceKey = keyof typeof VOICES;
 
 export const LINES = {
   // ── part 1: what you'll see ──

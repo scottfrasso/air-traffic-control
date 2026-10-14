@@ -6,6 +6,9 @@
     "studio": "remotion studio src/index.ts",
     "voiceover": "tsx scripts/voiceover.ts",
     "render": "remotion render src/index.ts ATC out/atc.mp4",
+    "render:scott": "REMOTION_VOICE=scott remotion render src/index.ts ATC out/atc-scott.mp4",
+    "render:short": "remotion render src/index.ts ATCShort out/atc-short.mp4",
+    "render:short:scott": "REMOTION_VOICE=scott remotion render src/index.ts ATCShort out/atc-short-scott.mp4",
     "typecheck": "tsc -p ."
   },
   "dependencies": {
