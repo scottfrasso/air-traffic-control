@@ -30,6 +30,7 @@
   "vars": {
     "ARTIFACTS_NAMESPACE": "agentmesh",
     "CF_ACCOUNT_ID": "cd5005b633a7bdac0f47d9f93c3ad45c",
-    "PUSH_QUEUE_ID": "9d2beda0c8d84a39a41c90fa5d59fd9f"
+    "PUSH_QUEUE_ID": "9d2beda0c8d84a39a41c90fa5d59fd9f",
+    "PUBLIC_REPLAY_BASELINES": "shop-261011185716"
   }
 }

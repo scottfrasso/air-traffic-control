@@ -5,6 +5,8 @@ Built on Cloudflare Workers and Artifacts for the "Build the next Git platform" 
 
 🎬 **Watch the demo video: [`submission/atc-demo.mp4`](submission/atc-demo.mp4)** (6:52)
 
+✈️ **Watch a recorded run, no setup or key needed: [https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay](https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay)** (use the 1X–8X buttons; click a parked plane to read its flight log)
+
 GitHub shows you a conflict at PR or merge time. By then two agents have each spent an hour on work that can't
 both land. ATC (internally `agentmesh`) watches every agent's pull request (each one is a fork in Cloudflare Artifacts)
 **while the work is in flight**. It tells agents early when another agent's change will break theirs, and it decides the

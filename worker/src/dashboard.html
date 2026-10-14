@@ -462,8 +462,9 @@
 
   // ── replay: play a recorded run through the same animation ──────────────
   async function startReplay() {
-    const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/timeline`, { headers: { authorization: `Bearer ${key}` } });
-    if (res.status === 401) { key = ""; return askForKey("KEY REJECTED. PASTE AGENTMESH_API_KEY."); }
+    // Allow-listed recorded runs are public (issue #14): try without a key, ask for one only if refused.
+    const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/timeline`, key ? { headers: { authorization: `Bearer ${key}` } } : {});
+    if (res.status === 401) { const msg = key ? "KEY REJECTED. PASTE AGENTMESH_API_KEY." : "ATC ACCESS KEY"; key = ""; return askForKey(msg); }
     const tl = await res.json();
     if (!tl.snapshots.length) { setLive(false, "NOTHING RECORDED"); return; }
     const GAP = 2500; // compress idle stretches so the video keeps moving
@@ -508,7 +509,8 @@
 
   async function boot() {
     if (!repo) return askForRepo();
-    if (!key) return askForKey("ATC ACCESS KEY");
+    const replay = new URLSearchParams(location.search).has("replay");
+    if (!key && !replay) return askForKey("ATC ACCESS KEY");
     app.innerHTML = `<main>
       <div><div class="scope"><canvas id="scene" width="${W}" height="${H}" aria-label="Side view of the approach: each pull request is a plane, nearest the runway lands next"></canvas></div>
       <div class="controls" id="controls" hidden></div></div>
@@ -526,8 +528,8 @@
     canvas.addEventListener("mousemove", (ev) => canvas.classList.toggle("pick", !!planeAt(ev)));
     try { await document.fonts.load("8px 'Press Start 2P'"); } catch (_) {}
     const link = document.getElementById("replayLink");
-    if (new URLSearchParams(location.search).has("replay")) {
-      link.hidden = false; link.textContent = "Back to live"; link.href = location.pathname;
+    if (replay) {
+      link.hidden = !key; link.textContent = "Back to live"; link.href = location.pathname;
       startReplay();
     } else {
       link.hidden = false; link.href = `${location.pathname}?replay`;

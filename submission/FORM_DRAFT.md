@@ -68,7 +68,7 @@ https://github.com/scottfrasso/air-traffic-control (**make it public and push `m
 ## Instructions to run your project (4000)
 
 <!-- instructions:start -->
-Fastest look (no setup): open the public replay of a recorded run: <PUBLIC_REPLAY_URL>. It replays the real event log through the runway dashboard at 1x to 8x.
+Fastest look (no setup): open the public replay of a recorded run: https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay. It replays the real event log through the runway dashboard at 1x to 8x.
 
 Run the full demo against your own Cloudflare account:
 

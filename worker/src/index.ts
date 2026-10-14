@@ -2,6 +2,7 @@ import { handleApi } from "./api";
 import { handleMcp } from "./mcp";
 import { baselineOf } from "./artifacts";
 import { isAuthorized, unauthorized } from "./auth";
+import { publicReplayBaseline } from "./public";
 import dashboardHtml from "./dashboard.html";
 import { isPushed, type ArtifactsEvent } from "./events";
 
@@ -15,6 +16,12 @@ export default {
     if (url.pathname === "/health") return Response.json({ ok: true });
     // Static shell only; it holds no data and asks for the API key (ADR-0005).
     if (url.pathname === "/" || url.pathname.startsWith("/r/")) return new Response(dashboardHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
+    // Key-less read-only replay of allow-listed recorded runs (issue #14).
+    const publicBaseline = publicReplayBaseline(request.method, url.pathname, env.PUBLIC_REPLAY_BASELINES);
+    if (publicBaseline) {
+      const stub = env.COORDINATOR.getByName(publicBaseline);
+      return new Response(await stub.timelineJson(), { headers: { "content-type": "application/json", "cache-control": "public, max-age=60" } });
+    }
     if (!isAuthorized(request, env)) return unauthorized();
     if (url.pathname.startsWith("/api/repos/")) return handleApi(request, env, url);
     if (url.pathname === "/mcp") return handleMcp(request, env, ctx);

@@ -26,6 +26,7 @@ the raw spike findings (milestone 1).
 | [0017](docs/adr/0017-competition-requirements.md) | The competition rules shape the submission (5–10 min video, public repo, judging weights) | Accepted |
 | [0018](docs/adr/0018-landing-reliability.md) | Land only what was checked: pinned heads, owned lock, current-head pair coverage | Accepted |
 | [0019](docs/adr/0019-flight-log-and-savings.md) | Flight log as a git note (refs/notes/atc); savings from the event log | Accepted |
+| [0020](docs/adr/0020-public-replay.md) | Key-less read-only replay of allow-listed recorded runs | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
