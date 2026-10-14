@@ -163,6 +163,8 @@ async function main() {
     process.on("SIGTERM", forward);
     process.on("SIGHUP", forward); // the terminal closed: still stop wrangler and remove the secrets
     let out = "";
+    const ignore = () => undefined; // a closed terminal (EIO) must not crash us before `finally` removes the secrets
+    process.stdout.on("error", ignore);
     child.stdout.on("data", (chunk: Buffer) => {
       process.stdout.write(chunk); // live progress
       out += chunk.toString("utf8");
@@ -174,6 +176,7 @@ async function main() {
     process.off("SIGINT", forward);
     process.off("SIGTERM", forward);
     process.off("SIGHUP", forward);
+    process.stdout.off("error", ignore);
     if (exit.error) throw new Error(`couldn't run wrangler: ${exit.error.message}`);
     const sig = exit.code === 0 ? null : (interrupted ?? exit.signal); // finished anyway: report the deploy, not the signal
     if (sig) {

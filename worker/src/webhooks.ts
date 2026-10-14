@@ -20,7 +20,7 @@ export async function deliver(url: string, secret: string | null, body: string, 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await fetcher(url, { method: "POST", headers, body, signal: AbortSignal.timeout(TIMEOUT_MS) });
-      await res.body?.cancel(); // the body is never read: free the connection now (review of #40)
+      await res.body?.cancel().catch(() => undefined); // free the connection; a failed cancel must not look like a failed POST (review of #42)
       if (res.ok || (res.status < 500 && res.status !== 429)) return { ok: res.ok, attempts: attempt }; // a 4xx won't change on retry
     } catch {
       /* timeout or network error: retry once */
