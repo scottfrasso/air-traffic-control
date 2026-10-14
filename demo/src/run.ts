@@ -170,6 +170,8 @@ try {
   if (end.savings) {
     const s = end.savings;
     say("system", `savings: ${savingsLine(s)}`);
+    const avgPair = s.pairCheckMs?.length ? (s.pairCheckMs.reduce((x, y) => x + y, 0) / s.pairCheckMs.length / 1000).toFixed(1) : "-";
+    say("system", `         main state built ${s.mainBuilds ?? "-"}×, avg pair check ${avgPair} s`);
     say("system", `         typecheck cache hits ${s.cacheHits}/${s.typechecks}, avg wait to land ${s.waitMs.length ? Math.round(s.waitMs.reduce((x, y) => x + y, 0) / s.waitMs.length / 1000) : 0} s, run ${Math.round(s.elapsedMs / 1000)} s`);
   }
 } catch (err) {

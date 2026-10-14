@@ -42,6 +42,9 @@ Nothing.
   to the `agentmesh-push-events-dlq` dead-letter queue after 3 tries. ADR-0002.
 - **Checker concurrency (#8, 2026-10-14):** a cross-process git lock in the container, atomic cache writes, and environment
   failures are no longer cached. `check.ts` is tested locally against temp git repos (`worker/test/container.test.ts`). ADR-0013.
+- **Checks share work (#9, 2026-10-14):** a push's checks share one container, re-checks after a landing run in the landing
+  container, and per-tree locks make concurrent checks reuse one tsc run. Main's TypeScript state built 7–8× per 5-PR run
+  (was 12–14×); average pair check 1.5–1.8 s (was 1.9–2.6 s). `run.sh` prints both. ADR-0013.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
   landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.

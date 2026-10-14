@@ -130,3 +130,23 @@ test("an old lock directory with no owner (from older code) doesn't wedge the co
     s.cleanup();
   }
 });
+
+test("checks running at once share main's build and each fork's own result instead of redoing them (issue #9)", { timeout: 120_000 }, async () => {
+  const s = airspace();
+  try {
+    // One push's checks, all at once, as ATC starts them: its check on main and its pairs with the others.
+    const results = await Promise.all([
+      s.check({ mode: "single", repo: s.a, baseline: s.base }),
+      s.check({ mode: "pair", a: s.a, b: s.b, baseline: s.base }),
+      s.check({ mode: "pair", a: s.a, b: s.c, baseline: s.base }),
+    ]);
+    const steps = results.flatMap((r) => r.timings as Array<{ step: string; cached?: boolean }>);
+    assert.equal(steps.filter((t) => t.step === "build main incremental state").length, 1); // not once per check
+    // A sits on main, so "A on main" and "A alone" are the same tree: tsc runs on it once, the other two are cache hits.
+    const aTree = steps.filter((t) => t.step === "typecheck on main" || t.step === "typecheck A alone");
+    assert.equal(aTree.length, 3);
+    assert.equal(aTree.filter((t) => !t.cached).length, 1);
+  } finally {
+    s.cleanup();
+  }
+});
