@@ -19,6 +19,10 @@ even for unrelated work. That wastes agent time and contradicts the picture of a
 - If a PR no longer fits on the new main (a combination effect pairwise checks didn't predict), the recheck or the landing
   check fails with `mainConflict`, and only then does that PR go around, with the exact error.
 - A new push from a PR clears its go-around state; the checks on that push decide.
+- **Wording follows from this** (issue #6, 2026-10-14). Only GO AROUND tells an agent to rebase. HOLD says
+  "Lands after PRx. Fix it now to avoid a go-around", because a fix made while holding is what saves the rebase.
+  The `request_land` refusal for a rival ahead says the same thing. FOLLOW says "No conflicts" only when there are
+  none; otherwise it names the PRs behind that wait for it. The MCP tool descriptions and `agents/PROTOCOL.md` match.
 
 ## Evidence
 - Scripted 5-PR demo: only PR2 (real conflict) went around. PR3–PR5 landed with no rebases ("Land PRn via ATC"), the final main

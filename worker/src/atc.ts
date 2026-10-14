@@ -89,7 +89,8 @@ export function buildSequence(
     // A conflicting PR that is ahead in the order lands first; this one holds.
     const ahead = mine.find((c) => landingOrder(byName.get(c.other)!, f, baselineHead) < 0);
     if (ahead) {
-      entry("hold", `Conflicts with ${prLabel(ahead.other)}${on(ahead)}. Lands after ${prLabel(ahead.other)}, then rebase.`, ahead.other);
+      // Not "then rebase": fixing the conflict while holding avoids the go-around, which is the point (issue #6).
+      entry("hold", `Conflicts with ${prLabel(ahead.other)}${on(ahead)}. Lands after ${prLabel(ahead.other)}. Fix it now to avoid a go-around.`, ahead.other);
       continue;
     }
     if (!leader) {
@@ -99,7 +100,10 @@ export function buildSequence(
       entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : "Cleared to land. No conflicts.");
       continue;
     }
-    entry("follow", `Follow ${prLabel(leader)}. No conflicts.`, leader);
+    // Its only conflicts are with PRs behind it (one ahead would have made it hold): they wait for it.
+    // One name per PR: a pair can have several open conflict signals (different symbols, files or errors).
+    const behind = [...new Set(mine.map((c) => prLabel(c.other)))];
+    entry("follow", `Follow ${prLabel(leader)}. ${behind.length ? `${behind.join(", ")} will wait for you.` : "No conflicts."}`, leader);
   }
   return out;
 }

@@ -14,7 +14,7 @@ const coordinatorFor = async (env: Env, baseline: string) => {
 
 /**
  * The agent interface. Stateless (ADR-0009): a fresh McpServer per request, all state in the Coordinator DO.
- * Fork names are `<baseline>--<agent>`, so tools that take a fork can find the right Coordinator.
+ * Fork names are `<baseline>--pr<N>`, so tools that take a fork can find the right Coordinator.
  */
 function createServer(env: Env) {
   const server = new McpServer({ name: "agentmesh", version: "0.1.0" });
@@ -54,7 +54,8 @@ function createServer(env: Env) {
     {
       description:
         "Informational notes about other agents' in-flight work that affects yours: signature changes to symbols you use, files you both edit, " +
-        "semantic conflicts found by speculative merge+typecheck, and 'rebase required' after someone lands. Poll this after each push.",
+        "semantic conflicts found by speculative merge+typecheck, and 'go around' when a PR you conflict with lands first " +
+        "or your PR no longer fits on main (rebase onto the new main, fix, push, then land). Poll this after each push.",
       inputSchema: z.object({
         fork: z.string().describe("Your fork name"),
         include_resolved: z.boolean().default(false),
@@ -70,7 +71,8 @@ function createServer(env: Env) {
     "get_clearance",
     {
       description:
-        "Ask Air Traffic Control (ATC) where your PR is in the landing sequence and why: cleared to land, follow another PR, hold for a conflicting PR, go around (rebase), or standby while checks run.",
+        "Ask Air Traffic Control (ATC) where your PR is in the landing sequence and why: cleared to land, follow another PR, hold for a conflicting PR (fix the conflict while you hold and you won't need to go around), " +
+        "go around (rebase onto the new main, fix, push, then land), or standby while checks run.",
       inputSchema: z.object({ fork: z.string().describe("Your fork name, from start_work") }),
     },
     async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).getClearance(fork)),
@@ -97,7 +99,7 @@ function createServer(env: Env) {
       description:
         "Ask to merge your fork into the baseline. Lands only if your fork is current with baseline and green (typechecks). " +
         "If another fork conflicts with yours and is closer to landing (or ties with a smaller diff), you are told to wait; " +
-        "after someone lands, conflicting forks get a 'rebase required' signal. If the response says retry, checks are still running.",
+        "if a PR you conflict with lands first, or yours no longer fits on main, you go around: rebase onto the new main, fix, push, then land. If the response says retry, checks are still running.",
       inputSchema: z.object({ fork: z.string().describe("Your fork name") }),
     },
     async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).requestLand(fork)),
