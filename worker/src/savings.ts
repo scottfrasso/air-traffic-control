@@ -20,6 +20,10 @@ export interface Savings {
   signalMs: number[];
   typechecks: number;
   cacheHits: number;
+  /** Times a checker container built main's incremental TypeScript state (once per container per main is the floor). */
+  mainBuilds: number;
+  /** Each pair check's wall time: its "total" step, or (older checkers) the sum of its steps, which misses waits. */
+  pairCheckMs: number[];
   /** Go-arounds ATC asked for. */
   rebases: number;
   naiveRebases: number;
@@ -29,10 +33,10 @@ export interface Savings {
   elapsedMs: number;
 }
 
-type Detail = { a?: string; b?: string; status?: string; fresh?: boolean; timings?: Array<{ step?: string; cached?: boolean }> };
+type Detail = { a?: string; b?: string; status?: string; fresh?: boolean; timings?: Array<{ step?: string; cached?: boolean; ms?: number }> };
 
 export function computeSavings(events: LogEvent[]): Savings {
-  const s: Savings = { prs: 0, landed: 0, pairsChecked: 0, pairRuns: 0, conflicts: 0, signalMs: [], typechecks: 0, cacheHits: 0, rebases: 0, naiveRebases: 0, waitMs: [], elapsedMs: 0 };
+  const s: Savings = { prs: 0, landed: 0, pairsChecked: 0, pairRuns: 0, conflicts: 0, signalMs: [], typechecks: 0, cacheHits: 0, mainBuilds: 0, pairCheckMs: [], rebases: 0, naiveRebases: 0, waitMs: [], elapsedMs: 0 };
   const open = new Set<string>();
   const lastPush = new Map<string, number>();
   const requested = new Map<string, number>();
@@ -76,9 +80,14 @@ export function computeSavings(events: LogEvent[]): Savings {
       case "check.single.stale":
       case "check.pair": {
         for (const t of d.timings ?? []) {
+          if (t.step === "build main incremental state") s.mainBuilds++;
           if (!t.step?.startsWith("typecheck")) continue;
           s.typechecks++;
           if (t.cached) s.cacheHits++;
+        }
+        if (e.kind === "check.pair") {
+          const total = d.timings?.find((t) => t.step === "total")?.ms;
+          s.pairCheckMs.push(total ?? (d.timings ?? []).reduce((n, t) => n + (t.ms ?? 0), 0));
         }
         if (e.kind !== "check.pair" || !d.a || !d.b || d.fresh === false) break;
         s.pairRuns++;

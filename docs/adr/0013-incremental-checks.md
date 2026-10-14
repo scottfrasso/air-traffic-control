@@ -46,6 +46,34 @@ A pair check ran `tsc` three times from a fresh clone (A alone, B alone, merge).
   lock left by a dead pid, and an old ownerless lock dir. Without the lock the
   parallel test fails reliably on concurrent `git init`; the fetch/worktree races didn't reproduce locally at 4-way.
 
+## Routing and shared work (issue #9, 2026-10-14)
+- **Before:** each push's checks were spread over the pool by the sorted pair key, and inside one container the
+  concurrent checks of one push all built main's TypeScript state and typechecked the fork alone at the same moment.
+  Three 5-PR demo runs measured main's state built 12–14 times, cache hits 32–46%, and 1.9–2.6 s per pair check.
+  Routing by fork alone, and then per-tree locks, changed nothing (12×, 1.9–2.1 s). The timelines showed why:
+  before the first landing main was built only 3 times. The other 9 came after landings: each landing re-checked
+  the remaining PRs, each in its own container, and each container built the new main (3 containers × 3 mains).
+- **Now:**
+  - All of one push's checks (its check on main and its pair checks) go to the pushing fork's container.
+  - Re-checks after main moved go to the landing container, which already has the new main: one build per landing.
+  - A per-tree lock (the same lock protocol as the git lock) makes one process build main's state or typecheck a
+    tree while the others wait for its cached result.
+  - `savings` counts `mainBuilds` and `pairCheckMs`, and `run.sh` prints them, so the effect is measured on every run.
+- **After** (two 5-PR runs, `shop-261014210117`, `shop-261014210231`): main built **7–8×** (was 12–14×). Cache hits stay
+  around 30–40%: most misses are merges, which are new trees. (Landings' own builds aren't logged as events, so both
+  counts are slightly low.) No claim about pair-check time: the old metric summed recorded steps, which misses time
+  spent waiting on a lock and then reading the cache. Checks now record a `total` wall-time step and `pairCheckMs` uses
+  it, so future runs can compare (review of #36).
+- **Limits** (review of #36):
+  - If the lock holder's tsc run produces nothing cacheable (killed, crashed), the waiters re-run it one after another,
+    where before they ran in parallel.
+  - Work is concentrated on fewer containers: the landing container also runs every re-check after a landing, and one
+    push's checks share one 2-vCPU container. That's fine at demo scale (tsc about 1 s). On a repo with 30 s typechecks
+    and ten PRs, re-checks would approach the 240 s limit; capping concurrent tsc runs per container would be next.
+- The lock's "ownerless dir" break branch is gone (a lock always has a pid file, and an empty dir is replaced by the
+  rename). Zombies count as dead, since the container's PID 1 never reaps. tsc exit 2 (a crash) isn't cached.
+  (Review of #34.)
+
 ## Consequences / next
 - The cache is per container. The 3-container pool (ADR-0010 follow-up) splits it. Routing by fork, or passing ATC's known
   alone results into pair checks, would raise the hit rate.

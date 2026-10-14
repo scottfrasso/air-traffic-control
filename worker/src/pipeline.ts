@@ -27,7 +27,9 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
     // Is this PR, merged onto the current main, green? (Tokens are minted inside the step so they never land in Workflow state.)
     const onMain = () =>
       step.do("check PR on current main", slow, async () => {
-        await coordinator.applySingle(await checkerFor(this.env, baseline, fork).run({ mode: "single", repo: await readRef(this.env, fork), baseline: await readRef(this.env, baseline) }));
+        // A re-check after main moved runs where the landing ran: that container has the new main and builds its
+        // TypeScript state once for every PR re-checked on it (issue #9: 3 builds per landing became 1).
+        await coordinator.applySingle(await checkerFor(this.env, baseline, kind === "recheck" ? "land" : fork).run({ mode: "single", repo: await readRef(this.env, fork), baseline: await readRef(this.env, baseline) }));
       });
     // All pairs in parallel (each in its own work dir in the same warm container).
     // A pair that still fails after its retries is recorded as failed (never left outstanding, which would block landing).
@@ -36,7 +38,9 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
         list.map(async (other) => {
           try {
             return await step.do(`speculative merge with ${other.name}`, slow, async () => {
-              const out = await checkerFor(this.env, baseline, [fork, other.name].sort().join("|")).run({
+              // Same container as this push's own check (keyed by the pushing fork, issue #9): it has already fetched the
+              // fork, built main's TypeScript state and cached the fork's "alone" result.
+              const out = await checkerFor(this.env, baseline, fork).run({
                 mode: "pair",
                 a: await readRef(this.env, fork),
                 b: await readRef(this.env, other.name),

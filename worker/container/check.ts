@@ -39,16 +39,18 @@ mkdirSync(WORK, { recursive: true });
 // directory (mkdir is atomic). Typechecks and merges in their own worktrees stay parallel.
 const LOCK = join(CACHE, "git.lock");
 const LOCK_STALE_MS = 300_000; // longer than the checker's hard timeout (240 s), so only a lost lock is ever broken
-const BREAK = `${LOCK}.break`;
 const BREAK_STALE_MS = 10_000;
-let lockDepth = 0;
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; } };
-const lockOwner = (): { pid: number; age: number } | null => {
+/** A zombie counts as dead: the container's PID 1 (`sleep infinity`) never reaps orphans (review of #34). */
+const alive = (pid: number) => {
+  try { process.kill(pid, 0); } catch (e) { return (e as { code?: string }).code === "EPERM"; }
+  try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.[0] !== "Z"; } catch { return true; } // no /proc (macOS): trust kill()
+};
+const lockOwner = (lock: string): { pid: number; age: number } | null => {
   let age = 0;
-  try { age = Date.now() - statSync(LOCK).mtimeMs; } catch { return null; } // no lock
+  try { age = Date.now() - statSync(lock).mtimeMs; } catch { return null; } // no lock
   let pid = 0;
-  try { pid = Number(readFileSync(join(LOCK, "pid"), "utf8")); } catch { /* an empty dir (older code): only age can break it */ }
+  try { pid = Number(readFileSync(join(lock, "pid"), "utf8")); } catch { /* an empty dir (older code): only age can break it */ }
   return { pid, age };
 };
 /** Move a directory out of the way, then delete it: the rename is atomic, so a lock is never half-removed. */
@@ -64,48 +66,58 @@ const discard = (path: string) => {
  * process breaks at a time (the .break guard), and it re-reads the owner first, so it can't remove a live lock that
  * another breaker just replaced (review of #34).
  */
-function breakIfStale(seen: { pid: number; age: number }) {
-  if (!((seen.pid && !alive(seen.pid)) || seen.age > LOCK_STALE_MS || (!seen.pid && seen.age > BREAK_STALE_MS))) return;
-  try { mkdirSync(BREAK); } catch {
-    try { if (Date.now() - statSync(BREAK).mtimeMs > BREAK_STALE_MS) discard(BREAK); } catch { /* gone already */ }
+function breakIfStale(lock: string, seen: { pid: number; age: number }) {
+  // An unreadable pid means the lock is changing hands (stat and read raced a release), not that it's ownerless: a lock
+  // always has its pid file, and an empty dir is simply replaced by the rename. Only a dead owner or age breaks it.
+  if (!seen.pid || !(!alive(seen.pid) || seen.age > LOCK_STALE_MS)) return;
+  const guard = `${lock}.break`;
+  try { mkdirSync(guard); } catch {
+    try { if (Date.now() - statSync(guard).mtimeMs > BREAK_STALE_MS) discard(guard); } catch { /* gone already */ }
     return;
   }
   try {
-    const now = lockOwner();
-    if (now && now.pid === seen.pid) discard(LOCK); // still the same dead (or ancient) owner
+    const now = lockOwner(lock);
+    if (now && now.pid === seen.pid) discard(lock); // still the same dead (or ancient) owner
   } finally {
-    rmSync(BREAK, { recursive: true, force: true });
+    rmSync(guard, { recursive: true, force: true });
   }
 }
 
-function withGitLock<T>(fn: () => T): T {
-  if (lockDepth > 0) { lockDepth++; try { return fn(); } finally { lockDepth--; } }
-  // The lock is built under a private name with its pid file, then renamed into place: it never exists without an
-  // owner, and renaming onto a held (non-empty) lock fails atomically.
-  const mine = `${LOCK}.${process.pid}`;
+const held = new Map<string, number>(); // lock path → depth held by this process
+/**
+ * A cross-process lock at `lock`: built under a private name with its pid file, then renamed into place, so it never
+ * exists without an owner, and renaming onto a held (non-empty) lock fails atomically. Re-entrant per path.
+ */
+function withLock<T>(lock: string, fn: () => T): T {
+  const depth = held.get(lock) ?? 0;
+  if (depth > 0) { held.set(lock, depth + 1); try { return fn(); } finally { held.set(lock, depth); } }
+  const mine = `${lock}.${process.pid}`;
   for (;;) {
     rmSync(mine, { recursive: true, force: true });
     mkdirSync(mine);
     writeFileSync(join(mine, "pid"), String(process.pid));
     try {
-      renameSync(mine, LOCK);
+      renameSync(mine, lock);
       break;
     } catch (e) {
       const code = (e as { code?: string }).code;
       if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "EPERM") { rmSync(mine, { recursive: true, force: true }); throw e; }
-      const owner = lockOwner();
-      if (owner) breakIfStale(owner);
+      rmSync(mine, { recursive: true, force: true }); // don't leave it behind if the hard timeout kills us while waiting
+      const owner = lockOwner(lock);
+      if (owner) breakIfStale(lock, owner);
       sleep(20);
     }
   }
-  lockDepth = 1;
+  held.set(lock, 1);
   try {
     return fn();
   } finally {
-    lockDepth = 0;
-    if (lockOwner()?.pid === process.pid) discard(LOCK); // only ever release our own lock
+    held.delete(lock);
+    if (lockOwner(lock)?.pid === process.pid) discard(lock); // only ever release our own lock
   }
 }
+const withGitLock = <T,>(fn: () => T): T => withLock(LOCK, fn);
+const gitLockHeld = () => (held.get(LOCK) ?? 0) > 0;
 const WRITES = new Set(["init", "fetch", "update-ref", "worktree", "notes", "gc", "prune"]);
 
 /** Write to a temp file, then rename: a concurrent reader sees the old file or the whole new one, never half of it. */
@@ -129,7 +141,7 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
   // The subcommand: the first argument that isn't an option. Every `-c` value here contains "=", so it's skipped;
   // a bare `-C <path>` would be misread (not used).
   const sub = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
-  if (dir === repoDir && WRITES.has(sub) && lockDepth === 0) return withGitLock(() => git(args, opts));
+  if (dir === repoDir && WRITES.has(sub) && !gitLockHeld()) return withGitLock(() => git(args, opts));
   // No automatic gc: it would rewrite the shared repo while another check reads it.
   const auth = ["-c", "gc.auto=0", ...(opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [])];
   try {
@@ -163,6 +175,11 @@ function mainBuildInfo(baseSha: string | null): string | null {
   if (!baseSha) return null;
   const file = join(CACHE, "tsbuild", `${treeOf(baseSha)}.tsbuildinfo`);
   if (existsSync(file)) return file;
+  // Concurrent checks of one push all need main's state at once: one builds it, the others wait and reuse it (issue #9).
+  return withLock(`${file}.lock`, () => (existsSync(file) ? file : buildMainInfo(baseSha, file)));
+}
+
+function buildMainInfo(baseSha: string, file: string): string | null {
   const wt = mkdtempSync(join(WORK, "main-"));
   try {
     git(["worktree", "add", "-q", "--detach", wt, baseSha]);
@@ -202,7 +219,8 @@ function ontoBase(fork: string, base: string, message: string): { sha: string } 
   }
 }
 
-const isTscOutcome = (ok: boolean, exit: number | null, errors: number) => ok || ((exit === 1 || exit === 2) && errors > 0);
+// tsc 7 reports diagnostics with exit 1; exit 2 from the Go binary is a crash, whose partial output must not be cached.
+const isTscOutcome = (ok: boolean, exit: number | null, errors: number) => ok || (exit === 1 && errors > 0);
 
 const prOf = (name: string) => (/--pr(\d+)$/.exec(name) ? `PR${/--pr(\d+)$/.exec(name)![1]}` : name);
 
@@ -211,10 +229,17 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
   const sha = git(["rev-parse", rev]).out;
   const tree = treeOf(sha);
   const cacheFile = join(CACHE, "tc", `${tree}.json`);
-  if (existsSync(cacheFile)) {
+  const cached = () => {
     timings.push({ step: `typecheck ${label}`, ms: 0, cached: true });
     return { ...(JSON.parse(readFileSync(cacheFile, "utf8")) as Typecheck), sha, cached: true, ms: 0 };
-  }
+  };
+  if (existsSync(cacheFile)) return cached();
+  // Another check of this push may be typechecking the same tree right now (the fork alone, in every pair): wait for
+  // its result instead of running tsc again (issue #9). An uncached outcome (environment failure) is recomputed.
+  return withLock(`${cacheFile}.lock`, () => (existsSync(cacheFile) ? cached() : runTypecheck(sha, label, buildInfo, cacheFile)));
+}
+
+function runTypecheck(sha: string, label: string, buildInfo: string | null, cacheFile: string): Typecheck {
   const wt = mkdtempSync(join(WORK, "check-"));
   const started = Date.now();
   try {
@@ -348,8 +373,12 @@ function run(): unknown {
   return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }
 
+const startedAt = Date.now();
 try {
-  console.log(`@@RESULT ${JSON.stringify(run())}`);
+  const result = run() as { timings?: unknown[] };
+  // Wall time of the whole check, including waits for locks and cached results (steps alone miss those; review of #36).
+  if (Array.isArray(result.timings)) result.timings.push({ step: "total", ms: Date.now() - startedAt });
+  console.log(`@@RESULT ${JSON.stringify(result)}`);
 } catch (err) {
   console.log(`@@RESULT ${JSON.stringify({ error: (err as Error).message })}`);
 } finally {

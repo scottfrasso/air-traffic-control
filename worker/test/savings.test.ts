@@ -59,3 +59,15 @@ test("summary line", () => {
   assert.equal(savingsLine(computeSavings(run)), "3 PRs · 3 pairs checked · 1 conflict found in 12 s · 1 rebase (naive: 3)");
   assert.equal(savingsLine(computeSavings([])), "0 PRs · 0 pairs checked · 0 conflicts · 0 rebases (naive: 0)");
 });
+
+test("counts main state builds and each pair check's time (issue #9)", () => {
+  const s = computeSavings([
+    ev(1_000, "check.pair", null, { a: "p1", b: "p2", status: "clean", fresh: true, timings: [{ step: "fetch a", ms: 100 }, { step: "build main incremental state", ms: 900 }, { step: "typecheck merge", ms: 300 }] }),
+    ev(2_000, "check.single", "p1", { timings: [{ step: "build main incremental state", ms: 800 }] }),
+    ev(3_000, "check.pair", null, { a: "p1", b: "p3", status: "clean", fresh: true, timings: [{ step: "typecheck merge", ms: 250, cached: true }] }),
+  ]);
+  assert.equal(s.mainBuilds, 2);
+  assert.deepEqual(s.pairCheckMs, [1_300, 250]);
+  const withTotal = computeSavings([ev(1, "check.pair", null, { a: "p1", b: "p2", status: "clean", fresh: true, timings: [{ step: "typecheck merge", ms: 0, cached: true }, { step: "total", ms: 900 }] })]);
+  assert.deepEqual(withTotal.pairCheckMs, [900]); // a check that waited on a lock: its wall time, not 0
+});

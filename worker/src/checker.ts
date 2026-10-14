@@ -105,7 +105,10 @@ export class Checker extends DurableObject<Env> {
   }
 }
 
-/** Pick one of a small pool of Checkers per baseline, so concurrent pair checks spread over containers. */
+/**
+ * Pick one of a small pool of Checkers per baseline. Pushes spread over the pool by fork, and all of one push's checks
+ * (its check on main and its pair checks) share a container, so main's build and the fork's results are reused.
+ */
 export function checkerFor(env: Env, baseline: string, key: string): DurableObjectStub<Checker> {
   let h = 0;
   for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
