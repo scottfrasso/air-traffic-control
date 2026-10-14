@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  approachQueue, forksWaitingOnPairs, landGate, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultIsCurrent, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  approachQueue, checkRetriesLeft, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -235,9 +235,7 @@ export class Coordinator extends DurableObject<Env> {
   async onPush(repo: string, sha: string, source: PushSource, event?: ArtifactsEvent): Promise<void> {
     const baseline = this.meta("baseline");
     if (repo === baseline) {
-      if (this.meta("baseline_head") === sha) return;
-      this.setMeta("baseline_head", sha);
-      this.log("baseline.pushed", { sha, source });
+      await this.baselineMoved(sha, source);
       return;
     }
     const fork = this.fork(repo);
@@ -258,26 +256,120 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
+   * Main moved outside a landing ATC made (someone pushed to main, or ATC learned of it late). Every PR checked on
+   * the old main is re-checked on the new one; without this, a check that ran on the old main is dropped as stale
+   * and the PR stays pending forever (issue #2).
+   */
+  private async baselineMoved(sha: string, source: PushSource) {
+    if (this.meta("baseline_head") === sha) return;
+    this.setMeta("baseline_head", sha);
+    this.log("baseline.pushed", { sha, source });
+    await this.recheckAll(new Set());
+  }
+
+  /**
    * kind "push": full pipeline (index, overlap signals, PR-on-main check, pair merges).
    * kind "recheck": main moved; only re-verify that the PR still merges onto the new main and typechecks.
    * kind "pairs": a pair check was lost or went stale; re-run just those pairs at the current heads.
    */
   /** Returns false if the instance couldn't be created (usually: the same push was already started). */
-  private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" | "pairs" = "push", others: Array<{ name: string; sha: string }> = []): Promise<boolean> {
+  /** `restart`: the n-th time ATC starts this PR's checks again by itself (a new instance id, see restartStuckChecks). */
+  private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" | "pairs" = "push", others: Array<{ name: string; sha: string }> = [], restart = 0): Promise<boolean> {
     const main = this.meta("baseline_head") ?? "";
     const raw =
       kind === "pairs"
         ? `p${Date.now()}-${sha.slice(0, 12)}-${others.map((o) => o.sha.slice(0, 12)).join("-")}-${fork}` // unique part first: ids are cut at 100 chars
-        : `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}`;
+        : `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}${restart ? `-r${restart}` : ""}`;
     const id = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
     try {
-      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind, others } });
+      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind, others, ...(kind === "pairs" ? {} : { main }) } });
       this.log("pipeline.started", { sha, instance: id }, fork);
+      if (kind !== "pairs") this.recordCheckRun(fork, sha, restart);
       return true;
     } catch (err) {
-      // Same push seen twice (event + reconcile, or queue redelivery) → instance already exists.
-      this.log("pipeline.duplicate", { sha, error: (err as Error).message }, fork);
+      const error = (err as Error).message;
+      // Same push seen twice (event + reconcile, or queue redelivery) → instance already exists. Anything else is real.
+      // A duplicate leaves check_runs alone: the run that exists keeps its start time, so polling request_land (which
+      // re-requests a re-check every few seconds) can't keep a hung run from ever counting as stuck.
+      if (isDuplicateInstance(error)) this.log("pipeline.duplicate", { sha, instance: id }, fork);
+      else {
+        this.log("pipeline.start_failed", { sha, instance: id, kind, error: error.slice(0, 300) }, fork);
+        if (kind !== "pairs") this.recordCheckRun(fork, sha, restart); // so the reconcile alarm tries again later
+      }
       return false;
+    }
+  }
+
+  /** The latest push/re-check run started for a fork, for restartStuckChecks. Restarts count per head. */
+  private recordCheckRun(fork: string, sha: string, restart: number) {
+    this.sql.exec(
+      `INSERT INTO check_runs(fork, sha, started_at, restarts) VALUES (?, ?, ?, ?)
+       ON CONFLICT(fork) DO UPDATE SET started_at = excluded.started_at,
+         restarts = CASE WHEN check_runs.sha = excluded.sha THEN max(check_runs.restarts, excluded.restarts) ELSE excluded.restarts END, sha = excluded.sha`,
+      fork, sha, Date.now(), restart,
+    );
+  }
+
+  /**
+   * The Workflow for this push (or re-check) failed for good. Show it as an error, not as pending forever (issue #2).
+   * `main`: for a re-check, the main it was checking on; a failure on a main that has since moved is ignored (the
+   * re-check on the new main is already running).
+   */
+  async applyPipelineFailure(fork: string, sha: string, error: string, main?: string): Promise<void> {
+    const row = this.fork(fork);
+    // A run on a main that has since moved is superseded by the re-check on the new main, unless its push was never
+    // indexed (that part isn't redone by a re-check).
+    const current = row?.status === "active" && row.head_sha === sha && (!main || main === this.meta("baseline_head") || row.processed_sha !== sha);
+    this.log("pipeline.failed", { sha, main, error: error.slice(0, 300), current }, fork);
+    if (!current) return; // a newer push, or a re-check on a newer main, has its own pipeline
+    if (this.markCheckError(fork, sha, error)) {
+      this.touch();
+      await this.scheduleReconcile();
+    }
+  }
+
+  /** Record that this PR's checks couldn't run, unless a (duplicate) run already has a result. True if recorded. */
+  private markCheckError(fork: string, sha: string, error: string): boolean {
+    const row = this.fork(fork)!;
+    // A result stands, unless the push itself was never indexed: a re-check alone can't finish that PR's checks.
+    if (row.processed_sha === sha && row.check_sha === sha && (row.check_status === "green" || row.check_status === "red")) return false;
+    this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ? WHERE name = ?", sha, error.slice(0, 500), fork);
+    this.emitSignal({
+      fork, kind: "check_failed", about_fork: null, symbol: null,
+      message: `ATC couldn't run the checks on your push ${sha.slice(0, 7)} (${error.slice(0, 120)}). It retries by itself; you can also push again.`,
+      data: { error: error.slice(0, 500) }, dedupe_key: `check_failed:${fork}:${sha}`,
+    });
+    return true;
+  }
+
+  /** From the reconcile alarm: start checks again that errored or have been pending too long; give up after a few tries. */
+  private async restartStuckChecks() {
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const head = this.meta("baseline_head") ?? "";
+    const now = Date.now();
+    // Decide and write everything before the first await (as requeuePairs does): a result or a push that arrives
+    // while a Workflow is being created must not be overwritten by a decision made on the old state.
+    const restarts: Array<{ name: string; sha: string; kind: "push" | "recheck"; attempt: number }> = [];
+    const goAround = this.goAroundMap(); // sent around on purpose and not re-checked (onLanded): a new push decides
+    for (const f of this.activeForks()) {
+      if (goAround.has(f.name)) continue;
+      const s = stuckCheck(f, runs.get(f.name), head, now);
+      if (!s) continue;
+      if ("giveUp" in s) {
+        this.log("check.gave_up", { sha: f.head_sha }, f.name);
+        this.markCheckError(f.name, f.head_sha, "checks didn't finish after several tries");
+        continue;
+      }
+      this.log("check.restarted", { sha: f.head_sha, kind: s.restart, attempt: s.attempt }, f.name);
+      // Pending again (not "error"), so this run gets the full CHECK_STUCK_MS before it counts as stuck.
+      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
+      this.sql.exec("UPDATE check_runs SET sha = ?, started_at = ?, restarts = max(restarts, ?) WHERE fork = ?", f.head_sha, now, s.attempt, f.name);
+      restarts.push({ name: f.name, sha: f.head_sha, kind: s.restart, attempt: s.attempt });
+    }
+    if (restarts.length) this.touch(); // keep the alarm running until these runs report back
+    for (const r of restarts) {
+      const f = this.fork(r.name);
+      if (f?.status === "active" && f.head_sha === r.sha && f.check_status === "pending") await this.startPipeline(r.name, r.sha, r.kind, [], r.attempt);
     }
   }
 
@@ -307,10 +399,15 @@ export class Coordinator extends DurableObject<Env> {
         "UPDATE forks SET processed_sha = ?, base_sha = ?, diff_lines = ? WHERE name = ?",
         index.headSha, index.baseSha, index.diffLines, index.fork,
       );
-      this.setMeta("baseline_head", index.baselineHead);
     });
-    this.log("index.updated", { sha: index.headSha, base: index.baseSha, files: index.files.map((f) => f.path), diffLines: index.diffLines }, index.fork);
-    if (index.baseSha === index.baselineHead) {
+    // The index's view of main is never written back as the global head (issue #4): one computed before a landing and
+    // applied after it would move baseline_head backwards. Only a push to main, a land request and onLanded set it.
+    // A newer main the index saw first is picked up by the reconcile alarm within seconds.
+    const main = this.meta("baseline_head");
+    this.log("index.updated", { sha: index.headSha, base: index.baseSha, files: index.files.map((f) => f.path), diffLines: index.diffLines, sawMain: index.baselineHead, main }, index.fork);
+    // Sits on the CURRENT main: a go-around or block from an earlier main no longer applies. (Comparing with the
+    // index's own, possibly older, main would clear a go-around that a landing sent while this index was computed.)
+    if (index.baseSha === main) {
       this.resolveSignals({ fork: index.fork, kind: "rebase_required" });
       this.resolveSignals({ fork: index.fork, kind: "land_blocked" });
     }
@@ -482,6 +579,8 @@ export class Coordinator extends DurableObject<Env> {
     const row = this.fork(fork);
     if (!row || row.head_sha !== sha) return; // stale result; a newer push is being checked
     this.sql.exec("UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ? WHERE name = ?", ok ? "green" : "red", sha, base, detail, fork);
+    // The checks ran after all: an earlier "ATC couldn't run the checks" no longer applies (pair ones are per pair).
+    this.sql.exec("UPDATE signals SET resolved_at = ? WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", Date.now(), fork);
   }
 
   /** Result of "this PR merged onto current main typechecks?" — the PR's green/red status. */
@@ -499,10 +598,12 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Main moved: re-verify every waiting PR against the new main (no rebase needed unless it no longer fits). */
   private async recheckAll(except: Set<string>) {
-    for (const f of this.activeForks()) {
-      if (except.has(f.name) || f.head_sha === f.base_sha) continue;
-      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
-      await this.startPipeline(f.name, f.head_sha, "recheck");
+    const due = forksToRecheck(this.activeForks(), this.meta("baseline_head") ?? "", except);
+    // Mark them all before the first await; then start each only if nothing changed meanwhile (a result or a push).
+    for (const f of due) this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
+    for (const { name, head_sha } of due) {
+      const now = this.fork(name);
+      if (now?.status === "active" && now.head_sha === head_sha && now.check_status === "pending") await this.startPipeline(name, head_sha, "recheck");
     }
   }
 
@@ -622,7 +723,10 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   sequence(): SequenceEntry[] {
-    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()));
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const forks = this.activeForks();
+    const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
+    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp);
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -667,7 +771,7 @@ export class Coordinator extends DurableObject<Env> {
 
     const baseline = this.baseline;
     const live = await headOf(this.env, baseline);
-    if (live && live.hash !== this.meta("baseline_head")) this.setMeta("baseline_head", live.hash);
+    if (live) await this.baselineMoved(live.hash, "land");
     const baselineHead = this.meta("baseline_head") ?? "";
     const me = this.fork(fork)!;
 
@@ -681,6 +785,7 @@ export class Coordinator extends DurableObject<Env> {
 
     const gate = landGate({
       me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork), rivals: this.rivals(fork),
+      checkRetriesLeft: checkRetriesLeft(me, this.sql.exec<CheckRun>("SELECT * FROM check_runs WHERE fork = ?", fork).toArray()[0]),
     });
     if (gate.kind === "deny") return deny(gate.reason, gate.signal);
     if (gate.kind === "retry") {
@@ -935,6 +1040,7 @@ export class Coordinator extends DurableObject<Env> {
       }),
     );
     await this.requeuePairs();
+    await this.restartStuckChecks();
     if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
   }

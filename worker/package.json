@@ -7,7 +7,7 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "typecheck": "tsc -p .",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --experimental-sqlite --no-warnings=ExperimentalWarning --import ./test/harness/register.mjs --test test/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261010.1",

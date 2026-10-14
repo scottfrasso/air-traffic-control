@@ -63,6 +63,8 @@ export type GateInput = {
   goAround?: string;
   /** Some pair check against another PR's current head isn't in yet. */
   waitingOnPairs: boolean;
+  /** This PR's own checks errored (see `checkErrored`): will ATC run them again by itself? */
+  checkRetriesLeft?: boolean;
   /** Active PRs with an open conflict against this one. */
   rivals: ForkRow[];
 };
@@ -75,12 +77,20 @@ export type Gate =
   | { kind: "deny"; reason: string; signal: "rebase_required" | "land_blocked" | null };
 
 /** May this PR land now? The checks run in this order; the first that fails decides (ADR-0011, issues #3 and #5). */
-export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals }: GateInput): Gate {
+export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, checkRetriesLeft = true }: GateInput): Gate {
   if (goAround) return { kind: "deny", reason: goAround, signal: null };
-  if (me.processed_sha !== me.head_sha || me.check_sha !== me.head_sha || me.check_status === "pending")
+  if (checkErrored(me)) {
+    const why = firstLine(me.check_detail ?? "unknown error");
+    return checkRetriesLeft
+      ? { kind: "retry", reason: `ATC couldn't run your checks (${why}). It retries by itself; ask again in a minute.` }
+      : { kind: "deny", reason: `ATC couldn't check your PR at ${me.head_sha.slice(0, 7)} (${why}). Push again to retry.`, signal: "land_blocked" };
+  }
+  if (me.processed_sha !== me.head_sha || me.check_sha !== me.head_sha)
     return { kind: "retry", reason: "Checks for your latest push are still running; retry in a few seconds." };
-  // Main moved since this PR was checked: re-verify on the new main (merge queue — no rebase needed).
+  // Main moved since this PR was checked: re-verify on the new main (merge queue — no rebase needed). Even if a check
+  // is already pending: it may be one that ran on the old main and was dropped (issue #2); a duplicate start is a no-op.
   if (me.check_base !== baselineHead) return { kind: "retry", reason: "Main moved; re-checking your PR on the new main. Retry in a few seconds.", then: "recheck" };
+  if (me.check_status === "pending") return { kind: "retry", reason: "Checks for your latest push are still running; retry in a few seconds." };
   if (!isGreen(me, baselineHead)) {
     const detail = me.check_detail ?? "";
     return detail.startsWith("on main:")
@@ -223,3 +233,64 @@ export function pairFailure(forks: ForkRow[], checks: PairCheckRow[], a: string,
   const row = { fork_a: x, fork_b: y, sha_a: sx, sha_b: sy, status: "error", detail: JSON.stringify({ error: error.slice(0, 500), attempts }), checked_at: now };
   return { record: true, row, attempts, final: attempts >= PAIR_MAX_ATTEMPTS };
 }
+
+// ── stuck checks (issue #2) ──────────────────────────────────────────────
+
+/**
+ * A PR whose check has been pending this long (no result, no error) is assumed stuck and started again. Longer than
+ * the longest healthy run: indexing plus the "PR on main" step's 3 tries of up to 5 min each, with back-off.
+ */
+export const CHECK_STUCK_MS = 20 * 60_000;
+/** After a check pipeline fails for good, wait this long before the next try. */
+export const CHECK_ERROR_RETRY_MS = 30_000;
+/** ATC starts a PR's checks again at most this many times per head; then it waits for a new push. */
+export const CHECK_MAX_RESTARTS = 3;
+
+/** The latest check pipeline ATC started for a PR (table `check_runs`). */
+export type CheckRun = { fork: string; sha: string; started_at: number; restarts: number };
+
+/** The Workflow for this PR's latest push (or its re-check on main) failed for good. */
+export const checkErrored = (f: ForkRow) => f.check_status === "error" && f.check_sha === f.head_sha;
+
+/** Checked at its current head on the current main, with a result. */
+const checkCurrent = (f: ForkRow, baselineHead: string) =>
+  f.processed_sha === f.head_sha && f.check_sha === f.head_sha && f.check_base === baselineHead && (f.check_status === "green" || f.check_status === "red");
+
+const hasPush = (f: ForkRow) => f.status === "active" && f.head_sha !== f.base_sha;
+
+/**
+ * Main moved: the PRs to re-check on it, skipping any already checked on this main. A PR whose push is still being
+ * indexed is included: its pipeline's own check may have read the old main, and that result gets dropped as stale.
+ */
+export function forksToRecheck(forks: ForkRow[], baselineHead: string, except = new Set<string>()): ForkRow[] {
+  return forks.filter((f) => hasPush(f) && !except.has(f.name) && !checkCurrent(f, baselineHead));
+}
+
+/** Will ATC start this PR's checks again by itself? (No: it gave up on this head; a new push resets that.) */
+export const checkRetriesLeft = (f: ForkRow, run: CheckRun | undefined) => (run?.sha === f.head_sha ? run.restarts : 0) < CHECK_MAX_RESTARTS;
+
+export type StuckCheck = { restart: "push" | "recheck"; attempt: number } | { giveUp: true };
+
+/**
+ * Called from the reconcile alarm. A PR without a current result is started again when its check errored (after
+ * CHECK_ERROR_RETRY_MS) or has had no result for CHECK_STUCK_MS: the full push pipeline if its push was never indexed,
+ * else a re-check on main. After CHECK_MAX_RESTARTS a pending check is marked as an error; an errored one stays so.
+ */
+export function stuckCheck(f: ForkRow, run: CheckRun | undefined, baselineHead: string, now: number): StuckCheck | null {
+  if (!hasPush(f) || checkCurrent(f, baselineHead)) return null;
+  const mine = run?.sha === f.head_sha ? run : undefined;
+  const startedAt = mine?.started_at ?? 0; // no record: started before this table existed, so long ago
+  const errored = checkErrored(f);
+  if (now - startedAt < (errored ? CHECK_ERROR_RETRY_MS : CHECK_STUCK_MS)) return null;
+  const restarts = mine?.restarts ?? 0;
+  // A result for this head on an older main isn't a failure: re-check it on the new one without counting a restart.
+  const hasResult = f.processed_sha === f.head_sha && f.check_sha === f.head_sha && (f.check_status === "green" || f.check_status === "red");
+  if (hasResult) return { restart: "recheck", attempt: restarts };
+  if (restarts >= CHECK_MAX_RESTARTS) return errored ? null : { giveUp: true };
+  return { restart: f.processed_sha === f.head_sha ? "recheck" : "push", attempt: restarts + 1 };
+}
+
+const firstLine = (s: string) => s.split("\n")[0]!.slice(0, 160);
+
+/** Workflows refuses an instance id that already exists with code 10405: that is a duplicate start, not a failure. */
+export const isDuplicateInstance = (message: string) => /10405|already[ _]exists/i.test(message);
