@@ -1,7 +1,7 @@
 # ADR-0021: A PR's checks never stay pending: re-check on any main move, record failures, restart stuck runs
 
 - Status: Accepted. Tightens ADR-0006 (reconcile), ADR-0015 (merge-queue landing) and ADR-0018.
-- Date: 2026-10-14. Fixes issue #2.
+- Date: 2026-10-14. Fixes issues #2 and #4.
 
 ## Context
 A PR could sit in `check_status = pending` forever, with every `request_land` answering "retry":
@@ -14,6 +14,9 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
 - **Any main move re-checks.** `baselineMoved` (from the baseline's push event, reconcile, or `requestLand` seeing a
   newer head) records the head and re-checks every open PR not already checked on it (`forksToRecheck`), including a
   PR whose push is still being indexed (its own check may have read the old main).
+- **Who moves `baseline_head`** (issue #4): only `baselineMoved` (a push to main, reconcile, a land request) and
+  `onLanded`. `applyIndex` never writes it: an index computed before a landing and applied after would move it
+  backwards. An index clears a PR's go-around only if its base is the **current** main, not the main it saw.
 - **Gate order** (`landGate`): an errored check first, then "push not processed", then "checked on an old main → start a
   re-check" (even if pending; a duplicate start is a no-op), then "pending → retry".
 - **Failures are recorded.** `PushPipeline` catches a push/re-check that fails for good and calls

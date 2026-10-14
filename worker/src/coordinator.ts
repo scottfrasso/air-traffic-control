@@ -365,10 +365,15 @@ export class Coordinator extends DurableObject<Env> {
         "UPDATE forks SET processed_sha = ?, base_sha = ?, diff_lines = ? WHERE name = ?",
         index.headSha, index.baseSha, index.diffLines, index.fork,
       );
-      this.setMeta("baseline_head", index.baselineHead);
     });
-    this.log("index.updated", { sha: index.headSha, base: index.baseSha, files: index.files.map((f) => f.path), diffLines: index.diffLines }, index.fork);
-    if (index.baseSha === index.baselineHead) {
+    // The index's view of main is never written back as the global head (issue #4): one computed before a landing and
+    // applied after it would move baseline_head backwards. Only a push to main, a land request and onLanded set it.
+    // A newer main the index saw first is picked up by the reconcile alarm within seconds.
+    const main = this.meta("baseline_head");
+    this.log("index.updated", { sha: index.headSha, base: index.baseSha, files: index.files.map((f) => f.path), diffLines: index.diffLines, sawMain: index.baselineHead, main }, index.fork);
+    // Sits on the CURRENT main: a go-around or block from an earlier main no longer applies. (Comparing with the
+    // index's own, possibly older, main would clear a go-around that a landing sent while this index was computed.)
+    if (index.baseSha === main) {
       this.resolveSignals({ fork: index.fork, kind: "rebase_required" });
       this.resolveSignals({ fork: index.fork, kind: "land_blocked" });
     }

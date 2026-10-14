@@ -33,6 +33,9 @@ Nothing.
 - **No PR stays pending (#2, ADR-0021, 2026-10-14):** any main move (outside ATC too) re-checks every open PR; a check
   pipeline that fails for good shows as an error (STANDBY "ATC couldn't run the checks", `check_failed` signal); the
   reconcile alarm restarts errored or 5-min-stuck checks up to 3 times per head. Unit tests in `worker/test/stuck.test.ts`.
+- **baseline_head never moves backwards (#4, 2026-10-14):** only a push to main, a land request and a landing set it; an index
+  applied late no longer rewinds it or clears a newer go-around. First Coordinator DO tests, in Node on node:sqlite
+  (`worker/test/coordinator.test.ts`, ADR-0022).
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
   landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.

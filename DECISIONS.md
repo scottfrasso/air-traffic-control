@@ -28,6 +28,7 @@ the raw spike findings (milestone 1).
 | [0019](docs/adr/0019-flight-log-and-savings.md) | Flight log as a git note (refs/notes/atc); savings from the event log | Accepted |
 | [0020](docs/adr/0020-public-replay.md) | Key-less read-only replay of allow-listed recorded runs | Accepted |
 | [0021](docs/adr/0021-checks-never-stay-pending.md) | Checks never stay pending: re-check on any main move, record failures, restart stuck runs | Accepted |
+| [0022](docs/adr/0022-coordinator-tests-in-node.md) | Coordinator DO tests in plain Node on node:sqlite | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
