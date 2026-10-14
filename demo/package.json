@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "test": "tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
