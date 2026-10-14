@@ -30,6 +30,8 @@ export function airport(baseline = "base-repo") {
   const heads = new Map<string, string>([[baseline, "main0"]]);
   const pipelines: Array<{ id: string; params: { fork: string; sha: string; kind: string; others: Array<{ name: string; sha: string }> } }> = [];
   let alarm: number | null = null;
+  /** Runs inside PUSH_PIPELINE.create, i.e. while the Coordinator is awaiting it: lets a test interleave another call. */
+  const hooks: { onCreate?: (id: string) => Promise<void> | void } = {};
   const ctx = {
     storage: {
       sql: sqlStorage(db),
@@ -52,13 +54,14 @@ export function airport(baseline = "base-repo") {
       create: async (opts: (typeof pipelines)[number]) => {
         if (pipelines.some((p) => p.id === opts.id)) throw new Error("(instance.already_exists) An instance with this ID already exists. [code: 10405]");
         pipelines.push(opts);
+        await hooks.onCreate?.(opts.id);
       },
     },
   };
   const co = new Coordinator(ctx as never, env as never);
   const q = <T = Row>(query: string, ...params: unknown[]) => ctx.storage.sql.exec<T>(query, ...params).toArray();
   return {
-    co, db, heads, pipelines, q,
+    co, db, heads, pipelines, q, hooks,
     meta: (key: string) => q<{ value: string }>("SELECT value FROM meta WHERE key = ?", key)[0]?.value ?? null,
     fork: (name: string) => q<Row>("SELECT * FROM forks WHERE name = ?", name)[0],
     events: (kind: string) => q<{ detail: string; fork: string | null }>("SELECT detail, fork FROM event_log WHERE kind = ? ORDER BY id", kind),

@@ -99,3 +99,9 @@ test("only Workflows' 'instance already exists' counts as a duplicate start", ()
   assert.equal(isDuplicateInstance("(instance.already_exists) An instance with this ID already exists. [code: 10405]"), true);
   assert.equal(isDuplicateInstance("Internal error: workflow binding unavailable"), false);
 });
+
+test("a result on an older main is re-checked without using up a restart, even after the cap (review of #30, finding 4)", () => {
+  const greenOld = fork("a", { check_base: "main1" });
+  assert.deepEqual(stuckCheck(greenOld, run({ restarts: CHECK_MAX_RESTARTS }), "main2", CHECK_STUCK_MS), { restart: "recheck", attempt: CHECK_MAX_RESTARTS });
+  assert.deepEqual(stuckCheck(greenOld, run({ restarts: 1 }), "main2", CHECK_STUCK_MS), { restart: "recheck", attempt: 1 });
+});

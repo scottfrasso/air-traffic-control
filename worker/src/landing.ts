@@ -280,6 +280,9 @@ export function stuckCheck(f: ForkRow, run: CheckRun | undefined, baselineHead: 
   const errored = checkErrored(f);
   if (now - startedAt < (errored ? CHECK_ERROR_RETRY_MS : CHECK_STUCK_MS)) return null;
   const restarts = mine?.restarts ?? 0;
+  // A result for this head on an older main isn't a failure: re-check it on the new one without counting a restart.
+  const hasResult = f.processed_sha === f.head_sha && f.check_sha === f.head_sha && (f.check_status === "green" || f.check_status === "red");
+  if (hasResult) return { restart: "recheck", attempt: restarts };
   if (restarts >= CHECK_MAX_RESTARTS) return errored ? null : { giveUp: true };
   return { restart: f.processed_sha === f.head_sha ? "recheck" : "push", attempt: restarts + 1 };
 }
@@ -287,4 +290,4 @@ export function stuckCheck(f: ForkRow, run: CheckRun | undefined, baselineHead: 
 const firstLine = (s: string) => s.split("\n")[0]!.slice(0, 160);
 
 /** Workflows refuses an instance id that already exists with code 10405: that is a duplicate start, not a failure. */
-export const isDuplicateInstance = (message: string) => /10405|already exists/i.test(message);
+export const isDuplicateInstance = (message: string) => /10405|already[ _]exists/i.test(message);

@@ -62,3 +62,77 @@ test("a duplicate Workflow start is logged as a duplicate, not as a failure", as
   assert.equal(a.events("pipeline.duplicate").length, 1);
   assert.equal(a.events("pipeline.start_failed").length, 0);
 });
+
+// ── issue #2 wiring (review of #30) ──
+
+/** A fork pushed and indexed on main0, with its check pending (as if its result never came back). */
+async function stuckFork(a: ReturnType<typeof airport>, name: string) {
+  a.addFork(name);
+  a.heads.set(name, `${name}1`); // what reconcile reads from Artifacts
+  await a.co.onPush(name, `${name}1`, "event");
+  await a.co.applyIndex(index(name, `${name}1`, "main0", "main0"));
+}
+const single = (repo: string, forkSha: string, ok: boolean, baseHead = "main0") =>
+  JSON.stringify({ repo, forkSha, baseHead, result: { ok, errors: [], output: "" } });
+const openCheckFailed = (a: ReturnType<typeof airport>, fork: string) =>
+  a.q("SELECT * FROM signals WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", fork).length;
+
+test("a pipeline failure shows as an error with a signal; the signal clears when a later run succeeds", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  await a.co.applyPipelineFailure("a", "a1", "checker produced no result");
+  assert.equal(a.fork("a")!.check_status, "error");
+  assert.equal(openCheckFailed(a, "a"), 1);
+  assert.match((await a.co.getClearance("a")).message, /couldn't run the checks \(checker produced no result\)/);
+  await a.co.applySingle(single("a", "a1", true));
+  assert.equal(a.fork("a")!.check_status, "green");
+  assert.equal(openCheckFailed(a, "a"), 0);
+});
+
+test("a failure is ignored if a newer push or a newer main has its own run, or a duplicate already has a result", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  await a.co.onPush("base-repo", "main1", "event");
+  await a.co.applyPipelineFailure("a", "a1", "boom", "main0"); // a re-check on main0; main is main1 now
+  assert.equal(a.fork("a")!.check_status, "pending");
+  await a.co.applyPipelineFailure("a", "a0", "boom"); // an older push
+  assert.equal(a.fork("a")!.check_status, "pending");
+  await a.co.applySingle(single("a", "a1", true, "main1"));
+  await a.co.applyPipelineFailure("a", "a1", "boom", "main1"); // a duplicate run failing after the real one finished
+  assert.equal(a.fork("a")!.check_status, "green");
+});
+
+test("the reconcile alarm restarts a stuck check with a new instance id, and gives up once after the cap", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  a.q("UPDATE check_runs SET started_at = 0"); // long ago
+  const before = a.pipelines.length;
+  await a.co.reconcile();
+  const restarted = a.pipelines.slice(before);
+  assert.deepEqual(restarted.map((p) => [p.params.kind, p.id.endsWith("-r1")]), [["recheck", true]]);
+  // Used up its restarts and still nothing: one error, one log line, then quiet (no log spam every 5 s).
+  a.q("UPDATE check_runs SET started_at = 0, restarts = 3");
+  await a.co.reconcile();
+  await a.co.reconcile();
+  assert.equal(a.fork("a")!.check_status, "error");
+  assert.equal(a.events("check.gave_up").length, 1);
+});
+
+test("a result that arrives while the alarm is starting other restarts isn't overwritten (review of #30, finding 3)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  await stuckFork(a, "b");
+  a.q("UPDATE check_runs SET started_at = 0");
+  a.hooks.onCreate = async (id) => {
+    if (id.startsWith("a-")) await a.co.applySingle(single("b", "b1", true)); // b's result lands while a's restart is created
+  };
+  const before = a.pipelines.length;
+  await a.co.reconcile();
+  const restarts = a.pipelines.slice(before).filter((p) => p.params.kind !== "pairs"); // reconcile also queues the (a, b) pair check
+  assert.deepEqual(restarts.map((p) => p.params.fork), ["a"]); // b was not restarted
+  assert.equal(a.fork("b")!.check_status, "green"); // and its result stands
+});

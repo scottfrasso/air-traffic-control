@@ -10,6 +10,8 @@ export interface PipelineParams {
   kind?: "push" | "recheck" | "pairs";
   /** "pairs": the other PRs and the heads they were queued at. */
   others?: Array<{ name: string; sha: string }>;
+  /** "recheck": the main it re-checks on, so a failure after main moved again is ignored. */
+  main?: string;
 }
 
 /**
@@ -19,7 +21,7 @@ export interface PipelineParams {
  */
 export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
   override async run(event: WorkflowEvent<PipelineParams>, step: WorkflowStep) {
-    const { baseline, fork, sha, kind = "push", others = [] } = event.payload;
+    const { baseline, fork, sha, kind = "push", others = [], main } = event.payload;
     const coordinator = this.env.COORDINATOR.getByName(baseline);
     const slow: WorkflowStepConfig = { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" };
     // Is this PR, merged onto the current main, green? (Tokens are minted inside the step so they never land in Workflow state.)
@@ -77,7 +79,7 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
     } catch (err) {
       // Out of step retries (cold start, "checker produced no result"): say so, so the PR isn't pending forever (issue #2).
       const error = (err as Error).message;
-      await step.do("record pipeline failure", () => coordinator.applyPipelineFailure(fork, sha, error));
+      await step.do("record pipeline failure", () => coordinator.applyPipelineFailure(fork, sha, error, main));
       return { fork, sha, kind, failed: error.slice(0, 300) };
     }
   }
