@@ -9,8 +9,8 @@ prefix in `check_detail`, which `atc.ts` and the landing gate parsed back out.
 
 ## Decision
 - **Pruning** runs in the reconcile alarm: keep the newest `KEEP_EVENTS` (20,000) events and `KEEP_SNAPSHOTS`
-  (5,000) snapshots, and delete resolved signals older than a week for PRs no longer in flight (their story is in the
-  flight log). A 5-PR demo run writes about 600 events and 40 snapshots, so demo runs are never touched.
+  (5,000) snapshots, and delete resolved signals older than a week of PRs that **landed** (their story is in the flight
+  log). Abandoned PRs have no flight log, so their signals are kept. A 5-PR demo run writes about 600 events and 40 snapshots, so demo runs are never touched.
 - **Never pruned:** the baselines in `PUBLIC_REPLAY_BASELINES` (ADR-0020) and `booking-261010213346` (the run the
   submitted video shows), so their replays stay whole (`keptBaselines`).
 - **`forks.check_main_conflict`** (0/1) replaces the prefix. New columns go in `COLUMNS` (`schema.ts`): the constructor

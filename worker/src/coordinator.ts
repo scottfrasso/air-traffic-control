@@ -11,11 +11,12 @@ import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceE
 import { analyzePair, describeError } from "./conflicts";
 import { NoteWriter, takeBatch } from "./notes";
 import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
-import { computeSavings, type LogEvent } from "./savings";
+import { flightLogs, overlaps, readModel, recordSnapshot, timelineJson } from "./readmodel";
 import { COLUMNS, SCHEMA } from "./schema";
 import { deliver } from "./webhooks";
-import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import { intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
+import { emitSignal, indexSnapshot, relabel, resolveSignals, signalsFor, syncDerivedSignals } from "./signalstore";
+import type { ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Storage bounds (prune): a 5-PR demo run writes about 600 events and 40 snapshots. */
@@ -98,20 +99,7 @@ export class Coordinator extends DurableObject<Env> {
     if (!this.meta("baseline")) return;
     const model = this.readModel();
     const full = JSON.stringify(model);
-    // Recording: compact snapshot for replay, stored only when the airspace actually changed.
-    const compact = JSON.stringify({
-      baseline: model.baseline,
-      baselineHead: model.baselineHead,
-      forks: model.forks.map(({ name, pr, status, landed_at, check_status, check_sha, head_sha, base_sha, diff_lines }) => ({ name, pr, status, landed_at, check_status, check_sha, head_sha, base_sha, diff_lines })),
-      sequence: model.sequence,
-      signals: model.signals
-        .filter((x) => x.resolved_at === null && ["semantic_conflict", "merge_conflict", "rebase_required"].includes(x.kind))
-        .map(({ kind, fork, about_fork, symbol }) => ({ kind, fork, about_fork, symbol, resolved_at: null })),
-      savings: model.savings, // flight logs never change once written: the timeline carries them once
-
-    });
-    const last = this.sql.exec<{ state: string }>("SELECT state FROM snapshots ORDER BY id DESC LIMIT 1").toArray()[0]?.state;
-    if (last !== compact) this.sql.exec("INSERT INTO snapshots(at, state) VALUES (?, ?)", Date.now(), compact);
+    recordSnapshot(this.sql, model); // for replay, only when the airspace actually changed
     // Live push to every connected dashboard.
     for (const ws of this.ctx.getWebSockets("dashboard")) {
       try {
@@ -138,11 +126,7 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Full recording for replay: every snapshot plus every event. */
   async timelineJson(): Promise<string> {
-    const snapshots = this.sql.exec<{ at: number; state: string }>("SELECT at, state FROM snapshots ORDER BY id").toArray();
-    const events = this.sql.exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id").toArray();
-    return `{"baseline":${JSON.stringify(this.meta("baseline"))},"flightLogs":${JSON.stringify(this.flightLogs())},"snapshots":[${snapshots.map((x) => `{"at":${x.at},"state":${x.state}}`).join(",")}],"events":[${events
-      .map((e) => JSON.stringify({ id: e.id, at: e.at, kind: e.kind, fork: e.fork, detail: JSON.parse(e.detail) as unknown }))
-      .join(",")}]}`;
+    return timelineJson(this.sql, this.meta("baseline"));
   }
 
   async addWebhook(url: string, secret: string | null): Promise<{ url: string }> {
@@ -471,78 +455,25 @@ export class Coordinator extends DurableObject<Env> {
   // ── intents & signals ───────────────────────────────────────────────────
 
   private snapshot(): IndexSnapshot {
-    const forks = this.activeForks().map((f) => ({ name: f.name, agent: f.agent }));
-    const active = new Set(forks.map((f) => f.name));
-    const keep = <T extends { fork: string }>(rows: T[]) => rows.filter((r) => active.has(r.fork));
-    return {
-      forks,
-      touched: keep(this.sql.exec<{ fork: string; path: string; change: string }>("SELECT fork, path, change FROM touched").toArray()),
-      symbolChanges: keep(
-        this.sql
-          .exec<{ fork: string; path: string; name: string; change: string; before_sig: string | null; after_sig: string | null }>(
-            "SELECT fork, path, name, change, before_sig, after_sig FROM symbol_changes",
-          )
-          .toArray(),
-      ),
-      uses: keep(this.sql.exec<{ fork: string; path: string; symbol: string; from_path: string }>("SELECT * FROM uses").toArray()),
-      intents: keep(
-        this.sql
-          .exec<{ fork: string; description: string; files: string; symbols: string }>("SELECT fork, description, files, symbols FROM intents ORDER BY id")
-          .toArray()
-          .map((i) => ({ ...i, files: JSON.parse(i.files) as string[], symbols: JSON.parse(i.symbols) as string[] })),
-      ),
-    };
+    return indexSnapshot(this.sql, this.activeForks());
   }
 
-  /** Insert a signal unless an identical one (same dedupe key) exists; re-open it if it was resolved. */
   /** Agents and the dashboard talk in PR numbers: replace fork repo names with "PR<N>". */
   private relabel(text: string): string {
-    const names = this.sql.exec<{ name: string }>("SELECT name FROM forks ORDER BY length(name) DESC").toArray().map((r) => r.name);
-    return names.reduce((t, n) => t.split(n).join(prLabel(n)), text);
+    return relabel(this.sql, text);
   }
 
   emitSignal(input: DesiredSignal): boolean {
-    const s = { ...input, message: this.relabel(input.message) };
-    const existing = this.sql
-      .exec<{ id: number; resolved_at: number | null; message: string }>("SELECT id, resolved_at, message FROM signals WHERE dedupe_key = ?", s.dedupe_key)
-      .toArray()[0];
-    if (existing && existing.resolved_at === null) {
-      // Same fact, new reasons (e.g. "declared an intent" → "uses it in src/checkout.ts"): refresh in place.
-      if (existing.message !== s.message) {
-        this.sql.exec("UPDATE signals SET message = ?, data = ? WHERE id = ?", s.message, JSON.stringify(s.data), existing.id);
-        this.log(`signal.${s.kind}.updated`, { to: s.fork, message: s.message }, s.fork);
-      }
-      return false;
-    }
-    if (existing) {
-      this.sql.exec("UPDATE signals SET resolved_at = NULL, created_at = ?, message = ?, data = ? WHERE id = ?", Date.now(), s.message, JSON.stringify(s.data), existing.id);
-    } else {
-      this.sql.exec(
-        "INSERT INTO signals(fork, kind, about_fork, symbol, message, data, dedupe_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        s.fork, s.kind, s.about_fork, s.symbol, s.message, JSON.stringify(s.data), s.dedupe_key, Date.now(),
-      );
-    }
-    this.log(`signal.${s.kind}`, { to: s.fork, message: s.message }, s.fork);
-    return true;
+    return emitSignal(this.sql, (k, d, f) => this.log(k, d, f), input);
   }
 
   resolveSignals(where: { fork?: string; kind?: SignalKind; about_fork?: string }) {
-    const clauses = ["resolved_at IS NULL"];
-    const args: string[] = [];
-    for (const [col, val] of Object.entries(where)) if (val) (clauses.push(`${col} = ?`), args.push(val));
-    this.sql.exec(`UPDATE signals SET resolved_at = ? WHERE ${clauses.join(" AND ")}`, Date.now(), ...args);
+    resolveSignals(this.sql, where);
   }
 
   /** Recompute index-derived signals; emit new ones and resolve ones that no longer hold. */
   private syncDerivedSignals() {
-    const desired = deriveSignals(this.snapshot());
-    const keys = new Set(desired.map((d) => d.dedupe_key));
-    for (const d of desired) this.emitSignal(d);
-    const placeholders = DERIVED_KINDS.map(() => "?").join(",");
-    const open = this.sql
-      .exec<{ id: number; dedupe_key: string }>(`SELECT id, dedupe_key FROM signals WHERE resolved_at IS NULL AND kind IN (${placeholders})`, ...DERIVED_KINDS)
-      .toArray();
-    for (const o of open) if (!keys.has(o.dedupe_key)) this.sql.exec("UPDATE signals SET resolved_at = ? WHERE id = ?", Date.now(), o.id);
+    syncDerivedSignals(this.sql, (k, d, f) => this.log(k, d, f), this.snapshot());
   }
 
   /** Record what an agent plans to touch; return in-flight work it collides with. */
@@ -561,13 +492,7 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
   async getSignals(fork: string, includeResolved = false): Promise<SignalRow[]> {
-    return this.sql
-      .exec<SignalRow & { data: string }>(
-        `SELECT * FROM signals WHERE fork = ? ${includeResolved ? "" : "AND resolved_at IS NULL"} ORDER BY id`,
-        fork,
-      )
-      .toArray()
-      .map((r) => ({ ...r, data: JSON.parse(r.data) as SignalData }));
+    return signalsFor(this.sql, fork, includeResolved);
   }
 
   // ── speculative checks (milestone 4) ───────────────────────────────────
@@ -829,7 +754,10 @@ export class Coordinator extends DurableObject<Env> {
     if (!sha || !row.head_sha.startsWith(sha) || (sha.length < 7 && sha !== row.head_sha))
       return refuse(409, `${prLabel(fork)} is at ${row.head_sha.slice(0, 7)}, not ${sha.slice(0, 7) || "(no sha)"}: review its current head`);
     // A landing in flight already checked the approval; a verdict now would change nothing and mislead the log.
-    if (this.landingInProgress()) return refuse(409, "a landing is in progress; send the review again in a few seconds");
+    // Only the PR being landed: its landing already checked the approval (others needn't wait; review of #38).
+    const landing = parseLock(this.meta("landing"));
+    if (this.landingInProgress() && (!landing?.fork || landing.fork === fork))
+      return refuse(409, `${prLabel(fork)} is landing right now; send the review again in a few seconds`);
     const who = reviewer.trim().slice(0, 60) || "reviewer";
     const text = note.trim().slice(0, 500);
     this.sql.exec(
@@ -914,7 +842,7 @@ export class Coordinator extends DurableObject<Env> {
     const token = crypto.randomUUID();
     const lock = takeLock(parseLock(this.meta("landing")), Date.now(), token);
     if (!lock) return { landed: false, fork, reason: "Another landing is in progress; retry shortly.", baselineHead, retry: true };
-    this.setMeta("landing", JSON.stringify(lock));
+    this.setMeta("landing", JSON.stringify({ ...lock, fork }));
     try {
       const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
       // The story up to the moment it lands. A bug in building it must never fail a landing: fall back to the basics.
@@ -1075,10 +1003,7 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   private flightLogs(): FlightLogEntry[] {
-    return this.sql
-      .exec<{ fork: string; landed_sha: string; landed_at: number; note: string; noted: number }>("SELECT fork, landed_sha, landed_at, note, noted FROM flight_logs ORDER BY landed_at")
-      .toArray()
-      .map((r) => ({ fork: r.fork, pr: prLabel(r.fork), landedSha: r.landed_sha, landedAt: r.landed_at, note: r.note, noted: r.noted === 1 }));
+    return flightLogs(this.sql);
   }
 
   /**
@@ -1098,37 +1023,7 @@ export class Coordinator extends DurableObject<Env> {
 
   /** File-level and symbol-level overlaps between every pair of active forks. */
   overlaps(): Overlap[] {
-    const files = this.sql
-      .exec<{ a: string; b: string; path: string }>(
-        `SELECT t1.fork AS a, t2.fork AS b, t1.path AS path FROM touched t1
-         JOIN touched t2 ON t1.path = t2.path AND t1.fork < t2.fork
-         JOIN forks f1 ON f1.name = t1.fork AND f1.status = 'active'
-         JOIN forks f2 ON f2.name = t2.fork AND f2.status = 'active'`,
-      )
-      .toArray()
-      .map((r): Overlap => ({ kind: "file", forks: [r.a, r.b], path: r.path, symbol: null, detail: `both forks modify ${r.path}` }));
-
-    // Fork X changes the signature of / removes an export that fork Y's touched files import.
-    const symbols = this.sql
-      .exec<{ changer: string; user: string; name: string; path: string; change: string; user_path: string; before_sig: string | null; after_sig: string | null }>(
-        `SELECT s.fork AS changer, u.fork AS user, s.name, s.path, s.change, u.path AS user_path, s.before_sig, s.after_sig
-         FROM symbol_changes s
-         JOIN uses u ON u.symbol = s.name AND u.from_path = s.path AND u.fork <> s.fork
-         JOIN forks f1 ON f1.name = s.fork AND f1.status = 'active'
-         JOIN forks f2 ON f2.name = u.fork AND f2.status = 'active'
-         WHERE s.change IN ('signature_changed', 'removed')`,
-      )
-      .toArray()
-      .map(
-        (r): Overlap => ({
-          kind: "symbol",
-          forks: [r.changer, r.user],
-          path: r.path,
-          symbol: r.name,
-          detail: `${r.changer} ${r.change === "removed" ? "removes" : "changes the signature of"} ${r.name} (${r.path}); ${r.user} uses it in ${r.user_path}`,
-        }),
-      );
-    return [...files, ...symbols];
+    return overlaps(this.sql);
   }
 
   // ── reconcile (ADR-0006) ────────────────────────────────────────────────
@@ -1171,7 +1066,8 @@ export class Coordinator extends DurableObject<Env> {
     this.sql.exec("DELETE FROM event_log WHERE id <= (SELECT max(id) FROM event_log) - ?", KEEP_EVENTS);
     this.sql.exec("DELETE FROM snapshots WHERE id <= (SELECT max(id) FROM snapshots) - ?", KEEP_SNAPSHOTS);
     this.sql.exec(
-      "DELETE FROM signals WHERE resolved_at IS NOT NULL AND resolved_at < ? AND fork NOT IN (SELECT name FROM forks WHERE status = 'active')",
+      // Landed PRs only: their story is in the flight log. Abandoned ones have no log, so their signals are kept.
+      "DELETE FROM signals WHERE resolved_at IS NOT NULL AND resolved_at < ? AND fork IN (SELECT name FROM forks WHERE status = 'landed')",
       Date.now() - 7 * 24 * 3600_000,
     );
   }
@@ -1225,44 +1121,14 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   private readModel(): CoordinatorState {
-    const forks = this.sql.exec<ForkRow>("SELECT * FROM forks ORDER BY created_at").toArray();
-    const touched = this.sql.exec<{ fork: string; path: string; change: string; lines: number }>("SELECT * FROM touched").toArray();
-    const symbolChanges = this.sql
-      .exec<{ fork: string; path: string; name: string; kind: string; change: string; before_sig: string | null; after_sig: string | null }>("SELECT * FROM symbol_changes")
-      .toArray();
-    return {
+    const head = this.meta("baseline_head");
+    return readModel(this.sql, {
       baseline: this.meta("baseline"),
-      baselineHead: this.meta("baseline_head"),
-      forks: forks.map((f) => ({
-        ...f,
-        files: touched.filter((t) => t.fork === f.name),
-        symbols: symbolChanges.filter((s) => s.fork === f.name),
-      })),
-      overlaps: this.overlaps(),
-      approach: approachQueue(this.activeForks(), this.meta("baseline_head") ?? ""),
+      baselineHead: head,
+      approach: approachQueue(this.activeForks(), head ?? ""),
       reviewRequired: this.reviewRequired(),
+      awaitingReview: [...this.reviewWaits().keys()],
       sequence: this.sequence(),
-      signals: this.sql
-        .exec<SignalRow & { data: string }>("SELECT * FROM signals ORDER BY id DESC LIMIT 100")
-        .toArray()
-        .map((r) => ({ ...r, data: JSON.parse(r.data) as SignalData })),
-      intents: this.sql
-        .exec<{ id: number; fork: string; description: string; files: string; symbols: string; created_at: number }>("SELECT * FROM intents ORDER BY id")
-        .toArray()
-        .map((i) => ({ ...i, files: JSON.parse(i.files) as string[], symbols: JSON.parse(i.symbols) as string[] })),
-      flightLogs: this.flightLogs(),
-      savings: computeSavings(
-        this.sql
-          .exec<{ at: number; kind: string; fork: string | null; detail: string }>(
-            `SELECT at, kind, fork, detail FROM event_log WHERE kind IN ('fork.created', 'fork.abandoned', 'push.received', 'land.requested', 'land.merged', 'signal.rebase_required', 'check.single', 'check.single.stale', 'check.pair') ORDER BY id`,
-          )
-          .toArray()
-          .map((e): LogEvent => ({ ...e, detail: JSON.parse(e.detail) as unknown })),
-      ),
-      events: this.sql
-        .exec<{ id: number; at: number; kind: string; fork: string | null; detail: string }>("SELECT * FROM event_log ORDER BY id DESC LIMIT 60")
-        .toArray()
-        .map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown })),
-    };
+    });
   }
 }

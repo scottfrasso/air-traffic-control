@@ -105,7 +105,9 @@ export function buildSequence(
       leader = f.name;
       const beat = mine[0];
       // A rival skipped only because it awaits review didn't lose on merit: say so (this text goes into git notes).
-      const why = beat && review.has(beat.other) ? `${prLabel(beat.other)} is waiting for review` : f.land_requested_at !== null ? "requested landing first" : "smaller diff";
+      // Cite review only if the rival would otherwise have been ahead; if it lost on merit, say why (review of #38).
+      const skippedForReview = beat && review.has(beat.other) && landingOrder(byName.get(beat.other)!, f, baselineHead) < 0;
+      const why = skippedForReview ? `${prLabel(beat.other)} is waiting for review` : f.land_requested_at !== null ? "requested landing first" : "smaller diff";
       entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : "Cleared to land. No conflicts.");
       continue;
     }

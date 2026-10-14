@@ -136,11 +136,31 @@ test("through request_land: an approved PR lands past an unapproved rival that a
   // While P2's landing runs, a review (and switching the gate) is refused.
   let during: unknown[] = [];
   a.checker = async (input: { mode: string; fork?: { expectedHead?: string } }) => {
-    if (input.mode === "land") during = [(await a.co.review(P1, "approve", "", "rev", "a1")).ok, (await a.co.setReviewRequired(false)).error];
+    if (input.mode === "land")
+      during = [
+        (await a.co.review(P2, "approve", "", "rev", "b1")).ok, // the PR being landed: refused
+        (await a.co.setReviewRequired(false)).error,
+      ];
     return input.mode === "land" ? { mode: "land", landed: true, landedSha: "landed-b1", forkHead: "b1", merged: true } : { mode: "notes", written: [] };
   };
   const res = await a.co.requestLand(P2);
   assert.equal(res.landed, true, res.reason);
   assert.deepEqual(during, [false, "a landing is in progress; try again in a few seconds"]);
+  // Another PR's review isn't held up by this landing (review of #38).
   assert.equal(a.q("SELECT * FROM signals WHERE fork = ? AND kind = 'rebase_required' AND resolved_at IS NULL", P1).length, 1); // P1 goes around
+});
+
+test("during a landing, other PRs can still be reviewed; only the PR being landed is refused (review of #38)", async () => {
+  const a = airport();
+  const [P1, P2] = ["base-repo--pr1", "base-repo--pr2"];
+  await a.co.ensure("base-repo");
+  for (const [n, sha] of [[P1, "a1"], [P2, "b1"]]) {
+    a.addFork(n);
+    a.heads.set(n, sha);
+    await a.co.onPush(n, sha, "event");
+  }
+  await a.co.setReviewRequired(true);
+  a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now(), fork: P2 }));
+  assert.equal((await a.co.review(P1, "approve", "", "rev", "a1")).ok, true);
+  assert.equal((await a.co.review(P2, "approve", "", "rev", "b1")).ok, false);
 });

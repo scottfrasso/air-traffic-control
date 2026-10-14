@@ -379,16 +379,22 @@ test("a PR that fits alone but not on main is flagged by the column: it goes aro
   assert.equal(a.q("SELECT * FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL").length, 1);
 });
 
-test("an existing Durable Object without the column gets it added (idempotent) and old prefixed rows still read", async () => {
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(":memory:");
-  db.exec("CREATE TABLE forks(name TEXT PRIMARY KEY, check_detail TEXT)"); // as before the column existed
-  const cols = () => (db.prepare("SELECT name FROM pragma_table_info('forks')").all() as Array<{ name: string }>).map((r) => r.name);
-  const { COLUMNS } = await import("../src/schema");
-  for (let i = 0; i < 2; i++) for (const c of COLUMNS) if (!cols().includes(c.column)) db.exec(c.ddl);
-  assert.ok(cols().includes("check_main_conflict"));
-  const { mainConflict } = await import("../src/landing");
-  assert.equal(mainConflict({ check_detail: "on main: x" } as never), true);
+test("an existing Durable Object without the column gets it added when the Coordinator starts, and old prefixed rows still read", async () => {
+  // The forks table as it was before check_main_conflict, holding a row written with the old "on main:" prefix.
+  const old = (db: import("node:sqlite").DatabaseSync) =>
+    db.exec(`CREATE TABLE forks(name TEXT PRIMARY KEY, agent TEXT NOT NULL, pr INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, created_at INTEGER NOT NULL,
+      base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, processed_sha TEXT NOT NULL, diff_lines INTEGER NOT NULL DEFAULT 0, subscription_id TEXT, remote TEXT NOT NULL,
+      land_requested_at INTEGER, landed_at INTEGER, check_status TEXT NOT NULL DEFAULT 'unknown', check_sha TEXT, check_base TEXT, check_detail TEXT);
+      INSERT INTO forks VALUES ('base-repo--pr1', 'a', 1, 'active', 1, 'main0', 'a1', 'a1', 3, NULL, '', NULL, NULL, 'red', 'a1', 'main0', 'on main: src/x.ts:1 TS2345 boom');
+      INSERT INTO meta(key, value) VALUES ('x', 'y')`);
+  const a = airport("base-repo", {}, (db) => {
+    db.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    old(db);
+  });
+  await a.co.ensure("base-repo");
+  assert.equal(a.fork("base-repo--pr1")!.check_main_conflict, 0); // the column exists now (default 0)…
+  assert.equal((await a.co.getClearance("base-repo--pr1")).clearance, "go_around"); // …and the old prefix still counts
+  airport("base-repo", {}, (db) => (db.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"), old(db), db.exec("ALTER TABLE forks ADD COLUMN check_main_conflict INTEGER NOT NULL DEFAULT 0"))); // already there: no error
 });
 
 test("deferred main reads during one landing are logged once (review of #40)", async () => {
