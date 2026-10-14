@@ -1,7 +1,7 @@
-"""Print the form answers from FORM_DRAFT.md, one block per form field, ready to paste.
+"""Print the form answers from FORM_DRAFT.md as plain text, one "===== Field =====" block per form field, ready to paste.
 
 Usage: python3 -I submission/answer-sheet.py [path/to/FORM_DRAFT.md]
-Personal fields (emails, location) are not in the repo; the person submitting types them.
+Team fields (names, emails, location) are not printed: they are personal and stay out of the repo.
 """
 
 import re
@@ -19,8 +19,6 @@ def block(name: str) -> str:
 
 
 fields = [
-    ("Team name (120)", "ATC"),
-    ("Primary contact name (120)", "Scott Frasso"),
     ("Project name (160)", re.search(r"## Project name.*?\n\n(.+?)\n", draft, re.S).group(1).strip()),
     ("Project vision (2000)", block("vision")),
     ("How you used Cloudflare (2000)", block("cloudflare")),
@@ -31,7 +29,7 @@ fields = [
 for label, text in fields:
     limit = int(re.search(r"\((\d+)\)", label).group(1))
     status = "OK" if len(text) <= limit else "OVER LIMIT"
-    print(f"### {label}: {len(text)} chars, {status}\n\n```text\n{text}\n```\n")
+    print(f"===== {label} ({len(text)} chars, {status}) =====\n{text}\n")
 
 if "<PUBLIC_REPLAY_URL>" in draft:
     print("WARNING: <PUBLIC_REPLAY_URL> is still a placeholder in FORM_DRAFT.md", file=sys.stderr)
