@@ -26,7 +26,9 @@ Nothing.
   the landing lock is token-owned and outlives the checker timeout; every pair of open PRs must have a speculative-merge result
   for their **current** heads before either is cleared or lands (missing or stale pairs are re-queued by the reconcile alarm,
   by a stale result, and by a land request). Only results for both current heads are recorded; a pair check that keeps
-  failing is recorded as `error` with a `check_failed` signal so it can't block landing. ADR-0018.
+  failing is retried (up to 3 attempts, 30 s apart) and only then recorded as final `error` with a `check_failed` signal,
+  so a transient error can't clear a PR and a broken checker can't block landing. Gate and pair decisions are pure
+  functions in `landing.ts` (2026-10-14, #5). ADR-0018.
   Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every

@@ -1,7 +1,7 @@
 # ADR-0018: Land only what was checked: pinned heads, an owned lock, and current-head pair coverage
 
 - Status: Accepted. Tightens ADR-0011 (landing gate) and ADR-0015 (merge-queue landing).
-- Date: 2026-10-11. Fixes issues #1, #3, #5 (code review of `8b81097`); PR #22.
+- Date: 2026-10-11, updated 2026-10-14. Fixes issues #1, #3, #5 (code review of `8b81097`); PR #22, and the #5 follow-up.
 
 ## Context
 Three gaps let ATC land a commit it never fully checked: the land step fetched the fork's *current* head rather than the
@@ -21,9 +21,16 @@ cleared it on exit (#3); and pair (speculative-merge) results for old heads were
   - Missing pairs are re-queued (`pair_queue`, `PushPipeline` kind `pairs`) from a dropped result, the reconcile alarm and
     a land request; a queued pair with no result after `PAIR_RETRY_MS` (= lock TTL) is assumed lost and re-queued.
     All due pairs are marked queued before the first `await`, so interleaved calls don't start one twice.
-  - **Liveness over completeness:** a pair check that still fails after its retries is recorded as `error` with a
-    `check_failed` signal to both PRs, so it can't block landing forever; the typecheck on main at landing still applies.
+  - **Errors are retried, then liveness wins** (tightened 2026-10-14, issue #5). A pair check that still fails after its
+    step retries is recorded as `error` with an attempt count (in `detail`, so no schema change). It **stays outstanding**
+    (neither PR is CLEARED or lands) and the reconcile alarm runs it again `PAIR_ERROR_RETRY_MS` (30 s) later. Only after
+    `PAIR_MAX_ATTEMPTS` (3) errors at the same heads does it count as checked, with a `check_failed` signal to both PRs,
+    so a broken checker can't block landing forever; the typecheck on main at landing still applies. A new push starts
+    the count again. `error` rows written before this change have no count and stay final.
     A failure never overwrites a real result at the same heads (a slow first run can outlive the retry window).
+  - **One decision path** (2026-10-14). The gate order (`landGate`) and every pair decision (`pairPartners`,
+    `pairResultRow`, `pairFailure`, `pairsToQueue`) are pure functions in `landing.ts`. The Coordinator only reads and
+    writes its tables around them, and `landing.test.ts` drives the same functions, including two near-simultaneous pushes.
   - A PR whose push is still being indexed **does** hold its partners (their pair at its new head is unchecked).
     Its own push pipeline queues those pairs; if it's still unindexed after `PAIR_RETRY_MS` (`head_seen` table),
     its pairs are queued directly, so a stuck PR delays its partners by at most that long.
@@ -31,7 +38,8 @@ cleared it on exit (#3); and pair (speculative-merge) results for old heads were
 ## Consequences
 - Landing waits for pair checks: the scripted demo went from about 56 s to about 60–68 s.
 - With many agents pushing often, every push briefly puts its partners back in CHECKING. Watch for starvation in the final.
-- A persistently failing pair check lowers protection for that pair to the land-time typecheck on main.
+- A persistently failing pair check (3 errors) lowers protection for that pair to the land-time typecheck on main.
+  A transient one now only delays the pair's PRs by about 30 s per attempt.
 - A slow but healthy pair check (up to 3 attempts × 5 min) can be re-queued while still running: duplicate work, no
   wrong result.
 - Known limits, not addressed here: pair results don't record the main they ran on, so after a landing an old pair
