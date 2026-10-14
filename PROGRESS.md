@@ -32,7 +32,7 @@ Nothing.
   Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **No PR stays pending (#2, ADR-0021, 2026-10-14):** any main move (outside ATC too) re-checks every open PR; a check
   pipeline that fails for good shows as an error (STANDBY "ATC couldn't run the checks", `check_failed` signal); the
-  reconcile alarm restarts errored or 5-min-stuck checks up to 3 times per head. Unit tests in `worker/test/stuck.test.ts`.
+  reconcile alarm restarts errored (30 s) or 20-min-stuck checks up to 3 times per head. Unit tests in `worker/test/stuck.test.ts`.
 - **baseline_head never moves backwards (#4, 2026-10-14):** only a push to main, a land request and a landing set it; an index
   applied late no longer rewinds it or clears a newer go-around. First Coordinator DO tests, in Node on node:sqlite
   (`worker/test/coordinator.test.ts`, ADR-0022).

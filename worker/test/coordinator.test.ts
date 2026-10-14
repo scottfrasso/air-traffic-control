@@ -136,3 +136,35 @@ test("a result that arrives while the alarm is starting other restarts isn't ove
   assert.deepEqual(restarts.map((p) => p.params.fork), ["a"]); // b was not restarted
   assert.equal(a.fork("b")!.check_status, "green"); // and its result stands
 });
+
+// ── second review of #30 ──
+
+test("polling request_land doesn't reset a hung re-check's start time, so the alarm still restarts it (finding 1)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  await a.co.applySingle(single("a", "a1", true)); // green on main0
+  a.heads.set("base-repo", "main1");
+  await a.co.onPush("base-repo", "main1", "event"); // re-check a-a1-mmain1 starts… and hangs
+  a.q("UPDATE check_runs SET started_at = 0");
+  for (let i = 0; i < 3; i++) await a.co.requestLand("a"); // each asks for the same re-check: a duplicate start
+  assert.ok(a.events("pipeline.duplicate").length >= 3);
+  assert.equal(a.q<{ started_at: number }>("SELECT started_at FROM check_runs WHERE fork = 'a'")[0]!.started_at, 0);
+  const before = a.pipelines.length;
+  await a.co.reconcile();
+  assert.ok(a.pipelines.slice(before).some((p) => p.params.fork === "a" && p.id.endsWith("-r1")));
+});
+
+test("giving up on a push that was never indexed marks it error once, even if a re-check set it green (finding 3)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a");
+  a.heads.set("a", "a1");
+  await a.co.onPush("a", "a1", "event"); // its index never applies
+  await a.co.applySingle(single("a", "a1", true)); // but a re-check on main went green
+  a.q("UPDATE check_runs SET started_at = 0, restarts = 3");
+  for (let i = 0; i < 3; i++) await a.co.reconcile();
+  assert.equal(a.fork("a")!.check_status, "error");
+  assert.equal(a.events("check.gave_up").length, 1);
+  assert.match((await a.co.getClearance("a")).message, /Push again to retry\./);
+});

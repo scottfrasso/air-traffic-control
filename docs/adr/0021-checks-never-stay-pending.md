@@ -23,13 +23,19 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
   `applyPipelineFailure`: `check_status = 'error'` with the reason, a `check_failed` signal, and STANDBY with
   "ATC couldn't run the checks (…)" in the sequence. `request_land` answers retry while ATC still retries, then
   `land_blocked` ("push again to retry"). Pair checks keep their own failure path (ADR-0018). A re-check carries the
-  main it ran on (`main` param); its failure is ignored once main has moved again. Any later result for the head
+  main it ran on (`main` param, push runs too); its failure is ignored once main has moved again, unless the push
+  was never indexed. The push pipeline waits for its main check and its pair checks (`allSettled`) before it
+  records a failure. Any later result for the head
   (`setCheck`) clears the PR's `check_failed` signal.
 - **Stuck runs restart.** Table `check_runs(fork, sha, started_at, restarts)` records the latest push/re-check started.
-  The reconcile alarm (`stuckCheck`) restarts a check that errored (after 30 s) or has had no result for 5 min
-  (`CHECK_STUCK_MS`): the full push pipeline if the push was never indexed, else a re-check. Each restart is a new
+  The reconcile alarm (`stuckCheck`) restarts a check that errored (after 30 s) or has had no result for 20 min
+  (`CHECK_STUCK_MS`, longer than the longest healthy run: indexing plus 3 tries of up to 5 min on main): the full push pipeline if the push was never indexed, else a re-check. Each restart is a new
   instance id (`-r<n>`). After `CHECK_MAX_RESTARTS` (3) per head ATC gives up and marks it `error` (once); a new push
   resets it. A green/red result on an older main isn't a failure: it is re-checked without counting a restart.
+  Go-around PRs are skipped (onLanded leaves them un-checked on purpose). Giving up on a push whose index never
+  applied writes `error` even over a green re-check, since a re-check can't finish that PR's checks.
+- **`started_at` only moves on a real start** (or a real start failure). A duplicate start leaves it alone: an agent
+  polling `request_land` re-requests the same re-check every few seconds and must not keep a hung run "fresh".
 - **Decide before awaiting.** `restartStuckChecks` and `recheckAll` write every decision (pending, `check_runs`) before
   the first `await`, then start each Workflow only if the PR still has the same head and is still pending: a result or
   push that arrives while `create()` is awaited isn't overwritten.
@@ -38,7 +44,7 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
   duplicate starts were all logged as `pipeline.duplicate`. A failed start still records `check_runs`, so the alarm tries again.
 
 ## Consequences
-- A PR is never pending for more than about 5 min per attempt without ATC doing something visible about it.
+- A run that fails is visible within seconds (`error`). One that hangs silently is restarted after 20 min.
 - Restarts can overlap a slow but healthy run: duplicate work, and the first result to arrive wins (`setCheck` only
   accepts results for the current head; `applySingle` drops ones for an old main).
 - `check_runs.restarts` is per head, not per main: a PR that used up its restarts stays `error` across main moves

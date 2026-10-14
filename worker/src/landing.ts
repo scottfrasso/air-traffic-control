@@ -236,8 +236,11 @@ export function pairFailure(forks: ForkRow[], checks: PairCheckRow[], a: string,
 
 // ── stuck checks (issue #2) ──────────────────────────────────────────────
 
-/** A PR whose check has been pending this long (no result, no error) is assumed stuck and started again. */
-export const CHECK_STUCK_MS = 5 * 60_000;
+/**
+ * A PR whose check has been pending this long (no result, no error) is assumed stuck and started again. Longer than
+ * the longest healthy run: indexing plus the "PR on main" step's 3 tries of up to 5 min each, with back-off.
+ */
+export const CHECK_STUCK_MS = 20 * 60_000;
 /** After a check pipeline fails for good, wait this long before the next try. */
 export const CHECK_ERROR_RETRY_MS = 30_000;
 /** ATC starts a PR's checks again at most this many times per head; then it waits for a new push. */

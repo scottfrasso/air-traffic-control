@@ -281,26 +281,33 @@ export class Coordinator extends DurableObject<Env> {
         ? `p${Date.now()}-${sha.slice(0, 12)}-${others.map((o) => o.sha.slice(0, 12)).join("-")}-${fork}` // unique part first: ids are cut at 100 chars
         : `${fork}-${sha.slice(0, 12)}${kind === "recheck" ? `-m${main.slice(0, 10)}` : ""}${restart ? `-r${restart}` : ""}`;
     const id = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
-    if (kind !== "pairs") {
-      // Recorded even if the start fails below, so the reconcile alarm tries again later instead of never.
-      this.sql.exec(
-        `INSERT INTO check_runs(fork, sha, started_at, restarts) VALUES (?, ?, ?, ?)
-         ON CONFLICT(fork) DO UPDATE SET started_at = excluded.started_at,
-           restarts = CASE WHEN check_runs.sha = excluded.sha THEN max(check_runs.restarts, excluded.restarts) ELSE excluded.restarts END, sha = excluded.sha`,
-        fork, sha, Date.now(), restart,
-      );
-    }
     try {
-      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind, others, ...(kind === "recheck" ? { main } : {}) } });
+      await this.env.PUSH_PIPELINE.create({ id, params: { baseline: this.baseline, fork, sha, kind, others, ...(kind === "pairs" ? {} : { main }) } });
       this.log("pipeline.started", { sha, instance: id }, fork);
+      if (kind !== "pairs") this.recordCheckRun(fork, sha, restart);
       return true;
     } catch (err) {
       const error = (err as Error).message;
       // Same push seen twice (event + reconcile, or queue redelivery) → instance already exists. Anything else is real.
+      // A duplicate leaves check_runs alone: the run that exists keeps its start time, so polling request_land (which
+      // re-requests a re-check every few seconds) can't keep a hung run from ever counting as stuck.
       if (isDuplicateInstance(error)) this.log("pipeline.duplicate", { sha, instance: id }, fork);
-      else this.log("pipeline.start_failed", { sha, instance: id, kind, error: error.slice(0, 300) }, fork);
+      else {
+        this.log("pipeline.start_failed", { sha, instance: id, kind, error: error.slice(0, 300) }, fork);
+        if (kind !== "pairs") this.recordCheckRun(fork, sha, restart); // so the reconcile alarm tries again later
+      }
       return false;
     }
+  }
+
+  /** The latest push/re-check run started for a fork, for restartStuckChecks. Restarts count per head. */
+  private recordCheckRun(fork: string, sha: string, restart: number) {
+    this.sql.exec(
+      `INSERT INTO check_runs(fork, sha, started_at, restarts) VALUES (?, ?, ?, ?)
+       ON CONFLICT(fork) DO UPDATE SET started_at = excluded.started_at,
+         restarts = CASE WHEN check_runs.sha = excluded.sha THEN max(check_runs.restarts, excluded.restarts) ELSE excluded.restarts END, sha = excluded.sha`,
+      fork, sha, Date.now(), restart,
+    );
   }
 
   /**
@@ -310,7 +317,9 @@ export class Coordinator extends DurableObject<Env> {
    */
   async applyPipelineFailure(fork: string, sha: string, error: string, main?: string): Promise<void> {
     const row = this.fork(fork);
-    const current = row?.status === "active" && row.head_sha === sha && (!main || main === this.meta("baseline_head"));
+    // A run on a main that has since moved is superseded by the re-check on the new main, unless its push was never
+    // indexed (that part isn't redone by a re-check).
+    const current = row?.status === "active" && row.head_sha === sha && (!main || main === this.meta("baseline_head") || row.processed_sha !== sha);
     this.log("pipeline.failed", { sha, main, error: error.slice(0, 300), current }, fork);
     if (!current) return; // a newer push, or a re-check on a newer main, has its own pipeline
     if (this.markCheckError(fork, sha, error)) {
@@ -322,7 +331,8 @@ export class Coordinator extends DurableObject<Env> {
   /** Record that this PR's checks couldn't run, unless a (duplicate) run already has a result. True if recorded. */
   private markCheckError(fork: string, sha: string, error: string): boolean {
     const row = this.fork(fork)!;
-    if (row.check_sha === sha && (row.check_status === "green" || row.check_status === "red")) return false;
+    // A result stands, unless the push itself was never indexed: a re-check alone can't finish that PR's checks.
+    if (row.processed_sha === sha && row.check_sha === sha && (row.check_status === "green" || row.check_status === "red")) return false;
     this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ? WHERE name = ?", sha, error.slice(0, 500), fork);
     this.emitSignal({
       fork, kind: "check_failed", about_fork: null, symbol: null,
@@ -340,7 +350,9 @@ export class Coordinator extends DurableObject<Env> {
     // Decide and write everything before the first await (as requeuePairs does): a result or a push that arrives
     // while a Workflow is being created must not be overwritten by a decision made on the old state.
     const restarts: Array<{ name: string; sha: string; kind: "push" | "recheck"; attempt: number }> = [];
+    const goAround = this.goAroundMap(); // sent around on purpose and not re-checked (onLanded): a new push decides
     for (const f of this.activeForks()) {
+      if (goAround.has(f.name)) continue;
       const s = stuckCheck(f, runs.get(f.name), head, now);
       if (!s) continue;
       if ("giveUp" in s) {
@@ -711,7 +723,10 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   sequence(): SequenceEntry[] {
-    return buildSequence(this.activeForks(), this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()));
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const forks = this.activeForks();
+    const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
+    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp);
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */

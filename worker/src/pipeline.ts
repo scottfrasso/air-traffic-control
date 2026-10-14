@@ -10,7 +10,7 @@ export interface PipelineParams {
   kind?: "push" | "recheck" | "pairs";
   /** "pairs": the other PRs and the heads they were queued at. */
   others?: Array<{ name: string; sha: string }>;
-  /** "recheck": the main it re-checks on, so a failure after main moved again is ignored. */
+  /** The main when the run started, so a failure after main moved again is ignored (see applyPipelineFailure). */
   main?: string;
 }
 
@@ -68,10 +68,11 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
       // Milestone 4: speculative merge + typecheck against every other active fork, in the Sandbox.
       const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
       if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
-      const mainCheck = onMain();
-      mainCheck.catch(() => undefined); // awaited below; don't let an early failure count as unhandled
-      const results = await pairs(plan.others);
-      await mainCheck;
+      // Wait for both before deciding: a failure in one must not be recorded while the other is still running.
+      const [mainCheck, merges] = await Promise.allSettled([onMain(), pairs(plan.others)]);
+      if (mainCheck.status === "rejected") throw mainCheck.reason;
+      if (merges.status === "rejected") throw merges.reason;
+      const results = merges.value;
       return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
     };
     try {
