@@ -55,7 +55,7 @@ const land = async (who: "A" | "B", fork: string): Promise<LandResponse> => {
       const head = (await mesh.state()).forks.find((f) => f.name === fork)?.head_sha ?? "";
       if (entry?.clearance === "review" && reviewed.get(fork) !== head) {
         say("system", `${entry.pr} REVIEW: ${entry.reason}`);
-        await mesh.call("POST", "/reviews", { fork, verdict: "approve", reviewer: "reviewer-bot", note: "Scripted review: read the diff; it typechecks on main." });
+        await mesh.call("POST", "/reviews", { fork, sha: head, verdict: "approve", reviewer: "reviewer-bot", note: "Scripted review: read the diff; it typechecks on main." });
         reviewed.set(fork, head);
         say("system", `reviewer-bot approved ${entry.pr} at ${head.slice(0, 7)}`);
         continue;

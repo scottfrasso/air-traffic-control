@@ -89,7 +89,8 @@ export function buildSequence(
       continue;
     }
     // A conflicting PR that is ahead in the order lands first; this one holds.
-    const ahead = mine.find((c) => landingOrder(byName.get(c.other)!, f, baselineHead) < 0);
+    // A rival still waiting for review isn't ahead: it can't land, so it mustn't hold up an approved PR (review of #38).
+    const ahead = mine.find((c) => !review.has(c.other) && landingOrder(byName.get(c.other)!, f, baselineHead) < 0);
     if (ahead) {
       // Not "then rebase": fixing the conflict while holding avoids the go-around, which is the point (issue #6).
       entry("hold", `Conflicts with ${prLabel(ahead.other)}${on(ahead)}. Lands after ${prLabel(ahead.other)}. Fix it now to avoid a go-around.`, ahead.other);

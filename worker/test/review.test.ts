@@ -49,12 +49,60 @@ test("the Coordinator: gate on, review via the API, a new push resets it, and th
   await a.co.setReviewRequired(true);
   a.q("UPDATE forks SET processed_sha = 'a1', check_status = 'green', check_sha = 'a1', check_base = 'main0'"); // checks passed
   assert.equal((await a.co.getClearance(F)).clearance, "review");
-  const r = await a.co.review(F, "approve", "looks right", "reviewer-bot");
+  assert.equal(JSON.parse(await a.co.stateJson()).reviewRequired, true);
+  const r = await a.co.review(F, "approve", "looks right", "reviewer-bot", "a1");
+  assert.ok(r.ok);
   assert.deepEqual([r.sha, r.verdict, r.clearance], ["a1", "approve", "cleared"]);
   assert.match(a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'review' AND resolved_at IS NULL", F)[0]!.message, /reviewer-bot approved PR1 at a1: looks right/);
   a.heads.set(F, "a2");
   await a.co.onPush(F, "a2", "event"); // new code: the approval no longer covers it
   a.q("UPDATE forks SET processed_sha = 'a2', check_status = 'green', check_sha = 'a2', check_base = 'main0'");
   assert.equal((await a.co.getClearance(F)).clearance, "review");
-  await assert.rejects(a.co.review("nope", "approve", "", "x"), /unknown or inactive/);
+  assert.equal((await a.co.review("nope", "approve", "", "x", "a2")).ok, false);
+  // The old approval's signal is closed by the push: it was for older code (review of #38).
+  assert.equal(a.q("SELECT * FROM signals WHERE fork = ? AND kind = 'review' AND resolved_at IS NULL", F).length, 0);
+});
+
+// ── review of #38 ──
+
+test("a review names the head it read; one for an older head is refused, so a push during review can't be approved unseen", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(F);
+  a.heads.set(F, "abcdef1111");
+  await a.co.onPush(F, "abcdef1111", "event");
+  await a.co.setReviewRequired(true);
+  a.heads.set(F, "fedcba2222");
+  await a.co.onPush(F, "fedcba2222", "event"); // pushed while the reviewer was reading abcdef1
+  const r = await a.co.review(F, "approve", "", "rev", "abcdef1");
+  assert.equal(r.ok, false);
+  assert.match(!r.ok ? r.error : "", /PR1 is at fedcba2, not abcdef1/);
+  assert.equal(a.q("SELECT * FROM reviews").length, 0);
+  assert.equal((await a.co.review(F, "approve", "", "rev", "fedcba2")).ok, true); // a short sha of the current head is fine
+});
+
+test("an unapproved rival that asked to land first doesn't hold up an approved PR it conflicts with (review of #38)", () => {
+  const x = fork("x", { diff_lines: 3, land_requested_at: 1 }); // asked first, smaller: would normally win
+  const y = fork("y", { diff_lines: 9 });
+  const conflicts = new Map([["x", [{ other: "y", symbol: "s" }]], ["y", [{ other: "x", symbol: "s" }]]]);
+  const seq = buildSequence([x, y], conflicts, "main", new Map(), new Set(), new Set(), new Map([["x", "Changes requested by rev."]]));
+  assert.deepEqual(seq.map((e) => [e.fork, e.clearance]), [["x", "review"], ["y", "cleared"]]);
+});
+
+test("request_land with the gate on: retry until approved, then it lands; a fresh Coordinator has the gate off", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  assert.equal(JSON.parse(await a.co.stateJson()).reviewRequired, false);
+  a.addFork(F);
+  a.heads.set(F, "a1");
+  await a.co.onPush(F, "a1", "event");
+  a.q("UPDATE forks SET processed_sha = 'a1', check_status = 'green', check_sha = 'a1', check_base = 'main0'");
+  await a.co.setReviewRequired(true);
+  const waiting = await a.co.requestLand(F);
+  assert.deepEqual([waiting.landed, waiting.retry], [false, true]);
+  assert.match(waiting.reason ?? "", /Waiting for review of a1/);
+  await a.co.review(F, "approve", "", "rev", "a1");
+  assert.equal((await a.co.requestLand(F)).landed, true);
 });

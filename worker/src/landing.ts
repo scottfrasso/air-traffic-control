@@ -322,6 +322,10 @@ export function afterLanding(winner: string, active: ForkRow[], conflicts: OpenC
     const c = conflicts.find((x) => x.fork === f.name && x.about_fork === winner);
     if (c) out.goAround.push({ fork: f.name, symbol: c.symbol, finding: c.message });
     else out.stayInLine.push(f.name);
+  }
+  return out;
+}
+
 // ── review gate (issue #16) ──────────────────────────────────────────────
 
 export type ReviewRow = { fork: string; sha: string; verdict: "approve" | "request_changes"; reviewer: string; note: string; at: number };

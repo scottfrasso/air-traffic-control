@@ -15,7 +15,7 @@ import { computeSavings, type LogEvent } from "./savings";
 import { COLUMNS, SCHEMA } from "./schema";
 import { deliver } from "./webhooks";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import type { ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Storage bounds (prune): a 5-PR demo run writes about 600 events and 40 snapshots. */
@@ -263,6 +263,7 @@ export class Coordinator extends DurableObject<Env> {
     this.resolveSignals({ fork: repo, kind: "rebase_required" });
     this.resolveSignals({ fork: repo, kind: "land_blocked" });
     this.resolveSignals({ fork: repo, kind: "check_failed" });
+    this.resolveSignals({ fork: repo, kind: "review" }); // an earlier verdict was for older code
     this.resolveSignals({ about_fork: repo, kind: "check_failed" });
     await this.startPipeline(repo, sha);
   }
@@ -816,10 +817,17 @@ export class Coordinator extends DurableObject<Env> {
    * A reviewer (an agent through MCP, or a person on the dashboard) approves or requests changes on a PR's CURRENT
    * head. A later push needs a new review. The author is told through a signal; the note goes into the flight log.
    */
-  async review(fork: string, verdict: "approve" | "request_changes", note: string, reviewer: string): Promise<{ fork: string; sha: string; verdict: string; clearance?: string }> {
+  async review(fork: string, verdict: "approve" | "request_changes", note: string, reviewer: string, sha: string): Promise<ReviewResult> {
+    // Refusals are returned, not thrown: an error's class doesn't survive the Durable Object RPC boundary.
+    const refuse = (status: number, error: string): ReviewResult => ({ ok: false, status, error: this.relabel(error) });
     const row = this.fork(fork);
-    if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
-    if (row.head_sha === row.base_sha) throw new Error(`${prLabel(fork)} has no pushed changes to review`);
+    if (!row || row.status !== "active") return refuse(404, `unknown or inactive fork ${fork}`);
+    if (row.head_sha === row.base_sha) return refuse(409, `${prLabel(fork)} has no pushed changes to review`);
+    // The verdict is for the code the reviewer read: if the PR moved since, it must be reviewed again (review of #38).
+    if (!sha || !row.head_sha.startsWith(sha) || (sha.length < 7 && sha !== row.head_sha))
+      return refuse(409, `${prLabel(fork)} is at ${row.head_sha.slice(0, 7)}, not ${sha.slice(0, 7) || "(no sha)"}: review its current head`);
+    // A landing in flight already checked the approval; a verdict now would change nothing and mislead the log.
+    if (this.landingInProgress()) return refuse(409, "a landing is in progress; send the review again in a few seconds");
     const who = reviewer.trim().slice(0, 60) || "reviewer";
     const text = note.trim().slice(0, 500);
     this.sql.exec(
@@ -837,7 +845,7 @@ export class Coordinator extends DurableObject<Env> {
       data: { verdict, reviewer: who, note: text, sha: row.head_sha }, dedupe_key: `review:${fork}:${row.head_sha}:${verdict}:${Date.now()}`,
     });
     this.touch();
-    return { fork, sha: row.head_sha, verdict, clearance: this.sequence().find((e) => e.fork === fork)?.clearance };
+    return { ok: true, fork, sha: row.head_sha, verdict, clearance: this.sequence().find((e) => e.fork === fork)?.clearance };
   }
 
   // ── landing gate (milestone 5) ─────────────────────────────────────────
@@ -884,10 +892,12 @@ export class Coordinator extends DurableObject<Env> {
       return { landed: false, fork, reason, baselineHead, atc: entry ? clearanceMessage(entry) : undefined };
     };
 
+    const waits = this.reviewWaits();
     const gate = landGate({
-      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork), rivals: this.rivals(fork),
+      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork),
+      rivals: this.rivals(fork).filter((r) => !waits.has(r.name)), // a rival waiting for review can't land, so it isn't ahead
       checkRetriesLeft: checkRetriesLeft(me, this.sql.exec<CheckRun>("SELECT * FROM check_runs WHERE fork = ?", fork).toArray()[0]),
-      awaitingReview: this.reviewWaits().get(fork),
+      awaitingReview: waits.get(fork),
     });
     if (gate.kind === "deny") return deny(gate.reason, gate.signal);
     if (gate.kind === "retry") {

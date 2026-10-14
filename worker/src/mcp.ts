@@ -102,12 +102,13 @@ function createServer(env: Env) {
         "later push needs a new review. The note goes to the author as a signal and into the flight log on main.",
       inputSchema: z.object({
         fork: z.string().describe("The PR's fork name, e.g. <baseline>--pr3"),
+        sha: z.string().min(7).describe("The commit you reviewed (the PR's head when you read it). If the PR has moved since, review it again."),
         verdict: z.enum(["approve", "request_changes"]),
         note: z.string().max(500).default("").describe("What you checked, or what must change"),
         reviewer: z.string().max(60).describe("Who is reviewing (your agent name)"),
       }),
     },
-    async ({ fork, verdict, note, reviewer }) => text(await (await coordinatorFor(env, baselineOf(fork))).review(fork, verdict, note, reviewer)),
+    async ({ fork, verdict, note, reviewer, sha }) => text(await (await coordinatorFor(env, baselineOf(fork))).review(fork, verdict, note, reviewer, sha)),
   );
 
   server.registerTool(

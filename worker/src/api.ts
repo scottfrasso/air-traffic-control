@@ -56,10 +56,13 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     "POST",
     /^\/reviews$/,
     async (stub, request) => {
-      const b = await body<{ fork?: string; verdict?: string; note?: string; reviewer?: string }>(request);
-      if (!b.fork) throw new HttpError(400, "fork is required");
+      const b = await body<{ fork?: unknown; verdict?: unknown; note?: unknown; reviewer?: unknown; sha?: unknown }>(request);
+      if (typeof b.fork !== "string" || !b.fork) throw new HttpError(400, "fork is required");
       if (b.verdict !== "approve" && b.verdict !== "request_changes") throw new HttpError(400, 'verdict must be "approve" or "request_changes"');
-      return json(await stub.review(b.fork, b.verdict, b.note ?? "", b.reviewer ?? "reviewer"));
+      if (typeof b.sha !== "string" || !b.sha) throw new HttpError(400, "sha (the head you reviewed) is required");
+      for (const k of ["note", "reviewer"] as const) if (b[k] !== undefined && typeof b[k] !== "string") throw new HttpError(400, `${k} must be a string`);
+      const r = await stub.review(b.fork, b.verdict, (b.note as string | undefined) ?? "", (b.reviewer as string | undefined) ?? "reviewer", b.sha);
+      return r.ok ? json(r) : json({ error: r.error }, r.status);
     },
   ],
   [

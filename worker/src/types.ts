@@ -98,6 +98,11 @@ export type SignalRow = {
   resolved_at: number | null;
 };
 
+/** What review() answers: recorded, or refused with an HTTP status and why. */
+export type ReviewResult =
+  | { ok: true; fork: string; sha: string; verdict: string; clearance?: string }
+  | { ok: false; status: number; error: string };
+
 export type LandResponse = {
   landed: boolean;
   fork: string;
