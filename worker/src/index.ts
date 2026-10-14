@@ -1,10 +1,10 @@
 import { handleApi } from "./api";
 import { handleMcp } from "./mcp";
-import { baselineOf } from "./artifacts";
 import { isAuthorized, unauthorized } from "./auth";
 import { publicReplayBaseline } from "./public";
 import dashboardHtml from "./dashboard.html";
-import { isPushed, type ArtifactsEvent } from "./events";
+import type { ArtifactsEvent } from "./events";
+import { consumeBatch, routePushEvent } from "./queue";
 
 export { Coordinator } from "./coordinator";
 export { PushPipeline } from "./pipeline";
@@ -38,20 +38,8 @@ export default {
     return Response.json({ error: "not found" }, { status: 404 });
   },
 
-  /** Artifacts event subscriptions deliver here (ADR-0002). */
+  /** Artifacts event subscriptions deliver here (ADR-0002). Each message is acked or retried on its own (issue #7). */
   async queue(batch, env): Promise<void> {
-    for (const msg of batch.messages) {
-      const event = msg.body;
-      if (isPushed(event)) {
-        const e = event;
-        const repo = e.source.repoName;
-        if (e.payload.ref === "refs/heads/main") {
-          const stub = env.COORDINATOR.getByName(baselineOf(repo));
-          await stub.ensure(baselineOf(repo));
-          await stub.onPush(repo, e.payload.after, "event", e);
-        }
-      }
-      msg.ack();
-    }
+    await consumeBatch(batch.messages, (event) => routePushEvent(env, event));
   },
 } satisfies ExportedHandler<Env, ArtifactsEvent>;

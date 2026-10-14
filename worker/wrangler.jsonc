@@ -24,7 +24,7 @@
     }
   ],
   "queues": {
-    "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3 }]
+    "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3, "dead_letter_queue": "agentmesh-push-events-dlq" }]
   },
   "workflows": [{ "name": "agentmesh-push-pipeline", "binding": "PUSH_PIPELINE", "class_name": "PushPipeline" }],
   "vars": {
