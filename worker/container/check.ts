@@ -7,7 +7,7 @@
 //   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
 //   notes  attach ATC's flight logs to landed commits as git notes under refs/notes/atc
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { landGuard } from "./guard.ts";
 
@@ -25,20 +25,67 @@ const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
 // fork and baseline commit, so each check fetches only deltas; typecheck results keyed by git TREE hash;
 // TypeScript incremental state computed once per baseline tree and reused by every check on top of it.
-const CACHE = "/cache";
+// ATC_CACHE / ATC_WORK exist for the local tests (worker/test/container.test.ts); the container uses the defaults.
+const CACHE = process.env.ATC_CACHE ?? "/cache";
+const WORK = process.env.ATC_WORK ?? "/work";
 const repoDir = join(CACHE, "repo");
 mkdirSync(join(CACHE, "tc"), { recursive: true });
 mkdirSync(join(CACHE, "tsbuild"), { recursive: true });
-if (!existsSync(join(repoDir, ".git"))) {
-  mkdirSync(repoDir, { recursive: true });
-  execFileSync("git", ["init", "-q"], { cwd: repoDir });
+mkdirSync(WORK, { recursive: true });
+
+// ── one git writer at a time (issue #8) ──
+// Concurrent checks are separate processes sharing /cache/repo. Git fails (it doesn't wait) on index.lock and ref
+// locks, so every command that writes refs or worktree metadata, and each fetch + rev-parse pair, holds a lock
+// directory (mkdir is atomic). Typechecks and merges in their own worktrees stay parallel.
+const LOCK = join(CACHE, "git.lock");
+const LOCK_STALE_MS = 300_000; // longer than the checker's hard timeout (240 s), so only a lost lock is ever broken
+let lockDepth = 0;
+const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; } };
+function withGitLock<T>(fn: () => T): T {
+  if (lockDepth > 0) { lockDepth++; try { return fn(); } finally { lockDepth--; } }
+  for (let waited = 0; ; waited += 20) {
+    try {
+      mkdirSync(LOCK);
+      writeFileSync(join(LOCK, "pid"), String(process.pid));
+      break;
+    } catch (e) {
+      if ((e as { code?: string }).code !== "EEXIST") throw e;
+      // Held. Break it if its owner died (the checker's hard timeout kills processes) or it is far too old.
+      let pid = 0;
+      let age = 0;
+      try { pid = Number(readFileSync(join(LOCK, "pid"), "utf8")); age = Date.now() - statSync(LOCK).mtimeMs; } catch { /* being created or removed */ }
+      if ((pid && !alive(pid)) || age > LOCK_STALE_MS) rmSync(LOCK, { recursive: true, force: true });
+      else sleep(20);
+    }
+  }
+  lockDepth = 1;
+  try { return fn(); } finally { lockDepth = 0; rmSync(LOCK, { recursive: true, force: true }); }
 }
+const WRITES = new Set(["init", "fetch", "update-ref", "worktree", "notes", "gc", "prune"]);
+
+/** Write to a temp file, then rename: a concurrent reader sees the old file or the whole new one, never half of it. */
+function writeAtomic(file: string, data: string | Buffer) {
+  const tmp = `${file}.tmp.${process.pid}`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, file);
+}
+
+withGitLock(() => {
+  if (!existsSync(join(repoDir, ".git"))) {
+    mkdirSync(repoDir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repoDir });
+  }
+});
 let dir = repoDir; // git commands run here; typechecks run in throwaway worktrees
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
 const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
 function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
-  const auth = opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [];
+  const sub = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
+  if (dir === repoDir && WRITES.has(sub) && lockDepth === 0) return withGitLock(() => git(args, opts));
+  // No automatic gc: it would rewrite the shared repo while another check reads it.
+  const auth = ["-c", "gc.auto=0", ...(opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [])];
   try {
     return {
       ok: true,
@@ -55,8 +102,11 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
 /** Fetch `main` of a repo into refs/agentmesh/<label>; returns the fetched sha. */
 function fetchMain(repo: RepoRef, label: string): string {
   const ref = `refs/agentmesh/${repo.name}`;
-  timed(`fetch ${label}`, () => git(["fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token }));
-  return git(["rev-parse", ref]).out;
+  // Fetch and read the ref under one lock, so another check's fetch of the same repo can't move it in between.
+  return withGitLock(() => {
+    timed(`fetch ${label}`, () => git(["fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token }));
+    return git(["rev-parse", ref]).out;
+  });
 }
 
 const treeOf = (rev: string) => git(["rev-parse", `${rev}^{tree}`]).out;
@@ -66,13 +116,13 @@ function mainBuildInfo(baseSha: string | null): string | null {
   if (!baseSha) return null;
   const file = join(CACHE, "tsbuild", `${treeOf(baseSha)}.tsbuildinfo`);
   if (existsSync(file)) return file;
-  const wt = mkdtempSync("/work/main-");
+  const wt = mkdtempSync(join(WORK, "main-"));
   try {
     git(["worktree", "add", "-q", "--detach", wt, baseSha]);
     timed("build main incremental state", () => {
       try { execFileSync("tsc", ["--noEmit", "-p", ".", "--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo"], { cwd: wt, stdio: "ignore" }); } catch { /* main may not typecheck; state is still useful */ }
     });
-    if (existsSync(join(wt, ".atc.tsbuildinfo"))) copyFileSync(join(wt, ".atc.tsbuildinfo"), file);
+    if (existsSync(join(wt, ".atc.tsbuildinfo"))) writeAtomic(file, readFileSync(join(wt, ".atc.tsbuildinfo")));
   } finally {
     git(["worktree", "remove", "--force", wt], { allowFail: true });
   }
@@ -85,7 +135,7 @@ function mainBuildInfo(baseSha: string | null): string | null {
  */
 function ontoBase(fork: string, base: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
   if (git(["merge-base", "--is-ancestor", base, fork], { allowFail: true }).ok) return { sha: fork };
-  const wt = mkdtempSync("/work/onto-");
+  const wt = mkdtempSync(join(WORK, "onto-"));
   const prev = dir;
   try {
     git(["worktree", "add", "-q", "--detach", wt, base]);
@@ -105,6 +155,8 @@ function ontoBase(fork: string, base: string, message: string): { sha: string } 
   }
 }
 
+const isTscOutcome = (ok: boolean, exit: number | null, errors: number) => ok || ((exit === 1 || exit === 2) && errors > 0);
+
 const prOf = (name: string) => (/--pr(\d+)$/.exec(name) ? `PR${/--pr(\d+)$/.exec(name)![1]}` : name);
 
 /** Typecheck a commit in a throwaway worktree. Results are cached by tree hash; main's incremental state seeds tsc. */
@@ -116,7 +168,7 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
     timings.push({ step: `typecheck ${label}`, ms: 0, cached: true });
     return { ...(JSON.parse(readFileSync(cacheFile, "utf8")) as Typecheck), sha, cached: true, ms: 0 };
   }
-  const wt = mkdtempSync("/work/check-");
+  const wt = mkdtempSync(join(WORK, "check-"));
   const started = Date.now();
   try {
     git(["worktree", "add", "-q", "--detach", wt, sha]);
@@ -127,12 +179,14 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
     }
     let output = "";
     let ok = true;
+    let exit: number | null = 0;
     try {
       output = execFileSync("tsc", args, { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
-      const e = err as { stdout?: string; stderr?: string };
+      const e = err as { stdout?: string; stderr?: string; status?: number | null };
       output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
       ok = false;
+      exit = e.status ?? null; // null: killed by a signal (timeout)
     }
     const errors: TsError[] = [];
     for (const line of output.split("\n")) {
@@ -146,7 +200,9 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
       errors.push({ file, line: Number(l), col: Number(c), code, message, lineText });
     }
     const result: Typecheck = { sha, ok: ok && errors.length === 0, errors, output: output.slice(0, 4000) };
-    writeFileSync(cacheFile, JSON.stringify(result));
+    // Cache only real tsc outcomes: a pass, or tsc's own diagnostics (exit 1 or 2). A crash, a kill or a missing tsc is
+    // the environment, not the code; caching it by tree hash would make a transient failure permanent (issue #8).
+    if (isTscOutcome(ok, exit, errors.length)) writeAtomic(cacheFile, JSON.stringify(result));
     const ms = Date.now() - started;
     timings.push({ step: `typecheck ${label}`, ms, cached: false });
     return { ...result, cached: false, ms };
@@ -209,7 +265,7 @@ function run(): unknown {
     const aloneA = typecheck(a, "A alone", info);
     const aloneB = typecheck(b, "B alone", info);
     // Merge B into A in a scratch worktree (no checkout of the shared cache repo).
-    const mwt = mkdtempSync("/work/merge-");
+    const mwt = mkdtempSync(join(WORK, "merge-"));
     try {
       git(["worktree", "add", "-q", "--detach", mwt, a]);
       const merge = (() => { const prev = dir; dir = mwt; try { return git(["merge", "--no-edit", "-q", b], { allowFail: true }); } finally { dir = prev; } })();
