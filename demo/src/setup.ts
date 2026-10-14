@@ -47,8 +47,8 @@ function setEnv(key: string, value: string, secret = false) {
   if (!DRY) appendFileSync(ENV_FILE, `\n${key}=${value}\n`);
 }
 
-const token = env.CLOUDFLARE_API_TOKEN;
-if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not set in .env (needs Workers, Queues, Artifacts and Containers edit)");
+// Checked in main(), not at import: tests import withVars from here without any credentials (review of #39).
+const token = env.CLOUDFLARE_API_TOKEN ?? "";
 
 async function cf<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
@@ -73,7 +73,8 @@ async function account(): Promise<string> {
 }
 
 async function ensureQueue(acct: string, name: string): Promise<string> {
-  const all = await cf<Array<{ queue_id: string; queue_name: string }>>("GET", `/accounts/${acct}/queues?per_page=100`);
+  // Filter by name (as wrangler does): a plain list is paged, so on a busy account the queue could be missed.
+  const all = await cf<Array<{ queue_id: string; queue_name: string }>>("GET", `/accounts/${acct}/queues?name=${encodeURIComponent(name)}`);
   const found = all.find((q) => q.queue_name === name);
   if (found) {
     say(`queue ${name}: exists (${found.queue_id})`);
@@ -108,6 +109,7 @@ export function withVars(jsonc: string, vars: Record<string, string>): string {
 }
 
 async function main() {
+  if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not set in .env (needs Workers, Queues, Artifacts and Containers edit)");
   const acct = await account();
   say(`account ${acct}`);
   const [queueId] = [await ensureQueue(acct, QUEUES[0]!), await ensureQueue(acct, QUEUES[1]!)];
@@ -125,7 +127,11 @@ async function main() {
   const apiKey = readEnv().AGENTMESH_API_KEY ?? "<generated>";
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
   const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
-  if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY) say("note: CLOUDFLARE_AGENTMESH_WORKER_API_KEY not set; the Worker gets CLOUDFLARE_API_TOKEN (works, but broader than it needs)");
+  if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
+    say(
+      "note: CLOUDFLARE_AGENTMESH_WORKER_API_KEY not set, so the Worker gets CLOUDFLARE_API_TOKEN. That works only if the token " +
+        "is NOT IP-restricted (the Worker calls the API from Cloudflare's network). Better: a separate token with Queues edit only.",
+    );
 
   if (DRY) {
     say("would run: wrangler deploy --secrets-file <AGENTMESH_API_KEY, CF_API_TOKEN> (needs Docker for the checker image)");
@@ -133,9 +139,14 @@ async function main() {
   }
   const dir = mkdtempSync(join(tmpdir(), "agentmesh-setup-"));
   const secrets = join(dir, "secrets.json");
+  // Ctrl-C during the deploy must not leave the secrets file behind (finally doesn't run on a signal).
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => (cleanup(), process.exit(130)));
   try {
     writeFileSync(secrets, JSON.stringify({ AGENTMESH_API_KEY: apiKey, CF_API_TOKEN: workerToken }), { mode: 0o600 });
+    say("deploying (building the checker image with Docker can take a few minutes)...");
     const deploy = spawnSync("pnpm", ["exec", "wrangler", "deploy", "--secrets-file", secrets], {
+      maxBuffer: 64 * 1024 * 1024,
       cwd: resolve(ROOT, "worker"),
       env: { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: acct, NODE_OPTIONS: "--dns-result-order=ipv4first" },
       encoding: "utf8",
@@ -145,9 +156,12 @@ async function main() {
     if (deploy.status !== 0) throw new Error(`wrangler deploy failed (exit ${deploy.status})`);
     const url = /https:\/\/agentmesh\.[a-z0-9-]+\.workers\.dev/.exec(deploy.stdout ?? "")?.[0];
     if (url) setEnv("AGENTMESH_URL", url);
+    const target = readEnv().AGENTMESH_URL;
+    if (!url || target !== url)
+      say(`warning: .env AGENTMESH_URL is ${target ?? "unset"}${url ? `, but this deploy is ${url}` : " and the deploy URL wasn't found"}. Set it to your Worker's URL before ./demo/run.sh.`);
     say(`deployed${url ? `: ${url}` : ""}. Next: ./demo/run.sh`);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanup();
   }
 }
 

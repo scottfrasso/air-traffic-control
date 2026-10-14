@@ -81,7 +81,7 @@ Setup
 1. git clone https://github.com/scottfrasso/air-traffic-control && cd air-traffic-control && pnpm install
 2. Create .env at the repo root with CLOUDFLARE_API_TOKEN=... (and CLOUDFLARE_ACCOUNT_ID=... if the token sees several accounts)
 3. pnpm setup:cloudflare
-It is idempotent. It creates the queues and the Artifacts namespace if they are missing, points worker/wrangler.jsonc at your account, generates AGENTMESH_API_KEY into .env, deploys the Worker with its secrets, and writes AGENTMESH_URL into .env. Every resource is named agentmesh*. Add --dry-run to see what it would do.
+It is idempotent. It creates the queues and the Artifacts namespace if they are missing, points worker/wrangler.jsonc at your account, generates AGENTMESH_API_KEY into .env, deploys the Worker with its secrets, and writes AGENTMESH_URL into .env. Every resource is named agentmesh*. Add --dry-run to see what it would do. On a brand-new account, pick a workers.dev subdomain in the dashboard first. If the token is IP-restricted, also set CLOUDFLARE_AGENTMESH_WORKER_API_KEY (Queues edit, no IP filter) for the Worker.
 
 Start it
 ./demo/run.sh

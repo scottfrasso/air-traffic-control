@@ -143,7 +143,9 @@ pnpm setup:cloudflare             # queues + Artifacts namespace if missing, wra
 ./demo/run.sh
 ```
 
-`setup:cloudflare` is idempotent and only touches resources named `agentmesh*`. It generates `AGENTMESH_API_KEY` into
+On a brand-new account, open Workers once in the dashboard to pick a `workers.dev` subdomain first. If your API token is
+IP-restricted, also set `CLOUDFLARE_AGENTMESH_WORKER_API_KEY` to a token with Queues edit only and no IP filter: the Worker
+uses it from Cloudflare's network. `setup:cloudflare` is idempotent and only touches resources named `agentmesh*`. It generates `AGENTMESH_API_KEY` into
 `.env` if you don't have one (paste it into the dashboard once) and writes `AGENTMESH_URL`, so `./demo/run.sh` targets
 your deployment.
 
