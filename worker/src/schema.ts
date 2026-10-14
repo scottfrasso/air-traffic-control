@@ -68,9 +68,6 @@ CREATE TABLE IF NOT EXISTS pair_queue(
 -- The latest check pipeline (push or re-check) started per fork, to restart stuck or failed ones (issue #2).
 CREATE TABLE IF NOT EXISTS check_runs(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, started_at INTEGER NOT NULL, restarts INTEGER NOT NULL);
 
--- Every main head ATC has accepted, so a stale read of an older head can't move baseline_head backwards.
-CREATE TABLE IF NOT EXISTS main_heads(sha TEXT PRIMARY KEY, at INTEGER NOT NULL);
-
 -- When each fork's current head was first seen (to tell "being indexed" from "stuck").
 CREATE TABLE IF NOT EXISTS head_seen(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
 

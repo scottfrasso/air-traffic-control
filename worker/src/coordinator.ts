@@ -235,8 +235,18 @@ export class Coordinator extends DurableObject<Env> {
   async onPush(repo: string, sha: string, source: PushSource, event?: ArtifactsEvent): Promise<void> {
     const baseline = this.meta("baseline");
     if (repo === baseline) {
-      await this.baselineMoved(sha, source);
+      // An event (possibly a delayed queue retry, or out of order) only says main moved: read where it is now.
+      if (source === "event") await this.syncMainHead("event");
+      else await this.baselineMoved(sha, source);
       return;
+    }
+    if (source === "event") {
+      // Same for a fork: a retried or reordered event can carry an older head than one already applied (review of #33).
+      const live = await headOf(this.env, repo).catch(() => null);
+      if (live && live.hash !== sha) {
+        this.log("push.event_stale", { sha, live: live.hash }, repo);
+        sha = live.hash;
+      }
     }
     const fork = this.fork(repo);
     if (!fork || fork.status !== "active") {
@@ -262,22 +272,34 @@ export class Coordinator extends DurableObject<Env> {
    */
   private async baselineMoved(sha: string, source: PushSource) {
     if (this.meta("baseline_head") === sha) return;
-    // Main only moves forward. A head ATC already had is a stale read (an Artifacts head fetched just before a landing
-    // and returned after it): taking it would re-check every PR on the old main for nothing, and their re-checks on the
-    // real head would then be duplicate no-ops, leaving them pending (third review of #30).
-    if (this.sql.exec("SELECT 1 FROM main_heads WHERE sha = ?", sha).toArray().length) {
-      this.log("baseline.stale_head", { sha, head: this.meta("baseline_head"), source });
-      return;
-    }
     this.setMainHead(sha);
     this.log("baseline.pushed", { sha, source });
     await this.recheckAll(new Set());
   }
 
-  /** The only writer of baseline_head (with the history that keeps it monotone). */
+  /**
+   * Read main's head from Artifacts and take it, unless main moved (a landing, or another read) while the read was in
+   * flight: then the answer may be older than what ATC already has, and taking it would move main backwards, re-check
+   * every PR on the old main, and leave them pending (third review of #30). A dropped read is retried by the next
+   * reconcile, 5 s later, so a wrong answer can't stick.
+   */
+  private async syncMainHead(source: PushSource): Promise<void> {
+    const baseline = this.meta("baseline");
+    if (!baseline) return;
+    const epoch = this.meta("main_epoch");
+    const live = await headOf(this.env, baseline).catch(() => null);
+    if (!live) return;
+    if (this.meta("main_epoch") !== epoch) {
+      this.log("baseline.stale_read", { read: live.hash, head: this.meta("baseline_head"), source });
+      return;
+    }
+    await this.baselineMoved(live.hash, source);
+  }
+
+  /** The only writer of baseline_head. Bumps main_epoch, so a head read that was in flight meanwhile is discarded. */
   private setMainHead(sha: string) {
     this.setMeta("baseline_head", sha);
-    this.sql.exec("INSERT OR IGNORE INTO main_heads(sha, at) VALUES (?, ?)", sha, Date.now());
+    this.setMeta("main_epoch", String(Number(this.meta("main_epoch") ?? 0) + 1));
   }
 
   /**
@@ -783,8 +805,7 @@ export class Coordinator extends DurableObject<Env> {
     this.log("land.requested", { head: row.head_sha }, fork);
 
     const baseline = this.baseline;
-    const live = await headOf(this.env, baseline);
-    if (live) await this.baselineMoved(live.hash, "land");
+    await this.syncMainHead("land");
     const baselineHead = this.meta("baseline_head") ?? "";
     const me = this.fork(fork)!;
 
@@ -1040,8 +1061,7 @@ export class Coordinator extends DurableObject<Env> {
     let found = 0;
     const baseline = this.meta("baseline");
     if (baseline) {
-      const head = await headOf(this.env, baseline);
-      if (head && head.hash !== this.meta("baseline_head")) await this.onPush(baseline, head.hash, "reconcile");
+      await this.syncMainHead("reconcile");
     }
     await Promise.all(
       this.activeForks().map(async (f) => {
@@ -1073,10 +1093,16 @@ export class Coordinator extends DurableObject<Env> {
     else this.log("reconcile.paused", { idleMs: idle });
   }
 
-  /** Any active PR whose checks are pending or errored and that restartStuckChecks may still start again. */
+  /**
+   * Any PR restartStuckChecks may still start again: pending or errored, retries left, and not a go-around (those are
+   * skipped there, so they never use up restarts and would keep the alarm up forever; review of #31).
+   */
   private checksAwaitingRestart(): boolean {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
-    return this.activeForks().some((f) => f.head_sha !== f.base_sha && (f.check_status === "pending" || f.check_status === "error") && checkRetriesLeft(f, runs.get(f.name)));
+    const goAround = this.goAroundMap();
+    return this.activeForks().some(
+      (f) => !goAround.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || f.check_status === "error") && checkRetriesLeft(f, runs.get(f.name)),
+    );
   }
 
   // ── teardown ────────────────────────────────────────────────────────────

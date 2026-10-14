@@ -11,8 +11,8 @@ test("an index computed before a landing and applied after it doesn't move basel
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
-  await a.co.onPush("a", "a1", "event"); // a's index starts against main0
-  await a.co.onPush("base-repo", "main1", "event"); // main moves before it is applied
+  await a.push("a", "a1"); // a's index starts against main0
+  await a.push("base-repo", "main1"); // main moves before it is applied
   assert.equal(a.meta("baseline_head"), "main1");
   await a.co.applyIndex(index("a", "a1", "main0", "main0"));
   assert.equal(a.meta("baseline_head"), "main1");
@@ -23,8 +23,8 @@ test("an index on an older main doesn't clear a go-around sent after it was comp
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
-  await a.co.onPush("a", "a1", "event");
-  await a.co.onPush("base-repo", "main1", "event");
+  await a.push("a", "a1");
+  await a.push("base-repo", "main1");
   // What onLanded sends a conflicting PR when the other one lands.
   (a.co as unknown as { emitSignal(s: object): void }).emitSignal({
     fork: "a", kind: "rebase_required", about_fork: "b", symbol: null, message: "Conflicts with PR2 (landed).", data: {}, dedupe_key: "rebase:a:b",
@@ -41,29 +41,54 @@ test("a push to main from outside ATC re-checks every open PR on it (issue #2)",
   await a.co.ensure("base-repo");
   for (const n of ["a", "b"]) {
     a.addFork(n);
-    await a.co.onPush(n, `${n}1`, "event");
+    await a.push(n, `${n}1`);
     await a.co.applyIndex(index(n, `${n}1`, "main0", "main0"));
   }
   const before = a.pipelines.length;
-  await a.co.onPush("base-repo", "main1", "event");
+  await a.push("base-repo", "main1");
   const rechecks = a.pipelines.slice(before).map((p) => [p.params.fork, p.params.kind]);
   assert.deepEqual(rechecks, [["a", "recheck"], ["b", "recheck"]]);
   assert.deepEqual([a.fork("a")!.check_status, a.fork("b")!.check_status], ["pending", "pending"]);
 });
 
-test("a stale read of an older main is ignored: baseline_head only moves forward (third review of #30)", async () => {
+test("a head read that overlaps a main move is discarded, so main never moves backwards (reviews of #30 and #31)", async () => {
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
-  await a.co.onPush("a", "a1", "event");
-  await a.co.onPush("base-repo", "main1", "event");
-  await a.co.onPush("base-repo", "main2", "event");
+  await a.push("a", "a1");
+  await a.push("base-repo", "main1");
+  // reconcile reads main (still main1)… and before the answer arrives, a landing moves main to main2.
+  let raced = false;
+  a.onHeadRead = async (repo) => {
+    if (repo !== "base-repo" || raced) return undefined;
+    raced = true;
+    await a.push("base-repo", "main2"); // its own read answers main2
+    return "main1"; // the slow read's answer, now stale
+  };
   const before = a.pipelines.length;
-  await a.co.onPush("base-repo", "main1", "reconcile"); // an Artifacts read from before the last landing, answered late
+  await a.co.reconcile();
   assert.equal(a.meta("baseline_head"), "main2");
-  assert.equal(a.pipelines.length, before); // nobody re-checked on the old main
-  assert.equal(a.events("baseline.stale_head").length, 1);
-  assert.notEqual(a.fork("a")!.check_status, "error");
+  assert.equal(a.events("baseline.stale_read").length, 1);
+  assert.ok(a.pipelines.slice(before).every((p) => p.params.main !== "main1")); // nobody re-checked on the old main
+});
+
+test("out-of-order or retried push events can't move a head backwards: the event only triggers a read (reviews of #31, #33)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a");
+  // Two outside pushes to main; main2's event arrives first, main1's (or a retry of it) after.
+  a.heads.set("base-repo", "main2");
+  await a.co.onPush("base-repo", "main2", "event");
+  await a.co.onPush("base-repo", "main1", "event");
+  assert.equal(a.meta("baseline_head"), "main2");
+  await a.co.reconcile();
+  assert.equal(a.meta("baseline_head"), "main2"); // and reconcile agrees, so nothing is stuck
+  // A fork: a1 then a2 pushed; a1's event is retried after a2's was applied.
+  a.heads.set("a", "a2");
+  await a.co.onPush("a", "a2", "event");
+  await a.co.onPush("a", "a1", "event");
+  assert.equal(a.fork("a")!.head_sha, "a2");
+  assert.equal(a.events("push.event_stale").length, 1);
 });
 
 // ── issue #2 wiring (review of #30) ──
@@ -72,7 +97,7 @@ test("a stale read of an older main is ignored: baseline_head only moves forward
 async function stuckFork(a: ReturnType<typeof airport>, name: string) {
   a.addFork(name);
   a.heads.set(name, `${name}1`); // what reconcile reads from Artifacts
-  await a.co.onPush(name, `${name}1`, "event");
+  await a.push(name, `${name}1`);
   await a.co.applyIndex(index(name, `${name}1`, "main0", "main0"));
 }
 const single = (repo: string, forkSha: string, ok: boolean, baseHead = "main0") =>
@@ -97,7 +122,7 @@ test("a failure is ignored if a newer push or a newer main has its own run, or a
   const a = airport();
   await a.co.ensure("base-repo");
   await stuckFork(a, "a");
-  await a.co.onPush("base-repo", "main1", "event");
+  await a.push("base-repo", "main1");
   await a.co.applyPipelineFailure("a", "a1", "boom", "main0"); // a re-check on main0; main is main1 now
   assert.equal(a.fork("a")!.check_status, "pending");
   await a.co.applyPipelineFailure("a", "a0", "boom"); // an older push
@@ -148,7 +173,7 @@ test("polling request_land doesn't reset a hung re-check's start time, so the al
   await stuckFork(a, "a");
   await a.co.applySingle(single("a", "a1", true)); // green on main0
   a.heads.set("base-repo", "main1");
-  await a.co.onPush("base-repo", "main1", "event"); // re-check a-a1-mmain1 starts… and hangs
+  await a.push("base-repo", "main1"); // re-check a-a1-mmain1 starts… and hangs
   a.q("UPDATE check_runs SET started_at = 0");
   for (let i = 0; i < 3; i++) await a.co.requestLand("a"); // each asks for the same re-check: a duplicate start
   assert.ok(a.events("pipeline.duplicate").length >= 3);
@@ -164,7 +189,7 @@ test("giving up on a push that was never indexed marks it error once, even if a 
   await a.co.ensure("base-repo");
   a.addFork("a");
   a.heads.set("a", "a1");
-  await a.co.onPush("a", "a1", "event"); // its index never applies
+  await a.push("a", "a1"); // its index never applies
   await a.co.applySingle(single("a", "a1", true)); // but a re-check on main went green
   a.q("UPDATE check_runs SET started_at = 0, restarts = 3");
   for (let i = 0; i < 3; i++) await a.co.reconcile();
@@ -181,6 +206,18 @@ test("the alarm keeps running while a PR's checks may still be restarted, even w
   await a.co.alarm();
   assert.equal(a.events("reconcile.paused").length, 0);
   a.q("UPDATE forks SET check_status = 'green', check_base = 'main0'"); // settled: now it may pause
+  a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'");
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 1);
+});
+
+test("a go-around PR that is still pending doesn't keep the alarm up forever (review of #31)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a"); // pending
+  (a.co as unknown as { emitSignal(s: object): void }).emitSignal({
+    fork: "a", kind: "rebase_required", about_fork: "b", symbol: null, message: "Conflicts with PR2 (landed).", data: {}, dedupe_key: "rebase:a:b",
+  });
   a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'");
   await a.co.alarm();
   assert.equal(a.events("reconcile.paused").length, 1);
