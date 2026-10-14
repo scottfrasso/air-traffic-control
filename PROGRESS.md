@@ -1,6 +1,16 @@
 # PROGRESS
 
-_Last updated 2026-10-10._
+_Last updated 2026-10-11. Next session: start with [`handover/04-next.md`](handover/04-next.md)._
+
+## Before submitting (found 2026-10-11, see docs/research/competition.md)
+
+- Priority work is tracked in GitHub issues labelled `competition`. P0: #12 public repo, #13 video, #14 public replay, #20 submit.
+- **Video must be 5–10 min** (official rules §4). v8 `submission/atc-demo.mp4` (6:52) was **approved 2026-10-11**
+  and replaced v7. Re-render only if #15/#17 add something worth showing.
+- **Repo must be public** (open-source requirement). `scottfrasso/air-traffic-control` is private and `main` is unpushed.
+  Owner's call (2026-10-11): **stay private until more work is done**; go public by 10-13 after a full-history secret scan.
+- A human fills in the form (automated entry is prohibited). Answers are drafted in `submission/FORM_DRAFT.md`.
+- A public read-only replay URL for judges is still TODO (it goes in the form's run instructions).
 
 ## Blocked
 
@@ -20,7 +30,7 @@ Nothing.
   Unit tests in `worker/test/{guard,landing,atc}.test.ts`.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
-  landed PR has it (`shop-261011174828`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
+  landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.
 - **Savings in numbers (#17, ADR-0019):** computed from the event log; `run.sh` prints
   `5 PRs · 10 pairs checked · 1 conflict found in 8 s · 1 rebase (naive: 10)` and the dashboard has a SAVINGS panel.
 - **Merge-queue landing (ADR-0015):** ATC merges each PR onto the current main, typechecks that exact commit, and pushes. After a landing,
@@ -48,7 +58,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** private GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 37 unit tests, strict TypeScript in every package.
+  clean before the first push), 62 unit tests, strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 
@@ -68,17 +78,36 @@ Nothing.
 ## Cut / not done
 
 - **Stretch:** blast-radius estimation from ticket descriptions and scheduling overlapping tickets. Not started.
-- **Second demo variant with two real coding agents over MCP.** The tools are built and exercised by a scripted MCP client
-  (`m3-signals.ts`), but there's no recorded run with two LLM agents.
+- **Recording of the two-real-agent run.** The run happened (2026-10-10, ADR-0015) but wasn't recorded; the video shows a
+  summary card instead.
 - Cloudflare logo in the dashboard's hero cloud (slot reserved; waiting on the owner's asset).
 - An LLM to phrase ATC's reasons: rejected for now. The ordering and reasons are deterministic so the demo is repeatable.
 
 ## Next
 
-1. Make the video: see `handover/03-video.md` (Remotion + ElevenLabs; footage from `demo/src/tools/record-replay.ts`).
-2. Optional: logo asset in the hero cloud; route checks by fork to raise the cache hit rate.
+Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
+
+1. ~~Landing reliability bugs #1, #3, #5.~~ Done 2026-10-11 (#22).
+2. ~~#15 flight log on the landed commit (context preservation), then #17 savings in numbers.~~ Done 2026-10-11 (#23);
+   still to do: a 10–15 s flight-log beat and a recap with the real numbers in the video.
+3. #14 public read-only replay link; fill `<PUBLIC_REPLAY_URL>` in `submission/FORM_DRAFT.md`.
+4. If time: #18 one-command deploy, #16 review clearance.
+5. Video is approved (#13). Optional: re-render with a #15/#17 beat in place of the recap's "next" line.
+6. Secret scan, push, go public (#12) when the owner says so; the owner submits the form (#20) by 10-14 23:59 PDT.
+
+Other code-review follow-ups (#2, #4, #6–#11) are not competition-critical.
 
 ## Tools
 
 - `demo/src/teardown.ts [--keep <baseline>]` deletes old runs (repos, forks, subscriptions).
 - `demo/src/tools/scene.ts [conflict|landed]` + `screenshot.ts <baseline> <out.png>` produce dashboard stills.
+
+## 2026-10-10: submission video
+- Done: `video/` (Remotion) renders `video/out/atc.mp4`, 2:57 at 1080p30, with ElevenLabs voice-over: the metaphor
+  (PRs are planes, GitHub has no controller), today's go-around (rebase onto main, then land late), then a real
+  five-PR run (`booking-261010213346`). In that run all 10 pairs are merged and type checked, only PR1 + PR2 fails,
+  and ATC orders PR4 → PR5 → PR2 → PR1 → PR3 by its rules. PR1 holds behind PR2 and fixes the call in flight;
+  all five land and nobody rebases. See ADR 0016.
+- Rebuild: `pnpm --dir demo exec tsx src/video-run.ts` (optional, for a new run), then `pnpm --dir video voiceover`
+  and `pnpm --dir video render`.
+- Open: Cloudflare logo for the hero cloud (needs the asset).

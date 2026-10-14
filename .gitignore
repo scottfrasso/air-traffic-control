@@ -172,3 +172,5 @@ dist
 .dev/
 demo/.work/
 worker-configuration.d.ts
+.DS_Store
+.playwright-mcp/

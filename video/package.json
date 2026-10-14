@@ -1,0 +1,25 @@
+{
+  "name": "agentmesh-video",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "voiceover": "tsx scripts/voiceover.ts",
+    "render": "remotion render src/index.ts ATC out/atc.mp4",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.534",
+    "@remotion/google-fonts": "4.0.534",
+    "@remotion/media": "4.0.534",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.534"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "19.2.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}
