@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  approachQueue, checkRetriesLeft, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  approachQueue, checkRetriesLeft, LANDING_LOCK_MS, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -240,10 +240,15 @@ export class Coordinator extends DurableObject<Env> {
       else await this.baselineMoved(sha, source);
       return;
     }
-    if (source === "event") {
+    if (source === "event" && this.fork(repo)?.status === "active") {
       // Same for a fork: a retried or reordered event can carry an older head than one already applied (review of #33).
       const live = await headOf(this.env, repo).catch(() => null);
-      if (live && live.hash !== sha) {
+      if (!live) {
+        // Can't tell whether the event is current: drop it; reconcile reads the fork's head within seconds.
+        this.log("push.event_unverified", { sha }, repo);
+        return;
+      }
+      if (live.hash !== sha) {
         this.log("push.event_stale", { sha, live: live.hash }, repo);
         sha = live.hash;
       }
@@ -286,14 +291,22 @@ export class Coordinator extends DurableObject<Env> {
   private async syncMainHead(source: PushSource): Promise<void> {
     const baseline = this.meta("baseline");
     if (!baseline) return;
+    // A landing in progress may already have pushed main; onLanded records that head itself. Reading now would take
+    // ATC's own landing for an outside push and re-check everyone, go-arounds included (review of #31).
+    if (this.landingInProgress()) return;
     const epoch = this.meta("main_epoch");
     const live = await headOf(this.env, baseline).catch(() => null);
     if (!live) return;
-    if (this.meta("main_epoch") !== epoch) {
+    if (this.meta("main_epoch") !== epoch || this.landingInProgress()) {
       this.log("baseline.stale_read", { read: live.hash, head: this.meta("baseline_head"), source });
       return;
     }
     await this.baselineMoved(live.hash, source);
+  }
+
+  private landingInProgress(): boolean {
+    const l = parseLock(this.meta("landing"));
+    return !!l && l.at > Date.now() - LANDING_LOCK_MS;
   }
 
   /** The only writer of baseline_head. Bumps main_epoch, so a head read that was in flight meanwhile is discarded. */
@@ -1100,8 +1113,9 @@ export class Coordinator extends DurableObject<Env> {
   private checksAwaitingRestart(): boolean {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const goAround = this.goAroundMap();
+    // Pending at any restart count: after the last restart, the alarm must still be up for the final give-up (review of #31).
     return this.activeForks().some(
-      (f) => !goAround.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || f.check_status === "error") && checkRetriesLeft(f, runs.get(f.name)),
+      (f) => !goAround.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || (f.check_status === "error" && checkRetriesLeft(f, runs.get(f.name)))),
     );
   }
 

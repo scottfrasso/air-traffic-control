@@ -222,3 +222,46 @@ test("a go-around PR that is still pending doesn't keep the alarm up forever (re
   await a.co.alarm();
   assert.equal(a.events("reconcile.paused").length, 1);
 });
+
+// ── fourth review of #30/#31 follow-ups ──
+
+test("after the last restart the alarm stays up, so the final give-up still fires (review of #31)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a");
+  a.q("UPDATE check_runs SET restarts = 3"); // the third restart is running… and hangs
+  a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'");
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 0);
+  a.q("UPDATE check_runs SET started_at = 0");
+  await a.co.alarm();
+  assert.equal(a.fork("a")!.check_status, "error"); // gave up, visibly
+  assert.equal(a.events("check.gave_up").length, 1);
+});
+
+test("a fork event whose live head can't be read is dropped, not applied (review of #31)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a");
+  await a.push("a", "a2");
+  a.onHeadRead = async (repo) => {
+    if (repo === "a") throw new Error("Artifacts 503");
+    return undefined;
+  };
+  await a.co.onPush("a", "a1", "event"); // a retried, older event during an outage
+  assert.equal(a.fork("a")!.head_sha, "a2");
+  assert.equal(a.events("push.event_unverified").length, 1);
+});
+
+test("main isn't read while a landing holds the lock: ATC's own landing isn't taken for an outside push (review of #31)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now() }));
+  a.heads.set("base-repo", "main1"); // the landing already pushed main; onLanded hasn't run yet
+  await a.co.reconcile();
+  assert.equal(a.meta("baseline_head"), "main0");
+  assert.equal(a.events("baseline.pushed").length, 0);
+  a.q("UPDATE meta SET value = '' WHERE key = 'landing'"); // lock released (e.g. it crashed): the next read takes it
+  await a.co.reconcile();
+  assert.equal(a.meta("baseline_head"), "main1");
+});
