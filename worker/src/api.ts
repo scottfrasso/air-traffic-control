@@ -71,7 +71,8 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     async (stub, request) => {
       const b = await body<{ review?: boolean }>(request);
       if (typeof b.review !== "boolean") throw new HttpError(400, "review (boolean) is required");
-      return json(await stub.setReviewRequired(b.review));
+      const r = await stub.setReviewRequired(b.review);
+      return r.error ? json({ error: r.error }, 409) : json(r);
     },
   ],
   [

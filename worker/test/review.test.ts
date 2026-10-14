@@ -106,3 +106,41 @@ test("request_land with the gate on: retry until approved, then it lands; a fres
   await a.co.review(F, "approve", "", "rev", "a1");
   assert.equal((await a.co.requestLand(F)).landed, true);
 });
+
+// ── second review of #38 ──
+
+test("when the beaten rival is only waiting for review, CLEARED says so (it goes into git notes)", () => {
+  const x = fork("x", { diff_lines: 3, land_requested_at: 1 });
+  const y = fork("y", { diff_lines: 9 });
+  const conflicts = new Map([["x", [{ other: "y", symbol: "s" }]], ["y", [{ other: "x", symbol: "s" }]]]);
+  const seq = buildSequence([x, y], conflicts, "main", new Map(), new Set(), new Set(), new Map([["x", "Waiting for review of x1."]]));
+  assert.equal(seq.find((e) => e.fork === "y")!.reason, "Cleared to land. Beats X on s: X is waiting for review.");
+});
+
+test("through request_land: an approved PR lands past an unapproved rival that asked first; reviews and the gate switch wait during a landing", async () => {
+  const a = airport();
+  const [P1, P2] = ["base-repo--pr1", "base-repo--pr2"];
+  await a.co.ensure("base-repo");
+  for (const [n, sha] of [[P1, "a1"], [P2, "b1"]]) {
+    a.addFork(n);
+    a.heads.set(n, sha);
+    await a.co.onPush(n, sha, "event");
+  }
+  a.q("UPDATE forks SET processed_sha = head_sha, check_status = 'green', check_sha = head_sha, check_base = 'main0'");
+  a.q("UPDATE forks SET land_requested_at = 1, diff_lines = 3 WHERE name = ?", P1); // asked first, smaller
+  a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, 'a1', 'b1', 'semantic_conflict', '{}', 1)", P1, P2);
+  for (const [me, other] of [[P1, P2], [P2, P1]])
+    (a.co as unknown as { emitSignal(s: object): void }).emitSignal({ fork: me, kind: "semantic_conflict", about_fork: other, symbol: "s", message: "m", data: {}, dedupe_key: `sem:${me}` });
+  await a.co.setReviewRequired(true);
+  await a.co.review(P2, "approve", "", "rev", "b1");
+  // While P2's landing runs, a review (and switching the gate) is refused.
+  let during: unknown[] = [];
+  a.checker = async (input: { mode: string; fork?: { expectedHead?: string } }) => {
+    if (input.mode === "land") during = [(await a.co.review(P1, "approve", "", "rev", "a1")).ok, (await a.co.setReviewRequired(false)).error];
+    return input.mode === "land" ? { mode: "land", landed: true, landedSha: "landed-b1", forkHead: "b1", merged: true } : { mode: "notes", written: [] };
+  };
+  const res = await a.co.requestLand(P2);
+  assert.equal(res.landed, true, res.reason);
+  assert.deepEqual(during, [false, "a landing is in progress; try again in a few seconds"]);
+  assert.equal(a.q("SELECT * FROM signals WHERE fork = ? AND kind = 'rebase_required' AND resolved_at IS NULL", P1).length, 1); // P1 goes around
+});

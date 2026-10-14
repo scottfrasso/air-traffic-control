@@ -803,7 +803,9 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /** Turn the review gate on or off for this baseline (off by default, so the demo is unchanged). */
-  async setReviewRequired(on: boolean): Promise<{ reviewRequired: boolean }> {
+  async setReviewRequired(on: boolean): Promise<{ reviewRequired: boolean; error?: string }> {
+    // A landing in flight passed the gate as it was; switching now would let it land "unreviewed" under the new rule.
+    if (this.landingInProgress()) return { reviewRequired: this.reviewRequired(), error: "a landing is in progress; try again in a few seconds" };
     this.setMeta("review_required", on ? "1" : "0");
     this.log("review.gate", { on });
     return { reviewRequired: on };
@@ -841,7 +843,7 @@ export class Coordinator extends DurableObject<Env> {
       fork, kind: "review", about_fork: null, symbol: null,
       message: verdict === "approve"
         ? `${who} approved ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."}`
-        : `${who} requested changes on ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."} Push a fix; it needs a new review.`,
+        : `${who} requested changes on ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."}${this.reviewRequired() ? " Push a fix; it needs a new review." : ""}`,
       data: { verdict, reviewer: who, note: text, sha: row.head_sha }, dedupe_key: `review:${fork}:${row.head_sha}:${verdict}:${Date.now()}`,
     });
     this.touch();

@@ -387,7 +387,11 @@
         method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify({ fork: b.dataset.approve, sha: b.dataset.sha, verdict: "approve", reviewer: "a person on the dashboard" }), // the head shown
       });
-      if (!res.ok) b.disabled = false;
+      if (!res.ok) { // e.g. the PR moved since this was drawn: say why, then let the next refresh redraw it
+        b.disabled = false;
+        b.textContent = "REFUSED";
+        b.title = ((await res.json().catch(() => ({}))).error) || `HTTP ${res.status}`;
+      }
     }));
     renderSavings();
     renderFlight();
