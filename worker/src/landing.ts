@@ -16,6 +16,11 @@ export function landingOrder(a: ForkRow, b: ForkRow, baselineHead: string): numb
   return (a.land_requested_at ?? Infinity) - (b.land_requested_at ?? Infinity) || a.created_at - b.created_at;
 }
 
+/** Fine alone, but doesn't fit on current main: it must go around. Rows from before the column used a detail prefix. */
+export const mainConflict = (f: ForkRow) => f.check_main_conflict === 1 || (f.check_detail ?? "").startsWith("on main:");
+/** The check's detail without the legacy "on main: " prefix. */
+export const checkDetail = (f: ForkRow) => (f.check_detail ?? "").replace(/^on main: /, "");
+
 /** Green = this PR's head, merged onto the current main, typechecks. */
 export const isGreen = (f: ForkRow, baselineHead: string) =>
   f.check_status === "green" && f.check_sha === f.head_sha && f.processed_sha === f.head_sha && f.check_base === baselineHead;
@@ -92,9 +97,9 @@ export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, c
   if (me.check_base !== baselineHead) return { kind: "retry", reason: "Main moved; re-checking your PR on the new main. Retry in a few seconds.", then: "recheck" };
   if (me.check_status === "pending") return { kind: "retry", reason: "Checks for your latest push are still running; retry in a few seconds." };
   if (!isGreen(me, baselineHead)) {
-    const detail = me.check_detail ?? "";
-    return detail.startsWith("on main:")
-      ? { kind: "deny", reason: `Your PR doesn't fit on current main: ${detail.slice(9)}. Rebase onto main and fix.`, signal: "rebase_required" }
+    const detail = checkDetail(me);
+    return mainConflict(me)
+      ? { kind: "deny", reason: `Your PR doesn't fit on current main: ${detail}. Rebase onto main and fix.`, signal: "rebase_required" }
       : { kind: "deny", reason: `Your PR does not typecheck at ${me.head_sha.slice(0, 7)}: ${detail}`.trim(), signal: "land_blocked" };
   }
   // Never land before every pair check against the other PRs' current heads is in (issue #5).

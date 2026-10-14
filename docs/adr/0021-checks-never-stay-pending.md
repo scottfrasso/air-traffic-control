@@ -23,11 +23,12 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
     can't stick. (A first attempt, "ignore any head already seen", could deadlock: an older head not yet seen would be
     taken and the real one then refused forever. Review of #31.)
   - A fork's push event is checked against the fork's live head too (`push.event_stale`), so a retried event can't
-    move a PR back to an older commit (review of #33). If that read fails, the event is dropped
-    (`push.event_unverified`); reconcile reads the fork's head within seconds.
-  - Main isn't read while a landing holds the lock: the landing may already have pushed main, and `onLanded`
-    records that head itself. Otherwise reconcile would take ATC's own landing for an outside push. `applyIndex` never writes it: an index computed before a landing and applied after would move it
-  backwards. An index clears a PR's go-around only if its base is the **current** main, not the main it saw.
+    move a PR back to an older commit (review of #33). If that read fails, `onPush` throws
+    (`push.event_unverified`), so the queue redelivers the event with a back-off (review of #35).
+  - Main isn't read while a landing holds the lock (`baseline.read_deferred`): the landing may already have pushed
+    main, and `onLanded` records that head itself. Otherwise reconcile would take ATC's own landing for an outside push.
+  - `applyIndex` never writes `baseline_head`: an index computed before a landing and applied after would move it
+    backwards. An index clears a PR's go-around only if its base is the **current** main, not the main it saw.
 - **Gate order** (`landGate`): an errored check first, then "push not processed", then "checked on an old main → start a
   re-check" (even if pending; a duplicate start is a no-op), then "pending → retry".
 - **Failures are recorded.** `PushPipeline` catches a push/re-check that fails for good and calls

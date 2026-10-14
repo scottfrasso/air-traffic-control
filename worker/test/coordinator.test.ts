@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { airport } from "./harness/coordinator";
+import { KEEP_EVENTS, keptBaselines } from "../src/coordinator";
 import type { ForkIndex } from "../src/artifacts";
 
 // The real Coordinator Durable Object on node:sqlite (see harness/). Run through `pnpm test`, which loads the harness.
@@ -239,7 +240,7 @@ test("after the last restart the alarm stays up, so the final give-up still fire
   assert.equal(a.events("check.gave_up").length, 1);
 });
 
-test("a fork event whose live head can't be read is dropped, not applied (review of #31)", async () => {
+test("a fork event whose live head can't be read is retried by the queue, not applied (reviews of #31, #35)", async () => {
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
@@ -248,7 +249,7 @@ test("a fork event whose live head can't be read is dropped, not applied (review
     if (repo === "a") throw new Error("Artifacts 503");
     return undefined;
   };
-  await a.co.onPush("a", "a1", "event"); // a retried, older event during an outage
+  await assert.rejects(a.co.onPush("a", "a1", "event"), /verify push/); // a retried, older event during an outage: the queue redelivers it
   assert.equal(a.fork("a")!.head_sha, "a2");
   assert.equal(a.events("push.event_unverified").length, 1);
 });
@@ -318,4 +319,31 @@ test("landing: the checker refusing (main moved under it) answers retry and land
   assert.deepEqual([res.landed, res.retry], [false, true]);
   assert.equal(a.fork(PA)!.status, "active");
   assert.equal(a.meta("landing"), ""); // the lock is released
+});
+
+// ── storage pruning (issue #10) ──
+
+const fill = (a: ReturnType<typeof airport>, n: number) =>
+  a.q("WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < ?) INSERT INTO event_log(at, kind, fork, detail) SELECT i, 'filler', NULL, '{}' FROM k", n);
+
+test("the alarm keeps storage bounded: only the newest events are kept", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a"); // something in flight, so reconcile runs its full pass
+  fill(a, KEEP_EVENTS + 500);
+  await a.co.reconcile();
+  const n = a.q<{ n: number }>("SELECT count(*) AS n FROM event_log")[0]!.n;
+  assert.ok(n <= KEEP_EVENTS + 10, `${n} events left`);
+  assert.equal(a.q("SELECT * FROM event_log WHERE kind = 'baseline.registered'").length, 0); // the oldest went first
+});
+
+test("a published replay's baseline is never pruned (ADR-0020)", async () => {
+  const a = airport("shop-261011185716", { PUBLIC_REPLAY_BASELINES: "shop-261011185716" });
+  a.heads.set("shop-261011185716", "main0");
+  await a.co.ensure("shop-261011185716");
+  a.addFork("a");
+  fill(a, KEEP_EVENTS + 500);
+  await a.co.reconcile();
+  assert.ok(a.q<{ n: number }>("SELECT count(*) AS n FROM event_log")[0]!.n > KEEP_EVENTS + 500);
+  assert.deepEqual([...keptBaselines({ PUBLIC_REPLAY_BASELINES: "x, y" })].sort(), ["booking-261010213346", "x", "y"]);
 });

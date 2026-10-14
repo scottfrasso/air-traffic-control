@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 /** The part of a Queues message the consumer uses. */
 export type QueueMessage<T> = { id: string; body: T; attempts: number; ack(): void; retry(options?: { delaySeconds?: number }): void };
 
-/** Back-off for a failed message: 5 s, 10 s, 20 s… capped at a minute (max_retries in wrangler.jsonc, then the DLQ). */
+/** Back-off for a failed message: 5, 10, 20 s, then 40 s on the last delivery, and then the DLQ (max_retries: 3). */
 export const retryDelaySeconds = (attempts: number) => Math.min(60, 5 * 2 ** Math.max(0, attempts - 1));
 
 /**
@@ -19,7 +19,7 @@ export async function consumeBatch<T>(messages: readonly QueueMessage<T>[], hand
       msg.ack();
     } catch (err) {
       const delaySeconds = retryDelaySeconds(msg.attempts);
-      log(`queue message ${msg.id} failed (attempt ${msg.attempts}), retrying in ${delaySeconds}s: ${(err as Error).message}`);
+      log(`queue message ${msg.id} failed (attempt ${msg.attempts}), retrying in ${delaySeconds}s: ${err instanceof Error ? err.message : String(err)}`);
       msg.retry({ delaySeconds });
     }
   }

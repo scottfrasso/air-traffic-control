@@ -25,9 +25,10 @@ which calls `POST /accounts/{id}/event_subscriptions/subscriptions` with:
   This uses a narrowly scoped API token stored as a Worker secret. It deletes the subscription
   when the fork lands or is abandoned. The baseline repo also gets a subscription, so external pushes to it are seen.
 - The queue consumer forwards each event to the repo's Coordinator DO. Each message is acked or retried on its own
-  (`worker/src/queue.ts`, issue #7, 2026-10-14): a failure is retried with a back-off (5 s doubling, capped at 60 s)
-  and logged, and it doesn't block or re-run the rest of the batch. After `max_retries` (3) a message goes to the
-  dead-letter queue `agentmesh-push-events-dlq` (nothing consumes it; inspect it with `wrangler queues`). Retries are
+  (`worker/src/queue.ts`, issue #7, 2026-10-14): a failure is retried with a back-off (5, 10, 20 s, then 40 s on the
+  last delivery) and logged, and it doesn't block or re-run the rest of the batch. After `max_retries` (3) a message
+  goes to the dead-letter queue `agentmesh-push-events-dlq`. Nothing consumes it: inspect it with `wrangler queues`;
+  messages there are deleted after 4 days. (Queues would create a missing DLQ on deploy; `setup:cloudflare` creates it.) Retries are
   safe because `onPush` de-duplicates by (repo, sha), and the reconcile alarm (ADR-0006) still catches a lost push.
 
 ## Consequences

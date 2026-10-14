@@ -25,7 +25,7 @@ function sqlStorage(db: DatabaseSync) {
   };
 }
 
-export function airport(baseline = "base-repo") {
+export function airport(baseline = "base-repo", vars: Record<string, string> = {}) {
   const db = new DatabaseSync(":memory:");
   const heads = new Map<string, string>([[baseline, "main0"]]);
   const pipelines: Array<{ id: string; params: { fork: string; sha: string; kind: string; others: Array<{ name: string; sha: string }> } }> = [];
@@ -44,6 +44,7 @@ export function airport(baseline = "base-repo") {
     acceptWebSocket: () => undefined,
   };
   const env = {
+    ...vars,
     ARTIFACTS: {
       get: async (repo: string) => ({
         log: async () => {

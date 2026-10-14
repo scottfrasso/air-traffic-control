@@ -1,4 +1,4 @@
-import { checkErrored, isGreen, landingOrder } from "./landing";
+import { checkDetail, checkErrored, isGreen, landingOrder, mainConflict } from "./landing";
 import type { ForkRow } from "./types";
 
 /**
@@ -77,8 +77,8 @@ export function buildSequence(
       continue;
     }
     if (!isGreen(f, baselineHead)) {
-      const detail = f.check_detail ? firstLine(f.check_detail) : "";
-      if (detail.startsWith("on main:")) entry("go_around", `Doesn't fit on current main (${detail.slice(9)}). Rebase and fix.`);
+      const detail = firstLine(checkDetail(f));
+      if (mainConflict(f)) entry("go_around", `Doesn't fit on current main (${detail}). Rebase and fix.`);
       else entry("fix", `Fails typecheck${detail ? `: ${detail}` : ""}.`);
       continue;
     }

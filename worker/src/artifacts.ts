@@ -4,6 +4,13 @@ import { changedLines, diffExports, extractExports, extractImports, resolveImpor
 export const forkName = (baseline: string, pr: number) => `${baseline}--pr${pr}`;
 export const baselineOf = (repoName: string) => repoName.split("--")[0] ?? repoName;
 
+/** A short-lived repo token + remote for the checker container. Tokens are minted where they're used, never stored. */
+export async function repoRef(env: Env, repo: string, scope: "read" | "write", ttlSeconds: number): Promise<{ name: string; remote: string; token: string }> {
+  using handle = await env.ARTIFACTS.get(repo);
+  const [token, info] = await Promise.all([handle.createToken(scope, ttlSeconds), handle.info()]);
+  return { name: repo, remote: info.remote, token: token.plaintext };
+}
+
 export async function headOf(env: Env, repo: string, ref = "main"): Promise<ArtifactsCommitMetadata | null> {
   using handle = await env.ARTIFACTS.get(repo);
   return (await handle.log({ ref, limit: 1 }))[0] ?? null;
