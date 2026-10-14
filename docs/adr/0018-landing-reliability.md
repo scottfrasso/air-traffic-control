@@ -39,7 +39,10 @@ cleared it on exit (#3); and pair (speculative-merge) results for old heads were
 - Landing waits for pair checks: the scripted demo went from about 56 s to about 60–68 s.
 - With many agents pushing often, every push briefly puts its partners back in CHECKING. Watch for starvation in the final.
 - A persistently failing pair check (3 errors) lowers protection for that pair to the land-time typecheck on main.
-  A transient one now only delays the pair's PRs by about 30 s per attempt.
+  A transient one delays the pair's PRs by one check run plus 30 s per attempt. If the checker keeps timing out,
+  each attempt is a step with 3 tries of up to 240 s, so both PRs can sit in CHECKING for up to about 37 min before the
+  pair counts as checked (it was about 12.5 min before retries). Runs re-queued as lost while a slow one is still going
+  also count toward the 3 attempts, so the cap counts failures rather than strictly one-after-another attempts.
 - A slow but healthy pair check (up to 3 attempts × 5 min) can be re-queued while still running: duplicate work, no
   wrong result.
 - Known limits, not addressed here: pair results don't record the main they ran on, so after a landing an old pair

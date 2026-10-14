@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS forks(
   remote TEXT NOT NULL,
   land_requested_at INTEGER,
   landed_at INTEGER,
-  check_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown | pending | green | red
+  check_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown | pending | green | red | error (its check pipeline failed for good)
   check_sha TEXT,
   check_base TEXT,                   -- main commit the PR was merged onto for its check
   check_detail TEXT
@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS pair_queue(
   fork_a TEXT NOT NULL, fork_b TEXT NOT NULL, sha_a TEXT NOT NULL, sha_b TEXT NOT NULL,
   queued_at INTEGER NOT NULL,
   PRIMARY KEY(fork_a, fork_b));
+
+-- The latest check pipeline (push or re-check) started per fork, to restart stuck or failed ones (issue #2).
+CREATE TABLE IF NOT EXISTS check_runs(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, started_at INTEGER NOT NULL, restarts INTEGER NOT NULL);
 
 -- When each fork's current head was first seen (to tell "being indexed" from "stuck").
 CREATE TABLE IF NOT EXISTS head_seen(fork TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);

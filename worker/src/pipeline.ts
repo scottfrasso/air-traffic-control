@@ -50,25 +50,36 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
       );
       return Object.fromEntries(list.map((o, i) => [o.name, statuses[i]]));
     };
-    if (kind === "recheck") {
-      await onMain();
-      return { fork, sha, kind };
+    if (kind === "pairs") return { fork, sha, kind, merges: await pairs(others) }; // each pair records its own failure
+
+    const check = async () => {
+      if (kind === "recheck") {
+        await onMain();
+        return { fork, sha, kind };
+      }
+      const index = await step.do("index fork vs base", { retries: { limit: 3, delay: "2 seconds", backoff: "exponential" } }, () =>
+        indexFork(this.env, baseline, fork, sha),
+      );
+
+      await step.do("apply index", () => coordinator.applyIndex(index));
+
+      // Milestone 4: speculative merge + typecheck against every other active fork, in the Sandbox.
+      const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
+      if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
+      const mainCheck = onMain();
+      mainCheck.catch(() => undefined); // awaited below; don't let an early failure count as unhandled
+      const results = await pairs(plan.others);
+      await mainCheck;
+      return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
+    };
+    try {
+      return await check();
+    } catch (err) {
+      // Out of step retries (cold start, "checker produced no result"): say so, so the PR isn't pending forever (issue #2).
+      const error = (err as Error).message;
+      await step.do("record pipeline failure", () => coordinator.applyPipelineFailure(fork, sha, error));
+      return { fork, sha, kind, failed: error.slice(0, 300) };
     }
-    if (kind === "pairs") return { fork, sha, kind, merges: await pairs(others) };
-
-    const index = await step.do("index fork vs base", { retries: { limit: 3, delay: "2 seconds", backoff: "exponential" } }, () =>
-      indexFork(this.env, baseline, fork, sha),
-    );
-
-    await step.do("apply index", () => coordinator.applyIndex(index));
-
-    // Milestone 4: speculative merge + typecheck against every other active fork, in the Sandbox.
-    const plan = await step.do("plan speculative merges", () => coordinator.checkPlan(fork, sha));
-    if (!plan.current) return { fork, sha, skipped: "superseded by a newer push" };
-    const mainCheck = onMain();
-    const results = await pairs(plan.others);
-    await mainCheck;
-    return { fork, sha, files: index.files.length, diffLines: index.diffLines, merges: results };
   }
 }
 

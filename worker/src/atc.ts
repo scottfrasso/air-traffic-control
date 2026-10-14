@@ -1,4 +1,4 @@
-import { isGreen, landingOrder } from "./landing";
+import { checkErrored, isGreen, landingOrder } from "./landing";
 import type { ForkRow } from "./types";
 
 /**
@@ -59,6 +59,10 @@ export function buildSequence(
     }
     if (goAround.has(f.name)) {
       entry("go_around", goAround.get(f.name)!);
+      continue;
+    }
+    if (checkErrored(f)) {
+      entry("checking", `ATC couldn't run the checks (${f.check_detail ? firstLine(f.check_detail) : "unknown error"}). ATC tries again by itself a few times, or push again.`);
       continue;
     }
     if (f.processed_sha !== f.head_sha || f.check_sha !== f.head_sha) {

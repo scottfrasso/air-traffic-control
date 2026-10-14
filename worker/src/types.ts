@@ -18,7 +18,7 @@ export type ForkRow = {
   remote: string;
   land_requested_at: number | null;
   landed_at: number | null;
-  check_status: "unknown" | "pending" | "green" | "red";
+  check_status: "unknown" | "pending" | "green" | "red" | "error";
   check_sha: string | null;
   check_base: string | null;
   check_detail: string | null;

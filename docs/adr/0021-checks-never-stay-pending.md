@@ -1,0 +1,36 @@
+# ADR-0021: A PR's checks never stay pending: re-check on any main move, record failures, restart stuck runs
+
+- Status: Accepted. Tightens ADR-0006 (reconcile), ADR-0015 (merge-queue landing) and ADR-0018.
+- Date: 2026-10-14. Fixes issue #2.
+
+## Context
+A PR could sit in `check_status = pending` forever, with every `request_land` answering "retry":
+- Main moved outside a landing ATC made (or ATC learned of it late, in `requestLand`). Only `baseline_head` was updated,
+  so a single check already in flight finished on the old main, was dropped as stale, and nothing re-checked the PR.
+- `requestLand` returned "checks still running" for any `pending` PR before it reached the "main moved: re-check" step.
+- A Workflow that ran out of step retries reported nothing, and `startPipeline` logged every `create()` error as a duplicate.
+
+## Decision
+- **Any main move re-checks.** `baselineMoved` (from the baseline's push event, reconcile, or `requestLand` seeing a
+  newer head) records the head and re-checks every open PR not already checked on it (`forksToRecheck`), including a
+  PR whose push is still being indexed (its own check may have read the old main).
+- **Gate order** (`landGate`): an errored check first, then "push not processed", then "checked on an old main → start a
+  re-check" (even if pending; a duplicate start is a no-op), then "pending → retry".
+- **Failures are recorded.** `PushPipeline` catches a push/re-check that fails for good and calls
+  `applyPipelineFailure`: `check_status = 'error'` with the reason, a `check_failed` signal, and STANDBY with
+  "ATC couldn't run the checks (…)" in the sequence. `request_land` answers retry while ATC still retries, then
+  `land_blocked` ("push again to retry"). Pair checks keep their own failure path (ADR-0018).
+- **Stuck runs restart.** Table `check_runs(fork, sha, started_at, restarts)` records the latest push/re-check started.
+  The reconcile alarm (`stuckCheck`) restarts a check that errored (after 30 s) or has had no result for 5 min
+  (`CHECK_STUCK_MS`): the full push pipeline if the push was never indexed, else a re-check. Each restart is a new
+  instance id (`-r<n>`). After `CHECK_MAX_RESTARTS` (3) per head ATC gives up and marks it `error`; a new push resets it.
+- **Duplicates vs failures.** Only Workflows' "instance already exists" (code 10405) is logged `pipeline.duplicate`;
+  anything else is `pipeline.start_failed`. A failed start still records `check_runs`, so the alarm tries again.
+
+## Consequences
+- A PR is never pending for more than about 5 min per attempt without ATC doing something visible about it.
+- Restarts can overlap a slow but healthy run: duplicate work, and the first result to arrive wins (`setCheck` only
+  accepts results for the current head; `applySingle` drops ones for an old main).
+- `check_runs.restarts` is per head, not per main: a PR that used up its restarts stays `error` across main moves
+  until it is pushed again.
+- The alarm still pauses after 10 min without activity; a restart or a recorded failure counts as activity.
