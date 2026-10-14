@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r --filter=!shop-core typecheck",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test",
+    "setup:cloudflare": "pnpm --dir demo exec tsx src/setup.ts"
   },
   "packageManager": "pnpm@10.13.1"
 }

@@ -75,17 +75,13 @@ Run the full demo against your own Cloudflare account:
 Prerequisites
 - A Cloudflare account on Workers Paid (Artifacts open beta, Containers, Workflows, Queues)
 - Node 24 (local scripts only need Node 22+), pnpm 10, git, Docker (to build the checker container image)
-- An API token with Artifacts Edit and Queues Edit
+- An API token with Workers, Queues, Artifacts and Containers edit
 
 Setup
 1. git clone https://github.com/scottfrasso/air-traffic-control && cd air-traffic-control && pnpm install
-2. In worker/wrangler.jsonc set CF_ACCOUNT_ID, and after step 3 set PUSH_QUEUE_ID.
-3. cd worker && pnpm exec wrangler queues create agentmesh-push-events
-4. Create the Artifacts namespace "agentmesh" (one REST call, shown in README "Deploy your own").
-5. pnpm exec wrangler secret put AGENTMESH_API_KEY (any random string; it protects /api, /mcp and the dashboard)
-6. pnpm exec wrangler secret put CF_API_TOKEN (Queues Edit; used to create per-fork push subscriptions)
-7. pnpm exec wrangler deploy
-8. Back at the repo root, create .env with CLOUDFLARE_API_TOKEN=... and AGENTMESH_API_KEY=... (same value as step 5). Also set CLOUDFLARE_ACCOUNT_ID, and AGENTMESH_URL to your Worker URL.
+2. Create .env at the repo root with CLOUDFLARE_API_TOKEN=... (and CLOUDFLARE_ACCOUNT_ID=... if the token sees several accounts)
+3. pnpm setup:cloudflare
+It is idempotent. It creates the queues and the Artifacts namespace if they are missing, points worker/wrangler.jsonc at your account, generates AGENTMESH_API_KEY into .env, deploys the Worker with its secrets, and writes AGENTMESH_URL into .env. Every resource is named agentmesh*. Add --dry-run to see what it would do.
 
 Start it
 ./demo/run.sh
@@ -94,9 +90,9 @@ This runs the acceptance test end to end in about a minute against real Artifact
 
 Real coding agents
 pnpm --dir demo exec tsx src/live.ts 4
-This creates a fresh repo and prints 4 agent prompts plus the "claude mcp add" command. Paste each prompt into its own Claude Code session. Details: handover/02-run-real-claude-code-agents.md
+This creates a fresh repo and prints 4 agent prompts plus the "claude mcp add" command. Paste each prompt into its own Claude Code session. The agents follow agents/PROTOCOL.md.
 
-Tests: cd worker && pnpm test
+Tests: pnpm test (also: ./demo/run.sh --review runs the optional review gate)
 Clean up: pnpm --dir demo exec tsx src/teardown.ts
 <!-- instructions:end -->
 

@@ -133,15 +133,18 @@ Status, including what's stubbed and cut, is in [`PROGRESS.md`](PROGRESS.md).
 
 ## Deploy your own
 
+Needs a Workers Paid account, Docker (for the checker image) and an API token with Workers, Queues, Artifacts and
+Containers edit. Put `CLOUDFLARE_API_TOKEN=...` in `.env` at the repo root, then:
+
 ```bash
-cd worker
-pnpm exec wrangler queues create agentmesh-push-events
-curl -X POST .../accounts/$ACCOUNT_ID/artifacts/namespaces -d '{"namespace":"agentmesh"}'   # see DECISIONS.md
-pnpm exec wrangler secret put AGENTMESH_API_KEY     # shared bearer key for /api, /mcp, dashboard
-pnpm exec wrangler secret put CF_API_TOKEN          # Queues:Edit only, used to create per-fork push subscriptions
-pnpm exec wrangler deploy                           # needs Docker for the checker image; Workers Paid plan
+pnpm install
+pnpm setup:cloudflare --dry-run   # what it would create or change
+pnpm setup:cloudflare             # queues + Artifacts namespace if missing, wrangler.jsonc IDs, secrets, deploy
+./demo/run.sh
 ```
 
-Update `CF_ACCOUNT_ID` and `PUSH_QUEUE_ID` in `wrangler.jsonc` first.
+`setup:cloudflare` is idempotent and only touches resources named `agentmesh*`. It generates `AGENTMESH_API_KEY` into
+`.env` if you don't have one (paste it into the dashboard once) and writes `AGENTMESH_URL`, so `./demo/run.sh` targets
+your deployment.
 
 MIT licensed.
