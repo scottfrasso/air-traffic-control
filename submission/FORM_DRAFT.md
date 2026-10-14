@@ -18,31 +18,33 @@ ATC: Air Traffic Control for coding agents
 ## Project vision (2000)
 
 <!-- vision:start -->
-We rethought the merge. Today a conflict between two pieces of work shows up at merge time, after both are finished. With many agents on one repo, that means hours of work that can't all land, and every agent rebasing whenever main moves.
+Many coding agents on one repo break the way we merge. A conflict shows up only at merge time, after both pieces of work are done, and the usual fix, rebasing everyone whenever main moves, grows with every agent you add. The worst conflicts are invisible to git: two changes in different files that merge cleanly and each pass alone, but break together.
 
-ATC treats every agent's change as a plane in flight and runs the airspace. Each agent works in its own fork in Cloudflare Artifacts and just pushes with git. On every push ATC does three things:
+We rethought the merge as air traffic control. Each agent's change is a plane in flight; ATC runs the airspace. Agents work in their own Artifacts fork and just push with git. On every push ATC:
 
-1. It indexes what the change touches (files, exported symbols, signatures) and tells the agent who else is working nearby. Agents can also declare intent before they start.
+1. Indexes what the change touches (files, exported symbols, signatures) and tells the agent who else is working nearby.
 
-2. It speculatively merges the change with every other in-flight change and runs the type checker on the result. The hard case is two changes in different files that git merges cleanly and that each pass alone, but that break together. ATC finds it within seconds and tells both agents which symbol and which other change, before either one asks to land.
+2. Speculatively merges it with every other in-flight change and typechecks the result. A semantic conflict reaches both agents within seconds, naming the symbol and the other change, before either asks to land.
 
-3. It keeps one landing sequence. Every change gets one clearance with one reason: cleared, follow, hold, go around (rebase on the new main), or standby. The change closest to landing wins, and ties go to the smaller diff, which is cheaper to redo. ATC itself merges each change onto the current main and checks that exact commit. When something lands, only the changes that really conflict with it go around. Everyone else is re-checked automatically and lands with no rebase.
+3. Keeps one landing sequence. Every change gets one clearance with one reason: cleared, follow, hold, go around (rebase on the new main), or standby. ATC merges each landing onto the current main and checks that exact commit. When something lands, only changes that really conflict go around; the rest land with no rebase.
 
-Why it matters: rebases stop growing with the number of agents and grow only with real conflicts. Agents get context early, as signals rather than commands, through an MCP server, so a real Claude Code session can join with one command. And people get one screen, the runway, that shows what is in flight, what collides, and what lands next.
+4. Preserves the why. Each landed commit carries its flight log as a git note: the intent, the signals, every clearance and its reason, any go-around. git log explains why main looks the way it does, and the next agent reads it over MCP before it starts.
 
-It works today on deployed Cloudflare resources: a scripted five-agent run, and two real Claude Code agents with colliding tasks that both landed with no human help, with main green at the end.
+From a real run: 5 PRs, 10 pairs checked, 1 conflict found in 6 seconds, 1 rebase where rebasing on every landing needs 10. Rebases grow with real conflicts, not with the number of agents.
+
+It works today on deployed Cloudflare resources: a scripted five-agent run, and real Claude Code agents with colliding tasks that both landed with no human help, main green at the end. An agent joins with one MCP command, and people watch everything on one screen: the runway.
 <!-- vision:end -->
 
 ## How you used Cloudflare (2000)
 
 <!-- cloudflare:start -->
-Everything runs on Cloudflare: one Worker plus the services it binds.
+Everything runs on Cloudflare: one Worker and its bindings.
 
-Artifacts: all repo storage. One baseline repo per project and one fork per agent, created with the Workers binding (fork, createToken). Agents use plain git over HTTPS with repo-scoped tokens. The coordinator reads forks without cloning, using log, readTree and readBlob, to diff each fork against its true merge base.
+Artifacts: all repo storage. One baseline repo per project and one fork per agent, created with the Workers binding (fork, createToken). Agents use plain git over HTTPS with repo-scoped tokens. The coordinator reads forks without cloning (log, readTree, readBlob) to diff each fork against its true merge base. Each landed commit gets its flight log as a git note under refs/notes/atc.
 
 Artifacts event subscriptions + Queues: every fork has a "pushed" subscription that delivers to a queue. The Worker's queue consumer hands each push to the coordinator, so pushes drive everything. No polling, no webhooks to host.
 
-Workers: one Worker serves the HTTP API, the MCP endpoint, the dashboard and the queue consumer.
+Workers: one Worker serves the API, MCP endpoint, dashboard and queue consumer.
 
 Durable Objects (SQLite): one Coordinator per repo holds the in-flight index (touched files, symbol deltas, imports), intents, signals, pair-check results, the landing sequence and an event log. It pushes every change to dashboards over hibernatable WebSockets and records snapshots for replay.
 
@@ -50,7 +52,7 @@ Workflows: one durable, retried pipeline per push: index the fork, update signal
 
 Containers (Sandbox SDK model): a Checker Durable Object owns a container with node, git and tsc. It runs the speculative merge plus typecheck for each pair, and the landing merge onto current main. It caches results by git tree hash and keeps main's incremental TypeScript state, so a pair check is usually one tsc run.
 
-Agents SDK (MCP): a stateless MCP server with start_work, declare_intent, get_signals, get_clearance and request_land. A Claude Code session joins with one "claude mcp add" command.
+Agents SDK (MCP): a stateless MCP server with start_work, declare_intent, get_signals, get_clearance, request_land and get_history. A Claude Code session joins with one "claude mcp add" command.
 
 Why this fit: forks are cheap and programmatic in Artifacts, so a fork per agent costs nothing. Push events plus Workflows make every push a durable check. A Durable Object gives each repo one consistent place to decide the landing order, which is what keeps it fast and race-free.
 <!-- cloudflare:end -->
