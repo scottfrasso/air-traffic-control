@@ -7,6 +7,7 @@
  *   5. A requests landing and merges. B is told to rebase, fixes the call, and lands.
  *   6. Baseline typechecks at the end.
  * Then: every landed PR's flight log is a git note on main (refs/notes/atc), and the run's savings in numbers.
+ * --review: the review gate is on (issue #16). Each PR waits in REVIEW until a scripted reviewer approves its latest push.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -22,6 +23,8 @@ import { savingsLine } from "../../worker/src/savings.ts";
 
 type LandResponse = { landed: boolean; reason?: string; retry?: boolean; baselineHead?: string; rebaseRequired?: string[]; atc?: string };
 const withTraffic = !process.argv.includes("--no-traffic");
+const withReview = process.argv.includes("--review");
+const reviewed = new Map<string, string>(); // fork → the head the scripted reviewer approved
 
 const step = (n: number, title: string) => console.log(`\n\x1b[1m── ${n}. ${title}\x1b[0m`);
 let failed = false;
@@ -36,12 +39,28 @@ const work = mkdtempSync(join(tmpdir(), "agentmesh-demo-"));
 const baseline = await seed(`shop-${stamp}`);
 const mesh = new Agentmesh(baseline);
 say("system", `dashboard: ${config.workerUrl}/r/${baseline}`);
+if (withReview) {
+  await mesh.call("POST", "/settings", { review: true });
+  say("system", "review gate on: every PR waits in REVIEW until a reviewer approves its latest push");
+}
 
 const openSignals = async (fork: string) => mesh.call<Signal[]>("GET", `/signals?fork=${fork}`);
 const land = async (who: "A" | "B", fork: string): Promise<LandResponse> => {
   for (;;) {
     const res = await mesh.call<LandResponse>("POST", "/land", { fork });
     if (!res.retry) return res;
+    if (withReview && res.reason?.startsWith("Waiting for review")) {
+      // The scripted reviewer: the PR is shown as REVIEW until it approves this exact head.
+      const entry = ((await mesh.state()).sequence ?? []).find((e) => e.fork === fork);
+      const head = (await mesh.state()).forks.find((f) => f.name === fork)?.head_sha ?? "";
+      if (entry?.clearance === "review" && reviewed.get(fork) !== head) {
+        say("system", `${entry.pr} REVIEW: ${entry.reason}`);
+        await mesh.call("POST", "/reviews", { fork, sha: head, verdict: "approve", reviewer: "reviewer-bot", note: "Scripted review: read the diff; it typechecks on main." });
+        reviewed.set(fork, head);
+        say("system", `reviewer-bot approved ${entry.pr} at ${head.slice(0, 7)}`);
+        continue;
+      }
+    }
     say(who === "B" && !fork.endsWith(`--pr2`) ? "system" : who, `${fork.split("--").pop()?.toUpperCase()} land: ${res.reason}`);
     await sleep(3000);
   }
@@ -164,6 +183,10 @@ try {
     check(!!log && note.ok && note.out.includes("ATC-Clearance:") && note.out === log.note, `${log?.pr ?? f.name} has its flight log on ${log?.landedSha.slice(0, 7) ?? "?"}`);
   }
   const bNote = logs.find((l) => l.fork === b.fork)?.note ?? "";
+  if (withReview) {
+    check(landedForks.length > 0 && landedForks.every((f) => reviewed.has(f.name)), `every landed PR waited in REVIEW and was approved first (${reviewed.size} reviews)`);
+    check(logs.every((l) => /^ATC-Review: approved by reviewer-bot/m.test(l.note)), "each flight log records its approval");
+  }
   check(/^ATC-Signal: semantic_conflict with PR\d+ on applyDiscount$/m.test(bNote) && /^ATC-Go-Around: /m.test(bNote), `PR${b.pr}'s log records the conflict and the go-around`);
   say("system", `git log --notes=atc -1 ${logs.find((l) => l.fork === b.fork)?.landedSha.slice(0, 7) ?? ""}:\n${final.git(["log", "--notes=atc", "-1", "--format=%h %s%n%N", logs.find((l) => l.fork === b.fork)?.landedSha ?? "HEAD"]).out.split("\n").map((l) => `           ${l}`).join("\n")}`);
 

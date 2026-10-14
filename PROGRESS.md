@@ -54,6 +54,9 @@ Nothing.
 - **Tidy-up (#10, 2026-10-14):** storage is pruned in the reconcile alarm (never the public replay or the video's run), webhooks
   have a 5 s timeout and one retry, `check_main_conflict` replaces the parsed "on main:" prefix (existing DOs migrate in
   place), duplicates removed. ADR-0024. Splitting `coordinator.ts` comes separately.
+- **Review gate (#16, ADR-0023, 2026-10-14):** optional (off by default). PRs wait in REVIEW until a reviewer approves their
+  current head, through the MCP `review` tool, the dashboard's APPROVE button or `POST /reviews`; the note goes into the
+  flight log. `./demo/run.sh --review` runs it with a scripted reviewer.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
   landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.

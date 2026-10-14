@@ -54,6 +54,29 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   ],
   [
     "POST",
+    /^\/reviews$/,
+    async (stub, request) => {
+      const b = await body<{ fork?: unknown; verdict?: unknown; note?: unknown; reviewer?: unknown; sha?: unknown }>(request);
+      if (typeof b.fork !== "string" || !b.fork) throw new HttpError(400, "fork is required");
+      if (b.verdict !== "approve" && b.verdict !== "request_changes") throw new HttpError(400, 'verdict must be "approve" or "request_changes"');
+      if (typeof b.sha !== "string" || !b.sha) throw new HttpError(400, "sha (the head you reviewed) is required");
+      for (const k of ["note", "reviewer"] as const) if (b[k] !== undefined && typeof b[k] !== "string") throw new HttpError(400, `${k} must be a string`);
+      const r = await stub.review(b.fork, b.verdict, (b.note as string | undefined) ?? "", (b.reviewer as string | undefined) ?? "reviewer", b.sha);
+      return r.ok ? json(r) : json({ error: r.error }, r.status);
+    },
+  ],
+  [
+    "POST",
+    /^\/settings$/,
+    async (stub, request) => {
+      const b = await body<{ review?: boolean }>(request);
+      if (typeof b.review !== "boolean") throw new HttpError(400, "review (boolean) is required");
+      const r = await stub.setReviewRequired(b.review);
+      return r.error ? json({ error: r.error }, 409) : json(r);
+    },
+  ],
+  [
+    "POST",
     /^\/land$/,
     async (stub, request) => {
       const { fork } = await body<{ fork?: string }>(request);

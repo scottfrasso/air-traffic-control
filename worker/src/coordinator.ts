@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  afterLanding, approachQueue, checkRetriesLeft, LANDING_LOCK_MS, type OpenConflict, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  afterLanding, approachQueue, checkRetriesLeft, LANDING_LOCK_MS, type OpenConflict, forksToRecheck, reviewWaits, type ReviewRow, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -15,7 +15,7 @@ import { computeSavings, type LogEvent } from "./savings";
 import { COLUMNS, SCHEMA } from "./schema";
 import { deliver } from "./webhooks";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
-import type { CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
+import type { ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Storage bounds (prune): a 5-PR demo run writes about 600 events and 40 snapshots. */
@@ -263,6 +263,7 @@ export class Coordinator extends DurableObject<Env> {
     this.resolveSignals({ fork: repo, kind: "rebase_required" });
     this.resolveSignals({ fork: repo, kind: "land_blocked" });
     this.resolveSignals({ fork: repo, kind: "check_failed" });
+    this.resolveSignals({ fork: repo, kind: "review" }); // an earlier verdict was for older code
     this.resolveSignals({ about_fork: repo, kind: "check_failed" });
     await this.startPipeline(repo, sha);
   }
@@ -782,7 +783,7 @@ export class Coordinator extends DurableObject<Env> {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const forks = this.activeForks();
     const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
-    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp);
+    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp, this.reviewWaits());
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -793,6 +794,60 @@ export class Coordinator extends DurableObject<Env> {
     const e = this.sequence().find((x) => x.fork === fork);
     if (!e) return { fork, pr: prLabel(fork), position: null, clearance: row.status, message: `ATC: ${prLabel(fork)} is ${row.status}.` };
     return { fork, pr: e.pr, position: e.position, clearance: e.clearance, message: clearanceMessage(e) };
+  }
+
+  // ── review gate (issue #16, ADR-0023) ───────────────────────────────────
+
+  private reviewRequired() {
+    return this.meta("review_required") === "1";
+  }
+
+  /** Turn the review gate on or off for this baseline (off by default, so the demo is unchanged). */
+  async setReviewRequired(on: boolean): Promise<{ reviewRequired: boolean; error?: string }> {
+    // A landing in flight passed the gate as it was; switching now would let it land "unreviewed" under the new rule.
+    if (this.landingInProgress()) return { reviewRequired: this.reviewRequired(), error: "a landing is in progress; try again in a few seconds" };
+    this.setMeta("review_required", on ? "1" : "0");
+    this.log("review.gate", { on });
+    return { reviewRequired: on };
+  }
+
+  private reviewWaits(): Map<string, string> {
+    return reviewWaits(this.activeForks(), this.sql.exec<ReviewRow>("SELECT * FROM reviews").toArray(), this.reviewRequired());
+  }
+
+  /**
+   * A reviewer (an agent through MCP, or a person on the dashboard) approves or requests changes on a PR's CURRENT
+   * head. A later push needs a new review. The author is told through a signal; the note goes into the flight log.
+   */
+  async review(fork: string, verdict: "approve" | "request_changes", note: string, reviewer: string, sha: string): Promise<ReviewResult> {
+    // Refusals are returned, not thrown: an error's class doesn't survive the Durable Object RPC boundary.
+    const refuse = (status: number, error: string): ReviewResult => ({ ok: false, status, error: this.relabel(error) });
+    const row = this.fork(fork);
+    if (!row || row.status !== "active") return refuse(404, `unknown or inactive fork ${fork}`);
+    if (row.head_sha === row.base_sha) return refuse(409, `${prLabel(fork)} has no pushed changes to review`);
+    // The verdict is for the code the reviewer read: if the PR moved since, it must be reviewed again (review of #38).
+    if (!sha || !row.head_sha.startsWith(sha) || (sha.length < 7 && sha !== row.head_sha))
+      return refuse(409, `${prLabel(fork)} is at ${row.head_sha.slice(0, 7)}, not ${sha.slice(0, 7) || "(no sha)"}: review its current head`);
+    // A landing in flight already checked the approval; a verdict now would change nothing and mislead the log.
+    if (this.landingInProgress()) return refuse(409, "a landing is in progress; send the review again in a few seconds");
+    const who = reviewer.trim().slice(0, 60) || "reviewer";
+    const text = note.trim().slice(0, 500);
+    this.sql.exec(
+      `INSERT INTO reviews(fork, sha, verdict, reviewer, note, at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(fork) DO UPDATE SET sha = excluded.sha, verdict = excluded.verdict, reviewer = excluded.reviewer, note = excluded.note, at = excluded.at`,
+      fork, row.head_sha, verdict, who, text, Date.now(),
+    );
+    this.log(verdict === "approve" ? "review.approved" : "review.changes_requested", { sha: row.head_sha, reviewer: who, note: text }, fork);
+    this.resolveSignals({ fork, kind: "review" });
+    this.emitSignal({
+      fork, kind: "review", about_fork: null, symbol: null,
+      message: verdict === "approve"
+        ? `${who} approved ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."}`
+        : `${who} requested changes on ${prLabel(fork)} at ${row.head_sha.slice(0, 7)}${text ? `: ${text}` : "."}${this.reviewRequired() ? " Push a fix; it needs a new review." : ""}`,
+      data: { verdict, reviewer: who, note: text, sha: row.head_sha }, dedupe_key: `review:${fork}:${row.head_sha}:${verdict}:${Date.now()}`,
+    });
+    this.touch();
+    return { ok: true, fork, sha: row.head_sha, verdict, clearance: this.sequence().find((e) => e.fork === fork)?.clearance };
   }
 
   // ── landing gate (milestone 5) ─────────────────────────────────────────
@@ -839,9 +894,12 @@ export class Coordinator extends DurableObject<Env> {
       return { landed: false, fork, reason, baselineHead, atc: entry ? clearanceMessage(entry) : undefined };
     };
 
+    const waits = this.reviewWaits();
     const gate = landGate({
-      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork), rivals: this.rivals(fork),
+      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork),
+      rivals: this.rivals(fork).filter((r) => !waits.has(r.name)), // a rival waiting for review can't land, so it isn't ahead
       checkRetriesLeft: checkRetriesLeft(me, this.sql.exec<CheckRun>("SELECT * FROM check_runs WHERE fork = ?", fork).toArray()[0]),
+      awaitingReview: waits.get(fork),
     });
     if (gate.kind === "deny") return deny(gate.reason, gate.signal);
     if (gate.kind === "retry") {
@@ -1010,6 +1068,9 @@ export class Coordinator extends DurableObject<Env> {
       clearances: clearanceHistory(snapshots, f.name),
       onto,
       landed,
+      review: this.reviewRequired()
+        ? this.sql.exec<{ verdict: string; reviewer: string; note: string }>("SELECT verdict, reviewer, note FROM reviews WHERE fork = ? AND sha = ?", f.name, f.head_sha).toArray()[0]
+        : undefined,
     });
   }
 
@@ -1179,6 +1240,7 @@ export class Coordinator extends DurableObject<Env> {
       })),
       overlaps: this.overlaps(),
       approach: approachQueue(this.activeForks(), this.meta("baseline_head") ?? ""),
+      reviewRequired: this.reviewRequired(),
       sequence: this.sequence(),
       signals: this.sql
         .exec<SignalRow & { data: string }>("SELECT * FROM signals ORDER BY id DESC LIMIT 100")

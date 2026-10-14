@@ -61,6 +61,8 @@ export interface CoordinatorState {
   overlaps: Overlap[];
   /** Active forks in landing order: index 0 is next to land. */
   approach: string[];
+  /** Review gate on (issue #16): PRs need an approval at their head before they're cleared. */
+  reviewRequired: boolean;
   /** ATC landing sequence with one clearance + reason per PR. */
   sequence: import("./atc").SequenceEntry[];
   signals: SignalRow[];
@@ -95,6 +97,11 @@ export type SignalRow = {
   created_at: number;
   resolved_at: number | null;
 };
+
+/** What review() answers: recorded, or refused with an HTTP status and why. */
+export type ReviewResult =
+  | { ok: true; fork: string; sha: string; verdict: string; clearance?: string }
+  | { ok: false; status: number; error: string };
 
 export type LandResponse = {
   landed: boolean;

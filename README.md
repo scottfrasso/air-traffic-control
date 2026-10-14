@@ -95,7 +95,7 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
 | **Durable Objects (SQLite)** | `Coordinator`, one per baseline, holds the in-flight index, intents, signals, pair-check results, landing state and event log. The `Checker` DO owns the container. |
 | **Containers / Sandbox** | `Checker` follows the Sandbox SDK 1.0 model (`ctx.container`). It clones forks, runs `git merge`, `tsc --noEmit`, and fast-forward landing pushes. |
 | **Workflows** | `PushPipeline` runs one durable, retried pipeline per push: index → signals → speculative merges. |
-| **Agents SDK (MCP)** | `/mcp` is a stateless MCP server (`createMcpHandler`) with tools `start_work`, `declare_intent`, `get_signals`, `get_clearance`, `request_land`, `get_history`. |
+| **Agents SDK (MCP)** | `/mcp` is a stateless MCP server (`createMcpHandler`) with tools `start_work`, `declare_intent`, `get_signals`, `get_clearance`, `request_land`, `get_history`, and `review` (for the optional review gate). |
 | **Durable Object WebSockets** | The Coordinator pushes every state change to dashboards over hibernatable WebSockets. It records snapshots for replay and sends HMAC-signed outbound webhooks. |
 
 ### The rules
@@ -112,6 +112,9 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
   `get_clearance`. The dashboard flies the planes in exactly this order.
 - **Checks reuse work** (ADR-0013): main is computed once per baseline head (incremental TypeScript state). Results are cached
   by git tree hash, so a fork's own check is reused by every pair it's in, and each pair usually costs a single `tsc` on the merge.
+- **Optional review gate** (ADR-0023, off by default): PRs wait in `REVIEW` until a reviewer approves their latest push,
+  either a reviewer agent through the MCP `review` tool or a person with the APPROVE button on the runway. The note goes
+  into the flight log. Try it with `./demo/run.sh --review`.
 - **Flight log on main** (ADR-0019): when ATC lands a PR it attaches the PR's story (intent, signals, clearances and why
   it went around) to the landed commit as a git note. `git fetch <baseline> refs/notes/atc:refs/notes/atc && git log --notes=atc`
   shows why main looks the way it does; agents ask with `get_history`; on the dashboard, click a parked plane.
