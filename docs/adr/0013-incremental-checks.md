@@ -23,6 +23,29 @@ A pair check ran `tsc` three times from a fresh clone (A alone, B alone, merge).
   so most of the remaining time is file reading and parsing.
 - Deployed 5-PR demo: 60 typecheck requests, 22 cache hits, average tsc 243 ms on `standard-3`. Main state was built 8 times.
 
+## Concurrency and cache safety (issue #8, 2026-10-14)
+- Concurrent checks in one container are separate processes sharing `/cache/repo`. Git fails (it doesn't wait) on
+  `index.lock` and ref locks, so one lock directory (`/cache/git.lock`, `mkdir` is atomic) serialises every git command
+  that writes refs or worktree metadata (`init`, `fetch`, `update-ref`, `worktree`, `notes`), and each fetch is held
+  together with the `rev-parse` of its ref. Typechecks and merges in their own worktrees still run in parallel.
+  `gc.auto=0`. The lock protocol (tightened after review of #34):
+  - **Acquire by rename:** a process builds `git.lock.<pid>/pid`, then renames it to `git.lock`. The lock never exists
+    without an owner, and renaming onto a held (non-empty) lock fails atomically.
+  - **Break once:** a lock whose owner pid is dead (the hard timeout kills the process group), or older than 5 min, or
+    an ownerless dir older than 10 s, is broken only under a `git.lock.break` guard, after re-reading that it's still
+    the same owner. Two waiters can't both break it and remove each other's live lock.
+  - **Release only your own** (the pid file must match), and remove by rename-then-delete.
+  - **Fetches are bounded** (60 s, and the low-speed limit), so a stalled remote can't hold the lock until the hard timeout.
+- Cache files (`tc/*.json`, `tsbuild/*.tsbuildinfo`) are written to `<file>.tmp.<pid>` and renamed into place.
+- Only real tsc outcomes are cached: a pass, or exit 1/2 with tsc diagnostics. A crash, a kill or a missing `tsc` is
+  the environment; caching it by tree hash would make a transient failure permanent.
+  A missing module (TS2307) is a tsc diagnostic and is cached. That is deliberate: the container never installs
+  packages, so for a given tree the result is stable, not transient.
+- `worker/test/container.test.ts` runs `check.ts` locally (Node + git + tsc, `ATC_CACHE`/`ATC_WORK` point at temp
+  dirs): four pair checks in parallel on one cache, a missing-`tsc` run that isn't cached, six checks contending for a
+  lock left by a dead pid, and an old ownerless lock dir. Without the lock the
+  parallel test fails reliably on concurrent `git init`; the fetch/worktree races didn't reproduce locally at 4-way.
+
 ## Consequences / next
 - The cache is per container. The 3-container pool (ADR-0010 follow-up) splits it. Routing by fork, or passing ATC's known
   alone results into pair checks, would raise the hit rate.
