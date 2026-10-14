@@ -56,7 +56,7 @@ export class Coordinator extends DurableObject<Env> {
     if (this.meta("baseline") === baseline) return;
     this.setMeta("baseline", baseline);
     const head = await headOf(this.env, baseline);
-    if (head) this.setMeta("baseline_head", head.hash);
+    if (head) this.setMainHead(head.hash);
     this.log("baseline.registered", { baseline, head: head?.hash ?? null });
   }
 
@@ -262,9 +262,22 @@ export class Coordinator extends DurableObject<Env> {
    */
   private async baselineMoved(sha: string, source: PushSource) {
     if (this.meta("baseline_head") === sha) return;
-    this.setMeta("baseline_head", sha);
+    // Main only moves forward. A head ATC already had is a stale read (an Artifacts head fetched just before a landing
+    // and returned after it): taking it would re-check every PR on the old main for nothing, and their re-checks on the
+    // real head would then be duplicate no-ops, leaving them pending (third review of #30).
+    if (this.sql.exec("SELECT 1 FROM main_heads WHERE sha = ?", sha).toArray().length) {
+      this.log("baseline.stale_head", { sha, head: this.meta("baseline_head"), source });
+      return;
+    }
+    this.setMainHead(sha);
     this.log("baseline.pushed", { sha, source });
     await this.recheckAll(new Set());
+  }
+
+  /** The only writer of baseline_head (with the history that keeps it monotone). */
+  private setMainHead(sha: string) {
+    this.setMeta("baseline_head", sha);
+    this.sql.exec("INSERT OR IGNORE INTO main_heads(sha, at) VALUES (?, ?)", sha, Date.now());
   }
 
   /**
@@ -844,7 +857,7 @@ export class Coordinator extends DurableObject<Env> {
    */
   private async onLanded(winner: ForkRow, newHead: string, previousHead: string, merged: boolean, note: string): Promise<LandResponse> {
     const now = Date.now();
-    this.setMeta("baseline_head", newHead);
+    this.setMainHead(newHead);
     this.sql.exec("UPDATE forks SET status = 'landed', landed_at = ? WHERE name = ?", now, winner.name);
     this.sql.exec(
       "INSERT OR REPLACE INTO flight_logs(fork, landed_sha, landed_at, note, noted, note_error) VALUES (?, ?, ?, ?, 0, NULL)",
@@ -1054,8 +1067,16 @@ export class Coordinator extends DurableObject<Env> {
     if (await this.reconcile()) this.touch();
     const idle = Date.now() - Number(this.meta("last_activity") ?? 0);
     // Notes are retried after the last landing too; once idle, any API call (ensure → scheduleReconcile) re-arms it.
-    if ((this.activeForks().length > 0 || this.notesPending()) && idle < RECONCILE_IDLE_MS) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    // Checks that ATC may still restart keep it running even when idle, or a hung run would wait for the next API call.
+    const waiting = this.checksAwaitingRestart();
+    if ((this.activeForks().length > 0 || this.notesPending()) && (idle < RECONCILE_IDLE_MS || waiting)) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     else this.log("reconcile.paused", { idleMs: idle });
+  }
+
+  /** Any active PR whose checks are pending or errored and that restartStuckChecks may still start again. */
+  private checksAwaitingRestart(): boolean {
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    return this.activeForks().some((f) => f.head_sha !== f.base_sha && (f.check_status === "pending" || f.check_status === "error") && checkRetriesLeft(f, runs.get(f.name)));
   }
 
   // ── teardown ────────────────────────────────────────────────────────────

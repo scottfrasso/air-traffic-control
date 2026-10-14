@@ -15,7 +15,9 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
   newer head) records the head and re-checks every open PR not already checked on it (`forksToRecheck`), including a
   PR whose push is still being indexed (its own check may have read the old main).
 - **Who moves `baseline_head`** (issue #4): only `baselineMoved` (a push to main, reconcile, a land request) and
-  `onLanded`. `applyIndex` never writes it: an index computed before a landing and applied after would move it
+  `onLanded`, both through `setMainHead`, which records every head in `main_heads`. Main only moves forward:
+  `baselineMoved` ignores a head ATC already had (`baseline.stale_head`), since that is a stale Artifacts read
+  answered after a landing. A force-push of main back to an earlier commit would also be ignored; it isn't supported. `applyIndex` never writes it: an index computed before a landing and applied after would move it
   backwards. An index clears a PR's go-around only if its base is the **current** main, not the main it saw.
 - **Gate order** (`landGate`): an errored check first, then "push not processed", then "checked on an old main → start a
   re-check" (even if pending; a duplicate start is a no-op), then "pending → retry".
@@ -51,4 +53,5 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
   until it is pushed again.
 - Instance ids stay under Workflows' 100-character limit with the suffix intact: the longest fork name is
   63 (baseline) + `--pr` + digits, so `<fork>-<sha12>-m<main10>-r<n>` is at most about 98.
-- The alarm still pauses after 10 min without activity; a restart or a recorded failure counts as activity.
+- The alarm pauses after 10 min without activity, except while a PR's checks are pending or errored and may still be
+  restarted (`checksAwaitingRestart`); that is bounded by the restart cap.

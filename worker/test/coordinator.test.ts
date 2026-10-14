@@ -51,16 +51,19 @@ test("a push to main from outside ATC re-checks every open PR on it (issue #2)",
   assert.deepEqual([a.fork("a")!.check_status, a.fork("b")!.check_status], ["pending", "pending"]);
 });
 
-test("a duplicate Workflow start is logged as a duplicate, not as a failure", async () => {
+test("a stale read of an older main is ignored: baseline_head only moves forward (third review of #30)", async () => {
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
   await a.co.onPush("a", "a1", "event");
   await a.co.onPush("base-repo", "main1", "event");
   await a.co.onPush("base-repo", "main2", "event");
-  await a.co.onPush("base-repo", "main1", "event"); // back to main1: the same re-check id as before
-  assert.equal(a.events("pipeline.duplicate").length, 1);
-  assert.equal(a.events("pipeline.start_failed").length, 0);
+  const before = a.pipelines.length;
+  await a.co.onPush("base-repo", "main1", "reconcile"); // an Artifacts read from before the last landing, answered late
+  assert.equal(a.meta("baseline_head"), "main2");
+  assert.equal(a.pipelines.length, before); // nobody re-checked on the old main
+  assert.equal(a.events("baseline.stale_head").length, 1);
+  assert.notEqual(a.fork("a")!.check_status, "error");
 });
 
 // ── issue #2 wiring (review of #30) ──
@@ -149,6 +152,7 @@ test("polling request_land doesn't reset a hung re-check's start time, so the al
   a.q("UPDATE check_runs SET started_at = 0");
   for (let i = 0; i < 3; i++) await a.co.requestLand("a"); // each asks for the same re-check: a duplicate start
   assert.ok(a.events("pipeline.duplicate").length >= 3);
+  assert.equal(a.events("pipeline.start_failed").length, 0); // duplicates aren't failures
   assert.equal(a.q<{ started_at: number }>("SELECT started_at FROM check_runs WHERE fork = 'a'")[0]!.started_at, 0);
   const before = a.pipelines.length;
   await a.co.reconcile();
@@ -167,4 +171,17 @@ test("giving up on a push that was never indexed marks it error once, even if a 
   assert.equal(a.fork("a")!.check_status, "error");
   assert.equal(a.events("check.gave_up").length, 1);
   assert.match((await a.co.getClearance("a")).message, /Push again to retry\./);
+});
+
+test("the alarm keeps running while a PR's checks may still be restarted, even with no API activity (third review of #30)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "a"); // pending
+  a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'"); // idle for ages
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 0);
+  a.q("UPDATE forks SET check_status = 'green', check_base = 'main0'"); // settled: now it may pause
+  a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'");
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 1);
 });
