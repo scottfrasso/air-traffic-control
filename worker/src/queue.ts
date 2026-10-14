@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 /** The part of a Queues message the consumer uses. */
 export type QueueMessage<T> = { id: string; body: T; attempts: number; ack(): void; retry(options?: { delaySeconds?: number }): void };
 
-/** Back-off for a failed message: 5, 10, 20 s, then 40 s on the last delivery, and then the DLQ (max_retries: 3). */
+/** Back-off for a failed message: 5, 10, 20 s between its 4 deliveries (max_retries: 3), then the DLQ. */
 export const retryDelaySeconds = (attempts: number) => Math.min(60, 5 * 2 ** Math.max(0, attempts - 1));
 
 /**

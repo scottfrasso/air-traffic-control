@@ -362,3 +362,40 @@ test("landing: the Coordinator pins the main it checked; if main moved, the chec
   assert.deepEqual([res.landed, res.retry], [false, true]);
   assert.equal(a.fork(PA)!.status, "active");
 });
+
+// ── check_main_conflict (review of #40) ──
+
+test("a PR that fits alone but not on main is flagged by the column: it goes around and land is refused with rebase_required", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "base-repo--pr1");
+  await a.co.applySingle(JSON.stringify({ repo: "base-repo--pr1", forkSha: "base-repo--pr11", baseHead: "main0", mainConflict: true, result: { ok: false, errors: [], output: "src/a.ts(1,1): error TS2345: boom" } }));
+  const f = a.fork("base-repo--pr1")!;
+  assert.equal(f.check_main_conflict, 1);
+  assert.doesNotMatch(String(f.check_detail), /^on main:/); // the flag, not a prefix
+  assert.equal((await a.co.getClearance("base-repo--pr1")).clearance, "go_around");
+  const res = await a.co.requestLand("base-repo--pr1");
+  assert.match(res.reason ?? "", /doesn't fit on current main/);
+  assert.equal(a.q("SELECT * FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL").length, 1);
+});
+
+test("an existing Durable Object without the column gets it added (idempotent) and old prefixed rows still read", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE forks(name TEXT PRIMARY KEY, check_detail TEXT)"); // as before the column existed
+  const cols = () => (db.prepare("SELECT name FROM pragma_table_info('forks')").all() as Array<{ name: string }>).map((r) => r.name);
+  const { COLUMNS } = await import("../src/schema");
+  for (let i = 0; i < 2; i++) for (const c of COLUMNS) if (!cols().includes(c.column)) db.exec(c.ddl);
+  assert.ok(cols().includes("check_main_conflict"));
+  const { mainConflict } = await import("../src/landing");
+  assert.equal(mainConflict({ check_detail: "on main: x" } as never), true);
+});
+
+test("deferred main reads during one landing are logged once (review of #40)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a");
+  a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now() }));
+  for (let i = 0; i < 3; i++) await a.co.reconcile();
+  assert.equal(a.events("baseline.read_deferred").length, 1);
+});

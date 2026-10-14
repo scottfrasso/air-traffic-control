@@ -198,7 +198,7 @@ export class Coordinator extends DurableObject<Env> {
        ON CONFLICT(name) DO UPDATE SET agent = excluded.agent, status = 'active', created_at = excluded.created_at,
          base_sha = excluded.base_sha, head_sha = excluded.head_sha, processed_sha = excluded.processed_sha,
          subscription_id = excluded.subscription_id, remote = excluded.remote, diff_lines = 0,
-         land_requested_at = NULL, check_status = 'unknown', check_sha = NULL, check_detail = NULL`,
+         land_requested_at = NULL, check_status = 'unknown', check_sha = NULL, check_detail = NULL, check_main_conflict = 0`,
       name, agent, pr, now, baseHead.hash, baseHead.hash, baseHead.hash, null, forked.remote, // subscription: attachSubscription (ADR-0009)
     );
     this.log("fork.created", { agent, pr, baseSha: baseHead.hash }, name);
@@ -291,7 +291,12 @@ export class Coordinator extends DurableObject<Env> {
     // A landing in progress may already have pushed main; onLanded records that head itself. Reading now would take
     // ATC's own landing for an outside push and re-check everyone, go-arounds included (review of #31).
     if (this.landingInProgress()) {
-      this.log("baseline.read_deferred", { source }); // onLanded records the head; the next read after it confirms
+      // onLanded records the head; the next read after it confirms. Logged once per landing, not every 5 s (review of #40).
+      const lock = this.meta("landing") ?? "";
+      if (this.meta("read_deferred_for") !== lock) {
+        this.setMeta("read_deferred_for", lock);
+        this.log("baseline.read_deferred", { source });
+      }
       return;
     }
     const epoch = this.meta("main_epoch");
@@ -381,7 +386,7 @@ export class Coordinator extends DurableObject<Env> {
     const row = this.fork(fork)!;
     // A result stands, unless the push itself was never indexed: a re-check alone can't finish that PR's checks.
     if (row.processed_sha === sha && row.check_sha === sha && (row.check_status === "green" || row.check_status === "red")) return false;
-    this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ? WHERE name = ?", sha, error.slice(0, 500), fork);
+    this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ?, check_main_conflict = 0 WHERE name = ?", sha, error.slice(0, 500), fork);
     this.emitSignal({
       fork, kind: "check_failed", about_fork: null, symbol: null,
       message: `ATC couldn't run the checks on your push ${sha.slice(0, 7)} (${error.slice(0, 120)}). It retries by itself; you can also push again.`,
