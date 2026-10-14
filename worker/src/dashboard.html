@@ -465,6 +465,7 @@
     // Allow-listed recorded runs are public (issue #14): try without a key, ask for one only if refused.
     const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/timeline`, key ? { headers: { authorization: `Bearer ${key}` } } : {});
     if (res.status === 401) { const msg = key ? "KEY REJECTED. PASTE AGENTMESH_API_KEY." : "ATC ACCESS KEY"; key = ""; return askForKey(msg); }
+    if (!res.ok) { setLive(false, "REPLAY UNAVAILABLE"); return; }
     const tl = await res.json();
     if (!tl.snapshots.length) { setLive(false, "NOTHING RECORDED"); return; }
     const GAP = 2500; // compress idle stretches so the video keeps moving

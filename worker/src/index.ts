@@ -19,8 +19,18 @@ export default {
     // Key-less read-only replay of allow-listed recorded runs (issue #14).
     const publicBaseline = publicReplayBaseline(request.method, url.pathname, env.PUBLIC_REPLAY_BASELINES);
     if (publicBaseline) {
-      const stub = env.COORDINATOR.getByName(publicBaseline);
-      return new Response(await stub.timelineJson(), { headers: { "content-type": "application/json", "cache-control": "public, max-age=60" } });
+      // Edge-cached for a minute so anonymous traffic doesn't wake the Coordinator on every request.
+      const cacheKey = new Request(url.origin + url.pathname, { method: "GET" });
+      const cached = await caches.default.match(cacheKey);
+      if (cached) return cached;
+      try {
+        const body = await env.COORDINATOR.getByName(publicBaseline).timelineJson();
+        const res = new Response(body, { headers: { "content-type": "application/json", "cache-control": "public, max-age=60" } });
+        ctx.waitUntil(caches.default.put(cacheKey, res.clone()));
+        return res;
+      } catch {
+        return Response.json({ error: "replay unavailable" }, { status: 503 });
+      }
     }
     if (!isAuthorized(request, env)) return unauthorized();
     if (url.pathname.startsWith("/api/repos/")) return handleApi(request, env, url);

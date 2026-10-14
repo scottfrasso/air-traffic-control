@@ -14,15 +14,20 @@ Cloudflare account. The dashboard shell at `/r/<baseline>` was already public, b
   matches that exact path only: no other method or route, and not `/state` or `/live`, so no WebSocket.
 - The response is the recorded timeline (ADR-0014): compact snapshots, the event log and flight logs. None of these
   hold tokens or remotes; fork and baseline tokens are returned only by `POST /forks` and never stored in snapshots.
-  It's cached for 60 s (`cache-control: public, max-age=60`).
+  It's cached for 60 s in the edge cache (`caches.default`) and the browser, so anonymous traffic rarely reaches the
+  Durable Object. If the Coordinator throws, the route returns 503 and the dashboard shows "REPLAY UNAVAILABLE".
 - The public route reads the Coordinator directly and does not call `ensure`, so it never writes to the Durable Object.
 - In replay mode (`?replay`) the dashboard fetches the timeline without a key first and asks for one only on 401.
   With no key it hides "Back to live", because live mode still needs the key.
 - Public link: `https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay`.
 
 ## Consequences
-- Anyone can read the allow-listed run's PR names, symbols and timings. Keep only demo baselines on the list, and
-  don't delete them while the link is published (the README and the competition form point to it).
+- Anyone can read the allow-listed run's PR names, symbols, commit messages, intents and timings. Keep only finished
+  demo baselines on the list, and don't delete them while the link is published (the README and the competition form
+  point to it).
+- The route serves the live event log, not a frozen copy, so **never run agents against a public baseline again**:
+  anything logged later (error strings from failed checks or subscriptions, new intents) would become public too.
+  Start a new baseline and add it to the list once its run is finished and checked.
 - Everything that writes (forks, intents, land, webhooks, reconcile, MCP) and the live socket still need the key.
   Without it they return 401, which was checked on the deployed Worker.
 - An unlisted baseline's timeline still returns 401, so a guessed baseline name reveals nothing.
