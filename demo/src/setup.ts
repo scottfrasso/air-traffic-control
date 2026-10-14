@@ -11,7 +11,7 @@
  *   7. writes AGENTMESH_URL and CLOUDFLARE_ACCOUNT_ID into .env, so ./demo/run.sh targets this deployment
  * Every resource it touches is named agentmesh*. Secrets are never printed.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setDefaultResultOrder } from "node:dns";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -40,9 +40,12 @@ const readEnv = (): Record<string, string> => {
 const env = { ...readEnv(), ...Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLOUDFLARE_|AGENTMESH_)/.test(k))) } as Record<string, string | undefined>;
 const say = (msg: string) => console.log(`${DRY ? "[dry run] " : ""}${msg}`);
 
-/** Add KEY=value to .env unless it is already set (in .env or the shell, which run.sh also reads, and prefers). */
-function setEnv(key: string, value: string, secret = false) {
-  if (readEnv()[key] || process.env[key]) return;
+/**
+ * Add KEY=value to .env unless it is already set there. `respectShell`: also skip when the shell has it (for the API
+ * key, which run.sh would send from the shell; non-secret values are still written so a later shell without them works).
+ */
+function setEnv(key: string, value: string, secret = false, respectShell = false) {
+  if (readEnv()[key] || (respectShell && process.env[key])) return;
   say(`.env: set ${key}${secret ? " (generated, not shown)" : `=${value}`}`);
   if (!DRY) appendFileSync(ENV_FILE, `\n${key}=${value}\n`);
 }
@@ -122,10 +125,10 @@ async function main() {
     if (!DRY) writeFileSync(WRANGLER, after);
   } else say("worker/wrangler.jsonc: already points at this account and queue");
 
-  setEnv("AGENTMESH_API_KEY", randomBytes(32).toString("hex"), true);
+  setEnv("AGENTMESH_API_KEY", randomBytes(32).toString("hex"), true, true);
   setEnv("CLOUDFLARE_ACCOUNT_ID", acct);
   // The key run.sh will send: the shell's if set (run.sh prefers it), else .env's.
-  const apiKey = process.env.AGENTMESH_API_KEY ?? readEnv().AGENTMESH_API_KEY ?? "<generated>";
+  const apiKey = process.env.AGENTMESH_API_KEY || readEnv().AGENTMESH_API_KEY || "<generated>"; // "" counts as unset, as in need()
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
   const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
   if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
@@ -140,34 +143,48 @@ async function main() {
   }
   const dir = mkdtempSync(join(tmpdir(), "agentmesh-setup-"));
   const secrets = join(dir, "secrets.json");
-  // Handlers stop Node from dying the instant a signal arrives (which would skip `finally` and leave the secrets
-  // file). While spawnSync blocks, a signal waits until wrangler exits; `finally` then removes the file.
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => (cleanup(), process.exit(sig === "SIGINT" ? 130 : 143)));
   try {
     writeFileSync(secrets, JSON.stringify({ AGENTMESH_API_KEY: apiKey, CF_API_TOKEN: workerToken }), { mode: 0o600 });
     say("deploying (building the checker image with Docker can take a few minutes)...");
-    const deploy = spawnSync("pnpm", ["exec", "wrangler", "deploy", "--secrets-file", secrets], {
-      maxBuffer: 64 * 1024 * 1024,
+    // Async, so the event loop stays free: a signal reaches our handler (which passes it on to wrangler) instead of
+    // waiting behind a blocking spawn, and `finally` always removes the secrets file (reviews of #39 and #41).
+    const child = spawn("pnpm", ["exec", "wrangler", "deploy", "--secrets-file", secrets], {
       cwd: resolve(ROOT, "worker"),
       env: { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: acct, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --dns-result-order=ipv4first`.trim() },
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
     });
-    process.stdout.write(deploy.stdout ?? "");
-    if (deploy.signal) {
-      // Ctrl-C reached wrangler too: stop quietly with the usual exit code (finally still cleans up).
-      say(`deploy interrupted (${deploy.signal})`);
-      process.exitCode = deploy.signal === "SIGINT" ? 130 : 143;
+    let interrupted: NodeJS.Signals | null = null;
+    const forward = (sig: NodeJS.Signals) => {
+      interrupted = sig;
+      child.kill(sig);
+    };
+    process.on("SIGINT", forward);
+    process.on("SIGTERM", forward);
+    let out = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      process.stdout.write(chunk); // live progress
+      out += chunk.toString("utf8");
+    });
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: Error }>((done) => {
+      child.on("error", (error) => done({ code: null, signal: null, error }));
+      child.on("close", (code, signal) => done({ code, signal }));
+    });
+    process.off("SIGINT", forward);
+    process.off("SIGTERM", forward);
+    if (exit.error) throw new Error(`couldn't run wrangler: ${exit.error.message}`);
+    const sig = interrupted ?? exit.signal;
+    if (sig) {
+      say(`deploy interrupted (${sig})`);
+      process.exitCode = sig === "SIGINT" ? 130 : 143;
       return;
     }
-    if (deploy.error) throw new Error(`couldn't run wrangler: ${deploy.error.message}`);
-    if (deploy.status !== 0) throw new Error(`wrangler deploy failed (exit ${deploy.status})`);
-    const url = /https:\/\/agentmesh\.[a-z0-9-]+\.workers\.dev/.exec(deploy.stdout ?? "")?.[0];
+    if (exit.code !== 0) throw new Error(`wrangler deploy failed (exit ${exit.code})`);
+    const url = /https:\/\/agentmesh\.[a-z0-9-]+\.workers\.dev/.exec(out)?.[0];
     if (url) setEnv("AGENTMESH_URL", url);
-    const target = process.env.AGENTMESH_URL ?? readEnv().AGENTMESH_URL; // what run.sh will use
+    const target = process.env.AGENTMESH_URL || readEnv().AGENTMESH_URL; // what run.sh will use
     if (!url || target !== url)
-      say(`warning: .env AGENTMESH_URL is ${target ?? "unset"}${url ? `, but this deploy is ${url}` : " and the deploy URL wasn't found"}. Set it to your Worker's URL before ./demo/run.sh.`);
+      say(`warning: AGENTMESH_URL (shell or .env) is ${target ?? "unset"}${url ? `, but this deploy is ${url}` : " and the deploy URL wasn't found"}. Set it to your Worker's URL before ./demo/run.sh.`);
     say(`deployed${url ? `: ${url}` : ""}. Next: ./demo/run.sh`);
   } finally {
     cleanup();

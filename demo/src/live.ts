@@ -25,7 +25,7 @@ console.log(`
 Runway ready: ${baseline}
 
 1) Once, register ATC with Claude Code (the key is read from your shell; it is not printed here):
-   export AGENTMESH_API_KEY=$(grep '^AGENTMESH_API_KEY=' ${join(ROOT, ".env")} | cut -d= -f2-)
+   export AGENTMESH_API_KEY=\${AGENTMESH_API_KEY:-$(grep '^AGENTMESH_API_KEY=' ${join(ROOT, ".env")} | cut -d= -f2-)}
    claude mcp add --scope user --transport http atc ${config.workerUrl}/mcp --header "Authorization: Bearer $AGENTMESH_API_KEY"
 
 2) Watch the airspace (live; add ?replay afterwards to replay the recording):
