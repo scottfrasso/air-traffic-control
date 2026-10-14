@@ -101,8 +101,9 @@ export function buildSequence(
       continue;
     }
     // Its only conflicts are with PRs behind it (one ahead would have made it hold): they wait for it.
-    const behind = mine.map((c) => prLabel(c.other));
-    entry("follow", `Follow ${prLabel(leader)}. ${behind.length ? `${behind.join(", ")} ${behind.length > 1 ? "wait" : "will wait"} for you.` : "No conflicts."}`, leader);
+    // One name per PR: a pair can have several open conflict signals (different symbols, files or errors).
+    const behind = [...new Set(mine.map((c) => prLabel(c.other)))];
+    entry("follow", `Follow ${prLabel(leader)}. ${behind.length ? `${behind.join(", ")} will wait for you.` : "No conflicts."}`, leader);
   }
   return out;
 }

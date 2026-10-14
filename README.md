@@ -89,7 +89,7 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
 
 | Product | Role |
 | --- | --- |
-| **Artifacts** | All repo storage. One baseline repo per project and one **fork per agent** (`<baseline>--<agent>`), created with the Workers binding's `fork()`. Agents use plain `git` over HTTPS with repo-scoped tokens minted by `createToken()`. The Coordinator diffs forks without cloning, using `log()`, `readTree()` and `readBlob()`. |
+| **Artifacts** | All repo storage. One baseline repo per project and one **fork per agent** (`<baseline>--pr<N>`), created with the Workers binding's `fork()`. Agents use plain `git` over HTTPS with repo-scoped tokens minted by `createToken()`. The Coordinator diffs forks without cloning, using `log()`, `readTree()` and `readBlob()`. |
 | **Artifacts events → Queues** | Each fork gets an `artifacts.repo` **`pushed`** event subscription delivering to the `agentmesh-push-events` queue. The Worker's queue consumer forwards pushes to the Coordinator. |
 | **Workers** | One Worker serves the HTTP API, the MCP server, the dashboard, and the queue consumer. |
 | **Durable Objects (SQLite)** | `Coordinator`, one per baseline, holds the in-flight index, intents, signals, pair-check results, landing state and event log. The `Checker` DO owns the container. |
@@ -108,7 +108,7 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
   When PRs conflict, the one **closest to landing** wins: requested landing > checked on current main > green.
   **Ties go to the smaller diff.** After a landing, only PRs that conflict with it go around; everyone else stays in line.
 - **ATC sequence:** every in-flight PR gets one clearance and one reason: `CLEARED`, `FOLLOW`, `HOLD`
-  (a conflicting PR lands first), `GO AROUND` (baseline moved, so rebase) or `STANDBY` (checks running). Agents read theirs with
+  (a conflicting PR lands first), `GO AROUND` (a conflicting PR landed first, or it no longer fits on main: rebase onto the new main, then land) or `STANDBY` (checks running). Agents read theirs with
   `get_clearance`. The dashboard flies the planes in exactly this order.
 - **Checks reuse work** (ADR-0013): main is computed once per baseline head (incremental TypeScript state). Results are cached
   by git tree hash, so a fork's own check is reused by every pair it's in, and each pair usually costs a single `tsc` on the merge.

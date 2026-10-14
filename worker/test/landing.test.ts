@@ -63,6 +63,9 @@ test("the gate: go-around, then running checks, main moved, red, outstanding pai
   const rival = fork("rival", { land_requested_at: 1 });
   const ahead = landGate({ ...base, me: { ...me, land_requested_at: null }, rivals: [rival] });
   assert.equal(ahead.kind === "deny" && ahead.signal, "land_blocked");
+  const why = ahead.kind === "deny" ? ahead.reason : "";
+  assert.match(why, /Lands after rival\. Fix it now to avoid a go-around\./); // matches HOLD (issue #6)
+  assert.doesNotMatch(why, /rebase/i);
   assert.deepEqual(landGate(base), { kind: "land" });
 });
 

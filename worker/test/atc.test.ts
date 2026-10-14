@@ -60,16 +60,27 @@ test("a PR with a pair check outstanding is never cleared (issue #5)", () => {
 });
 
 test("FOLLOW only says 'No conflicts' when there are none; otherwise it names who waits (issue #6)", () => {
-  // PR3 cleared; PR2 follows and conflicts with PR1, which is behind it.
-  const seq = buildSequence([f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 }), f(3, { diff_lines: 3 })], conflicts([[1, 2, "applyDiscount"]]), "base");
-  assert.equal(seq[1]!.reason, "Follow PR3. PR1 will wait for you.");
+  // Several open conflicts with the same PR (two symbols) name it once.
+  const dup = buildSequence([f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 }), f(3, { diff_lines: 3 })], conflicts([[1, 2, "applyDiscount"], [1, 2, "Cart"]]), "base");
+  assert.equal(dup[1]!.reason, "Follow PR3. PR1 will wait for you.");
   const two = buildSequence([f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 }), f(3, { diff_lines: 20 }), f(4, { diff_lines: 1 })], conflicts([[1, 2, "x"], [3, 2, "y"]]), "base");
-  assert.equal(two.find((e) => e.pr === "PR2")!.reason, "Follow PR4. PR1, PR3 wait for you.");
+  assert.equal(two.find((e) => e.pr === "PR2")!.reason, "Follow PR4. PR1, PR3 will wait for you.");
   const clean = buildSequence([f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 })], new Map(), "base");
   assert.equal(clean[1]!.reason, "Follow PR2. No conflicts.");
 });
 
-test("no clearance tells a holding PR to rebase; only a go-around does (issue #6)", () => {
-  const seq = buildSequence([f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 }), f(3, { diff_lines: 3 })], conflicts([[1, 2, "a"], [2, 3, "b"]]), "base");
+test("no clearance tells a PR to rebase except GO AROUND (issue #6)", () => {
+  const seq = buildSequence(
+    [
+      f(1, { diff_lines: 12 }), f(2, { diff_lines: 7 }), f(3, { diff_lines: 3 }), // cleared, follow, hold
+      f(4, { check_status: "red", check_detail: "src/x.ts:1 TS2345 boom" }), // fix
+      f(5, { check_status: "pending" }), // checking
+      f(6, { check_status: "red", check_detail: "on main: src/x.ts:1 TS2345 boom" }), // go around: doesn't fit on main
+      f(7), // go around: conflicted with a landed PR
+      f(8, { diff_lines: 5 }), // follow
+    ],
+    conflicts([[1, 2, "a"], [2, 3, "b"]]), "base", new Map([["shop--pr7", "Conflicts with PR9 (landed) on applyDiscount. Rebase onto main and fix."]]),
+  );
+  assert.deepEqual(new Set(seq.map((e) => e.clearance)), new Set(["cleared", "follow", "hold", "fix", "checking", "go_around"]));
   for (const e of seq) if (e.clearance !== "go_around") assert.doesNotMatch(e.reason, /rebase/i, `${e.pr} ${e.clearance}: ${e.reason}`);
 });

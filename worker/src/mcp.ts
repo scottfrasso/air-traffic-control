@@ -55,7 +55,7 @@ function createServer(env: Env) {
       description:
         "Informational notes about other agents' in-flight work that affects yours: signature changes to symbols you use, files you both edit, " +
         "semantic conflicts found by speculative merge+typecheck, and 'go around' when a PR you conflict with lands first " +
-        "(rebase onto the new main, fix, push, then land). Poll this after each push.",
+        "or your PR no longer fits on main (rebase onto the new main, fix, push, then land). Poll this after each push.",
       inputSchema: z.object({
         fork: z.string().describe("Your fork name"),
         include_resolved: z.boolean().default(false),
@@ -99,7 +99,7 @@ function createServer(env: Env) {
       description:
         "Ask to merge your fork into the baseline. Lands only if your fork is current with baseline and green (typechecks). " +
         "If another fork conflicts with yours and is closer to landing (or ties with a smaller diff), you are told to wait; " +
-        "if a PR you conflict with lands first, you go around: rebase onto the new main, fix, push, then land. If the response says retry, checks are still running.",
+        "if a PR you conflict with lands first, or yours no longer fits on main, you go around: rebase onto the new main, fix, push, then land. If the response says retry, checks are still running.",
       inputSchema: z.object({ fork: z.string().describe("Your fork name") }),
     },
     async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).requestLand(fork)),
