@@ -8,4 +8,9 @@ It is rendered from `video/` (Remotion). The demo section replays the recorded r
 from `video/src/data/run.json`. To re-render: `pnpm --dir video voiceover` (only changed lines are regenerated),
 then `pnpm --dir video render`, which writes `video/out/atc.mp4`.
 
+- `atc-linkedin.mp4`: the 60-second cut (1:05, Scott voice) for LinkedIn, with burned-in captions. Rendered from the
+  `ATCShort` composition: `pnpm --dir video voiceover --short --voice scott`, then `pnpm --dir video render:short:scott`
+  (writes `video/out/atc-short-scott.mp4`). Its numbers come from the same run as the long video; the flight-log card
+  is from the public replay run (`shop-261011185716`) and says so, because `booking-261010213346` predates flight logs.
+
 Form answers: [`FORM_DRAFT.md`](FORM_DRAFT.md). Check their lengths with `./check-form.sh`.
