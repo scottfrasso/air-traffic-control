@@ -146,7 +146,6 @@ test("through request_land: an approved PR lands past an unapproved rival that a
   const res = await a.co.requestLand(P2);
   assert.equal(res.landed, true, res.reason);
   assert.deepEqual(during, [false, "a landing is in progress; try again in a few seconds"]);
-  // Another PR's review isn't held up by this landing (review of #38).
   assert.equal(a.q("SELECT * FROM signals WHERE fork = ? AND kind = 'rebase_required' AND resolved_at IS NULL", P1).length, 1); // P1 goes around
 });
 
@@ -163,4 +162,26 @@ test("during a landing, other PRs can still be reviewed; only the PR being lande
   a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now(), fork: P2 }));
   assert.equal((await a.co.review(P1, "approve", "", "rev", "a1")).ok, true);
   assert.equal((await a.co.review(P2, "approve", "", "rev", "b1")).ok, false);
+});
+
+// ── review of #42 ──
+
+test("CLEARED gives the real reason when the leader beat an unapproved rival on merit", () => {
+  const x = fork("x", { diff_lines: 9 }); // bigger, didn't ask: loses on merit anyway
+  const y = fork("y", { diff_lines: 3 });
+  const conflicts = new Map([["x", [{ other: "y", symbol: "s" }]], ["y", [{ other: "x", symbol: "s" }]]]);
+  const seq = buildSequence([x, y], conflicts, "main", new Map(), new Set(), new Set(), new Map([["x", "Waiting for review of x1."]]));
+  assert.equal(seq.find((e) => e.fork === "y")!.reason, "Cleared to land. Beats X on s: smaller diff.");
+});
+
+test("a landing lock from before locks named their PR refuses every review, with a generic message", async () => {
+  const a = airport();
+  const P1 = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(P1);
+  a.heads.set(P1, "a1");
+  await a.co.onPush(P1, "a1", "event");
+  a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now() }));
+  const r = await a.co.review(P1, "approve", "", "rev", "a1");
+  assert.deepEqual(r, { ok: false, status: 409, error: "a landing is in progress; send the review again in a few seconds" });
 });

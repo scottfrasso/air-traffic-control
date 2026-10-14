@@ -405,3 +405,16 @@ test("deferred main reads during one landing are logged once (review of #40)", a
   for (let i = 0; i < 3; i++) await a.co.reconcile();
   assert.equal(a.events("baseline.read_deferred").length, 1);
 });
+
+test("pruning drops old resolved signals of landed PRs only; abandoned and active PRs keep theirs (review of #40)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  for (const [n, status] of [["landed1", "landed"], ["gone1", "abandoned"], ["live1", "active"]] as const) {
+    a.addFork(n);
+    a.q("UPDATE forks SET status = ? WHERE name = ?", status, n);
+    a.q("INSERT INTO signals(fork, kind, about_fork, symbol, message, data, dedupe_key, created_at, resolved_at) VALUES (?, 'overlap', NULL, NULL, 'm', '{}', ?, 1, 1)", n, `k-${n}`);
+  }
+  a.addFork("keepalive"); // something active so reconcile runs its full pass
+  await a.co.reconcile();
+  assert.deepEqual(a.q<{ fork: string }>("SELECT fork FROM signals ORDER BY fork").map((r) => r.fork), ["gone1", "live1"]);
+});

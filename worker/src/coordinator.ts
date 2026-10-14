@@ -757,7 +757,7 @@ export class Coordinator extends DurableObject<Env> {
     // Only the PR being landed: its landing already checked the approval (others needn't wait; review of #38).
     const landing = parseLock(this.meta("landing"));
     if (this.landingInProgress() && (!landing?.fork || landing.fork === fork))
-      return refuse(409, `${prLabel(fork)} is landing right now; send the review again in a few seconds`);
+      return refuse(409, landing?.fork ? `${prLabel(fork)} is landing right now; send the review again in a few seconds` : "a landing is in progress; send the review again in a few seconds");
     const who = reviewer.trim().slice(0, 60) || "reviewer";
     const text = note.trim().slice(0, 500);
     this.sql.exec(
