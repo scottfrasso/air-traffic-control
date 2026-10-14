@@ -46,7 +46,11 @@ export function airport(baseline = "base-repo") {
   const env = {
     ARTIFACTS: {
       get: async (repo: string) => ({
-        log: async () => (heads.has(repo) ? [{ hash: heads.get(repo)! }] : []),
+        log: async () => {
+          const forced = await self.onHeadRead?.(repo);
+          const h = forced ?? heads.get(repo);
+          return h ? [{ hash: h }] : [];
+        },
         [Symbol.dispose]: () => undefined,
       }),
     },
@@ -60,11 +64,18 @@ export function airport(baseline = "base-repo") {
   };
   const co = new Coordinator(ctx as never, env as never);
   const q = <T = Row>(query: string, ...params: unknown[]) => ctx.storage.sql.exec<T>(query, ...params).toArray();
-  return {
+  const self = {
     co, db, heads, pipelines, q, hooks,
     meta: (key: string) => q<{ value: string }>("SELECT value FROM meta WHERE key = ?", key)[0]?.value ?? null,
     fork: (name: string) => q<Row>("SELECT * FROM forks WHERE name = ?", name)[0],
     events: (kind: string) => q<{ detail: string; fork: string | null }>("SELECT detail, fork FROM event_log WHERE kind = ? ORDER BY id", kind),
+    /** A push event: the repo's head in Artifacts moves to `sha`, then the event is delivered. */
+    async push(repo: string, sha: string) {
+      heads.set(repo, sha);
+      await co.onPush(repo, sha, "event");
+    },
+    /** Override what Artifacts answers for one read of `repo` (to model a stale or racing read). */
+    onHeadRead: undefined as undefined | ((repo: string) => Promise<string | undefined>),
     /** Add an active fork the way createFork leaves it (without going through Artifacts). */
     addFork(name: string, base = heads.get(baseline)!) {
       q(
@@ -74,4 +85,5 @@ export function airport(baseline = "base-repo") {
       heads.set(name, base);
     },
   };
+  return self;
 }
