@@ -21,6 +21,7 @@ type Input =
   | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
   | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
 
+const startedAt = Date.now(); // before the startup git lock, so "total" includes every wait (review of #36)
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
 // fork and baseline commit, so each check fetches only deltas; typecheck results keyed by git TREE hash;
@@ -272,7 +273,7 @@ function runTypecheck(sha: string, label: string, buildInfo: string | null, cach
       errors.push({ file, line: Number(l), col: Number(c), code, message, lineText });
     }
     const result: Typecheck = { sha, ok: ok && errors.length === 0, errors, output: output.slice(0, 4000) };
-    // Cache only real tsc outcomes: a pass, or tsc's own diagnostics (exit 1 or 2). A crash, a kill or a missing tsc is
+    // Cache only real tsc outcomes: a pass, or tsc's own diagnostics (exit 1). A crash, a kill or a missing tsc is
     // the environment, not the code; caching it by tree hash would make a transient failure permanent (issue #8).
     if (isTscOutcome(ok, exit, errors.length)) writeAtomic(cacheFile, JSON.stringify(result));
     const ms = Date.now() - started;
@@ -373,7 +374,6 @@ function run(): unknown {
   return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }
 
-const startedAt = Date.now();
 try {
   const result = run() as { timings?: unknown[] };
   // Wall time of the whole check, including waits for locks and cached results (steps alone miss those; review of #36).

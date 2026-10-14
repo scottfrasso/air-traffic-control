@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landGate, landingOrder, mayRelease, outstandingPairs, PAIR_ERROR_RETRY_MS, PAIR_MAX_ATTEMPTS,
+  afterLanding, approachQueue, CHECK_TIMEOUT_S, forksWaitingOnPairs, LANDING_LOCK_MS, landGate, landingOrder, mayRelease, outstandingPairs, PAIR_ERROR_RETRY_MS, PAIR_MAX_ATTEMPTS,
   PAIR_RETRY_MS, pairAttempts, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair, takeLock, type PairCheckRow, type PairQueueRow,
 } from "../src/landing";
 import { buildSequence } from "../src/atc";
@@ -274,4 +274,16 @@ test("cleared is never given while a pair is outstanding, including an errored p
   assert.deepEqual(clearances(), ["checking", "checking"]);
   s.result("a", "a1", "b", "b1");
   assert.ok(clearances().includes("cleared"));
+});
+
+// ── after a landing (issue #11) ──
+
+test("after a landing only PRs with an open conflict against the winner go around; the rest stay in line", () => {
+  const active = [fork("w"), fork("x"), fork("y"), fork("z")];
+  const split = afterLanding("w", active, [
+    { fork: "x", about_fork: "w", symbol: "applyDiscount", message: "fails typecheck" },
+    { fork: "y", about_fork: "z", symbol: "other", message: "conflict with someone else" }, // not with the winner
+  ]);
+  assert.deepEqual(split.goAround, [{ fork: "x", symbol: "applyDiscount", finding: "fails typecheck" }]);
+  assert.deepEqual(split.stayInLine, ["y", "z"]);
 });

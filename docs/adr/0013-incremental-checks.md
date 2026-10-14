@@ -49,8 +49,8 @@ A pair check ran `tsc` three times from a fresh clone (A alone, B alone, merge).
 ## Routing and shared work (issue #9, 2026-10-14)
 - **Before:** each push's checks were spread over the pool by the sorted pair key, and inside one container the
   concurrent checks of one push all built main's TypeScript state and typechecked the fork alone at the same moment.
-  Three 5-PR demo runs measured main's state built 12–14 times, cache hits 32–46%, and 1.9–2.6 s per pair check.
-  Routing by fork alone, and then per-tree locks, changed nothing (12×, 1.9–2.1 s). The timelines showed why:
+  Three 5-PR demo runs measured main's state built 12–14 times and cache hits 32–46%.
+  Routing by fork alone, and then per-tree locks, left it at 12 builds. The timelines showed why:
   before the first landing main was built only 3 times. The other 9 came after landings: each landing re-checked
   the remaining PRs, each in its own container, and each container built the new main (3 containers × 3 mains).
 - **Now:**
@@ -75,6 +75,6 @@ A pair check ran `tsc` three times from a fresh clone (A alone, B alone, merge).
   (Review of #34.)
 
 ## Consequences / next
-- The cache is per container. The 3-container pool (ADR-0010 follow-up) splits it. Routing by fork, or passing ATC's known
-  alone results into pair checks, would raise the hit rate.
+- The cache is per container. The 3-container pool (ADR-0010 follow-up) splits it; routing (above) keeps each push in one
+  container. Passing ATC's known alone results into pair checks would raise the hit rate further.
 - The cache is lost when the container sleeps (10-minute inactivity), and it's rebuilt lazily.

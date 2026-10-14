@@ -265,3 +265,57 @@ test("main isn't read while a landing holds the lock: ATC's own landing isn't ta
   await a.co.reconcile();
   assert.equal(a.meta("baseline_head"), "main1");
 });
+
+// ── the land path (issue #11) ──
+
+/** Three PRs pushed, indexed, green on main0 and checked against each other; b has an open conflict with a. */
+const [PA, PB, PC] = ["base-repo--pr1", "base-repo--pr2", "base-repo--pr3"]; // real fork names: ATC relabels them "PR1"…
+async function readyToLand(a: ReturnType<typeof airport>) {
+  await a.co.ensure("base-repo");
+  for (const n of [PA, PB, PC]) await stuckFork(a, n);
+  a.q("UPDATE forks SET check_status = 'green', check_sha = head_sha, check_base = 'main0'");
+  for (const [x, y] of [[PA, PB], [PA, PC], [PB, PC]])
+    a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, 'clean', '{}', 1)", x, y, `${x}1`, `${y}1`);
+  for (const [me, other] of [[PA, PB], [PB, PA]])
+    (a.co as unknown as { emitSignal(s: object): void }).emitSignal({
+      fork: me, kind: "semantic_conflict", about_fork: other, symbol: "applyDiscount", message: "merges cleanly but fails typecheck", data: {}, dedupe_key: `sem:${me}:${other}`,
+    });
+}
+
+test("landing: main moves to the landed commit, only the conflicting PR goes around, the rest are re-checked", async () => {
+  const a = airport();
+  await readyToLand(a);
+  const res = await a.co.requestLand(PA);
+  assert.equal(res.landed, true, res.reason);
+  assert.equal(a.meta("baseline_head"), `landed-${PA}1`);
+  assert.equal(a.fork(PA)!.status, "landed");
+  const open = (fork: string, kind: string) => a.q("SELECT * FROM signals WHERE fork = ? AND kind = ? AND resolved_at IS NULL", fork, kind).length;
+  assert.equal(open(PB, "rebase_required"), 1); // b conflicted with a: go around
+  assert.equal(open(PB, "semantic_conflict"), 0); // the conflict signal is closed by the go-around
+  assert.equal(open(PC, "rebase_required"), 0); // c stays in line…
+  assert.equal(open(PC, "landed"), 1);
+  const rechecks = a.pipelines.filter((p) => p.params.kind === "recheck").map((p) => p.params.fork);
+  assert.deepEqual(rechecks, [PC]); // …and is re-checked on the new main; b is not (it must push first)
+  assert.equal(a.q("SELECT * FROM flight_logs WHERE fork = ?", PA).length, 1);
+  assert.match((await a.co.getClearance(PB)).message, /go around/);
+});
+
+test("landing: a PR whose rival is closer to landing is refused, and nothing moves", async () => {
+  const a = airport();
+  await readyToLand(a);
+  a.q("UPDATE forks SET land_requested_at = 1 WHERE name = ?", PA); // a asked first
+  const res = await a.co.requestLand(PB);
+  assert.equal(res.landed, false);
+  assert.match(res.reason ?? "", /Lands after PR1\. Fix it now to avoid a go-around/);
+  assert.equal(a.meta("baseline_head"), "main0");
+});
+
+test("landing: the checker refusing (main moved under it) answers retry and lands nothing", async () => {
+  const a = airport();
+  await readyToLand(a);
+  a.checker = async () => ({ mode: "land", landed: false, retry: true, reason: "main moved; retry" });
+  const res = await a.co.requestLand(PA);
+  assert.deepEqual([res.landed, res.retry], [false, true]);
+  assert.equal(a.fork(PA)!.status, "active");
+  assert.equal(a.meta("landing"), ""); // the lock is released
+});

@@ -15,6 +15,11 @@ Containers and Workflows, which local workerd can't fully provide, and adding vi
     run unchanged) and fakes the bindings: Artifacts heads from a map, and `PUSH_PIPELINE.create` that records instances
     and throws Workflows' duplicate error (code 10405).
 - `pnpm --dir worker test` loads the harness (`--experimental-sqlite` on Node 22).
+- The harness also fakes the checker container (`CHECKER`, answered by `airport().checker`), so the land path runs for
+  real: `requestLand` → the gate → the landing lock → `onLanded` (issue #11). `container/check.ts` itself is tested
+  separately against temporary git repos (`worker/test/container.test.ts`: pairs, a textual conflict, the
+  environment-failure rule, the lock, land onto main, a stale expected head, and a main conflict at land).
+- `pnpm test` at the repo root runs every package's tests (`pnpm -r --if-present test`).
 
 ## Consequences
 - Coordinator behaviour (meta, signals, the pipelines it starts) is now testable without deploying.

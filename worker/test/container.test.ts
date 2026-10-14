@@ -150,3 +150,59 @@ test("checks running at once share main's build and each fork's own result inste
     s.cleanup();
   }
 });
+
+// ── more modes (issue #11) ──
+
+test("a textual conflict: both PRs edit the same line, and the merge lists the file", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const d = repo(s.root, "shop--pr4", { "src/cart.ts": 'import { applyDiscount } from "./price";\nexport const total = applyDiscount(100, 20);\n' }, s.base.remote);
+    const r = await s.check({ mode: "pair", a: s.a, b: { name: "shop--pr4", remote: d, token: "" }, baseline: s.base });
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.merge.clean, false);
+    assert.deepEqual(r.merge.conflicts, ["src/cart.ts"]);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("land: a PR on current main lands (main moves to it); a stale expected head is refused with retry", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const bare = join(s.root, "shop.git");
+    execFileSync("git", ["clone", "-q", "--bare", s.base.remote, bare]);
+    const main = () => execFileSync("git", ["rev-parse", "main"], { cwd: bare, encoding: "utf8" }).trim();
+    const base = { name: "shop", remote: bare, token: "" };
+    const before = main();
+    const cHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: s.c.remote, encoding: "utf8" }).trim();
+    const ok = await s.check({ mode: "land", fork: { ...s.c, expectedHead: cHead }, baseline: { ...base, expectedHead: before } });
+    assert.equal(ok.error, undefined, ok.error);
+    assert.equal(ok.landed, true);
+    assert.equal(main(), ok.landedSha); // pushed to main
+    // Another landing pinned to the old main: the guard refuses it instead of landing on a main it didn't check.
+    const stale = await s.check({ mode: "land", fork: { ...s.a }, baseline: { ...base, expectedHead: before } });
+    assert.deepEqual([stale.landed, stale.retry], [false, true]);
+    assert.equal(main(), ok.landedSha); // nothing moved
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("land: a PR that fits alone but breaks on the new main is refused as a main conflict, and main doesn't move", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const bare = join(s.root, "shop.git");
+    execFileSync("git", ["clone", "-q", "--bare", s.base.remote, bare]);
+    const main = () => execFileSync("git", ["rev-parse", "main"], { cwd: bare, encoding: "utf8" }).trim();
+    const base = { name: "shop", remote: bare, token: "" };
+    const first = await s.check({ mode: "land", fork: s.a, baseline: { ...base, expectedHead: main() } }); // A changes applyDiscount
+    assert.equal(first.landed, true, first.reason);
+    const after = main();
+    const second = await s.check({ mode: "land", fork: s.b, baseline: { ...base, expectedHead: after } }); // B calls it the old way
+    assert.deepEqual([second.landed, second.mainConflict], [false, true]);
+    assert.equal(second.typecheck.errors[0].file, "src/checkout.ts");
+    assert.equal(main(), after);
+  } finally {
+    s.cleanup();
+  }
+});

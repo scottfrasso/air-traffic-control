@@ -4,7 +4,7 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  approachQueue, checkRetriesLeft, LANDING_LOCK_MS, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  afterLanding, approachQueue, checkRetriesLeft, LANDING_LOCK_MS, type OpenConflict, forksToRecheck, forksWaitingOnPairs, isDuplicateInstance, landGate, stuckCheck, type CheckRun, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultRow, pairsToQueue, parseLock, queuedPair,
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
@@ -901,30 +901,30 @@ export class Coordinator extends DurableObject<Env> {
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
     this.resolveSignals({ fork: winner.name });
-    const goAround: string[] = [];
-    for (const other of this.activeForks()) {
-      const sem = this.sql
-        .exec<{ symbol: string | null; message: string }>(
-          "SELECT symbol, message FROM signals WHERE fork = ? AND about_fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL",
-          other.name, winner.name,
-        )
-        .toArray()[0];
-      this.resolveSignals({ fork: other.name, about_fork: winner.name });
-      if (sem) {
-        goAround.push(other.name);
-        this.emitSignal({
-          fork: other.name, kind: "rebase_required", about_fork: winner.name, symbol: sem.symbol,
-          message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}) and your PR conflicts with it${sem.symbol ? ` on ${sem.symbol}` : ""}. Go around: rebase onto main, fix, push. Finding: ${sem.message}`,
-          data: { newHead }, dedupe_key: `rebase:${other.name}:${newHead}`,
-        });
-      } else {
-        this.emitSignal({
-          fork: other.name, kind: "landed", about_fork: winner.name, symbol: null,
-          message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}). No conflict with your PR: stay in line, no rebase needed. ATC is re-checking your PR on the new main.`,
-          data: { newHead }, dedupe_key: `landed-ahead:${other.name}:${newHead}`,
-        });
-      }
+    const split = afterLanding(
+      winner.name,
+      this.activeForks(),
+      this.sql
+        .exec<OpenConflict>("SELECT fork, about_fork, symbol, message FROM signals WHERE about_fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL ORDER BY id", winner.name)
+        .toArray(),
+    );
+    for (const g of split.goAround) {
+      this.resolveSignals({ fork: g.fork, about_fork: winner.name });
+      this.emitSignal({
+        fork: g.fork, kind: "rebase_required", about_fork: winner.name, symbol: g.symbol,
+        message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}) and your PR conflicts with it${g.symbol ? ` on ${g.symbol}` : ""}. Go around: rebase onto main, fix, push. Finding: ${g.finding}`,
+        data: { newHead }, dedupe_key: `rebase:${g.fork}:${newHead}`,
+      });
     }
+    for (const name of split.stayInLine) {
+      this.resolveSignals({ fork: name, about_fork: winner.name });
+      this.emitSignal({
+        fork: name, kind: "landed", about_fork: winner.name, symbol: null,
+        message: `${winner.name} landed (main is now ${newHead.slice(0, 7)}). No conflict with your PR: stay in line, no rebase needed. ATC is re-checking your PR on the new main.`,
+        data: { newHead }, dedupe_key: `landed-ahead:${name}:${newHead}`,
+      });
+    }
+    const goAround = split.goAround.map((g) => g.fork);
     this.emitSignal({
       fork: winner.name, kind: "landed", about_fork: null, symbol: null,
       message: `Landed at ${newHead.slice(0, 7)}.${goAround.length ? ` ${goAround.join(", ")} must go around (conflict).` : ""}`,
