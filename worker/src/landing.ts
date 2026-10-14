@@ -103,7 +103,7 @@ export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, c
   if (r)
     return {
       kind: "deny",
-      reason: `${r.name} conflicts with your fork and is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Wait for it to land, then rebase.`,
+      reason: `Conflicts with ${r.name}, which is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Lands after ${r.name}. Fix it now to avoid a go-around.`,
       signal: "land_blocked",
     };
   return { kind: "land" };

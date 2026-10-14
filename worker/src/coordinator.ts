@@ -790,7 +790,7 @@ export class Coordinator extends DurableObject<Env> {
 
   /**
    * Merge `fork` into baseline only if it is current and green. If it conflicts with another fork that is
-   * closer to landing (ADR-0011), it yields. On landing, conflicting forks get "rebase required".
+   * closer to landing (ADR-0011), it yields. On landing, conflicting forks are sent around (rebase onto the new main, then land).
    */
   async requestLand(fork: string): Promise<LandResponse> {
     const row = this.fork(fork);

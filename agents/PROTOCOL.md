@@ -16,6 +16,8 @@ How to work with ATC:
    something you use, adapt your code or wait. Your judgement decides.
 7. When your task is done and typechecks, call `request_land`.
    - Response says retry: wait ~5 seconds and call `request_land` again.
-   - Rebase required or go around: run `commands.rebaseOntoBaseline`, fix anything that broke, typecheck, commit, push, then `request_land` again.
-   - Hold (another PR lands first): call `get_clearance` every ~10 seconds until you're cleared, then `request_land`.
+   - Go around (a PR you conflicted with landed first): run `commands.rebaseOntoBaseline`, fix anything that broke, typecheck, commit, push, then `request_land` again.
+   - Hold (a conflicting PR lands first): fix the conflict in your PR now if you can (`get_signals` says what the other PR
+     changed), push, and call `get_clearance` every ~10 seconds until you're cleared, then `request_land`. Fixing while you
+     hold is what saves you the go-around.
 8. Stop when you have landed. Finish by printing your PR number and ATC's last message to you.
