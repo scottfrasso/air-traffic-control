@@ -23,7 +23,10 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
     can't stick. (A first attempt, "ignore any head already seen", could deadlock: an older head not yet seen would be
     taken and the real one then refused forever. Review of #31.)
   - A fork's push event is checked against the fork's live head too (`push.event_stale`), so a retried event can't
-    move a PR back to an older commit (review of #33). `applyIndex` never writes it: an index computed before a landing and applied after would move it
+    move a PR back to an older commit (review of #33). If that read fails, the event is dropped
+    (`push.event_unverified`); reconcile reads the fork's head within seconds.
+  - Main isn't read while a landing holds the lock: the landing may already have pushed main, and `onLanded`
+    records that head itself. Otherwise reconcile would take ATC's own landing for an outside push. `applyIndex` never writes it: an index computed before a landing and applied after would move it
   backwards. An index clears a PR's go-around only if its base is the **current** main, not the main it saw.
 - **Gate order** (`landGate`): an errored check first, then "push not processed", then "checked on an old main → start a
   re-check" (even if pending; a duplicate start is a no-op), then "pending → retry".
@@ -60,6 +63,7 @@ A PR could sit in `check_status = pending` forever, with every `request_land` an
 - Instance ids stay under Workflows' 100-character limit with the suffix intact: the longest fork name is
   63 (baseline) + `--pr` + digits, so `<fork>-<sha12>-m<main10>-r<n>` is at most about 98.
 - The alarm pauses after 10 min without activity, except while a PR's checks are pending or errored and may still be
-  restarted (`checksAwaitingRestart`, which skips go-arounds exactly as `restartStuckChecks` does); that is bounded
-  by the restart cap.
+  restarted (`checksAwaitingRestart`, which skips go-arounds exactly as `restartStuckChecks` does). That means pending
+  at any restart count (after the last restart, the final give-up still has to fire), or errored with retries left.
+  Bounded by the restart cap.
 - Every push event now costs one extra Artifacts head read.
