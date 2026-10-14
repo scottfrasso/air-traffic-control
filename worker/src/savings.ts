@@ -22,7 +22,7 @@ export interface Savings {
   cacheHits: number;
   /** Times a checker container built main's incremental TypeScript state (once per container per main is the floor). */
   mainBuilds: number;
-  /** Wall time of each pair check, from its own step timings (issue #9). */
+  /** Each pair check's wall time: its "total" step, or (older checkers) the sum of its steps, which misses waits. */
   pairCheckMs: number[];
   /** Go-arounds ATC asked for. */
   rebases: number;
@@ -85,7 +85,10 @@ export function computeSavings(events: LogEvent[]): Savings {
           s.typechecks++;
           if (t.cached) s.cacheHits++;
         }
-        if (e.kind === "check.pair") s.pairCheckMs.push((d.timings ?? []).reduce((n, t) => n + (t.ms ?? 0), 0));
+        if (e.kind === "check.pair") {
+          const total = d.timings?.find((t) => t.step === "total")?.ms;
+          s.pairCheckMs.push(total ?? (d.timings ?? []).reduce((n, t) => n + (t.ms ?? 0), 0));
+        }
         if (e.kind !== "check.pair" || !d.a || !d.b || d.fresh === false) break;
         s.pairRuns++;
         const key = [d.a, d.b].sort().join("|");

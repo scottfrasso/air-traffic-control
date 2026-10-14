@@ -68,4 +68,6 @@ test("counts main state builds and each pair check's time (issue #9)", () => {
   ]);
   assert.equal(s.mainBuilds, 2);
   assert.deepEqual(s.pairCheckMs, [1_300, 250]);
+  const withTotal = computeSavings([ev(1, "check.pair", null, { a: "p1", b: "p2", status: "clean", fresh: true, timings: [{ step: "typecheck merge", ms: 0, cached: true }, { step: "total", ms: 900 }] })]);
+  assert.deepEqual(withTotal.pairCheckMs, [900]); // a check that waited on a lock: its wall time, not 0
 });

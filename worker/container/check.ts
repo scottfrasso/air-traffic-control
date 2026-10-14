@@ -373,8 +373,12 @@ function run(): unknown {
   return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }
 
+const startedAt = Date.now();
 try {
-  console.log(`@@RESULT ${JSON.stringify(run())}`);
+  const result = run() as { timings?: unknown[] };
+  // Wall time of the whole check, including waits for locks and cached results (steps alone miss those; review of #36).
+  if (Array.isArray(result.timings)) result.timings.push({ step: "total", ms: Date.now() - startedAt });
+  console.log(`@@RESULT ${JSON.stringify(result)}`);
 } catch (err) {
   console.log(`@@RESULT ${JSON.stringify({ error: (err as Error).message })}`);
 } finally {

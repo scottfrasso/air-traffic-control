@@ -59,8 +59,17 @@ A pair check ran `tsc` three times from a fresh clone (A alone, B alone, merge).
   - A per-tree lock (the same lock protocol as the git lock) makes one process build main's state or typecheck a
     tree while the others wait for its cached result.
   - `savings` counts `mainBuilds` and `pairCheckMs`, and `run.sh` prints them, so the effect is measured on every run.
-- **After** (two 5-PR runs, `shop-261014210117`, `shop-261014210231`): main built **7–8×** (was 12–14×), average pair
-  check **1.5–1.8 s** (was 1.9–2.6 s). Cache hits stay around 30–40%: most misses are merges, which are new trees.
+- **After** (two 5-PR runs, `shop-261014210117`, `shop-261014210231`): main built **7–8×** (was 12–14×). Cache hits stay
+  around 30–40%: most misses are merges, which are new trees. (Landings' own builds aren't logged as events, so both
+  counts are slightly low.) No claim about pair-check time: the old metric summed recorded steps, which misses time
+  spent waiting on a lock and then reading the cache. Checks now record a `total` wall-time step and `pairCheckMs` uses
+  it, so future runs can compare (review of #36).
+- **Limits** (review of #36):
+  - If the lock holder's tsc run produces nothing cacheable (killed, crashed), the waiters re-run it one after another,
+    where before they ran in parallel.
+  - Work is concentrated on fewer containers: the landing container also runs every re-check after a landing, and one
+    push's checks share one 2-vCPU container. That's fine at demo scale (tsc about 1 s). On a repo with 30 s typechecks
+    and ten PRs, re-checks would approach the 240 s limit; capping concurrent tsc runs per container would be next.
 - The lock's "ownerless dir" break branch is gone (a lock always has a pid file, and an empty dir is replaced by the
   rename). Zombies count as dead, since the container's PID 1 never reaps. tsc exit 2 (a crash) isn't cached.
   (Review of #34.)
