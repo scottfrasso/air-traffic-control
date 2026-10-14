@@ -4,8 +4,14 @@
  * real event lands on the line that describes it; the on-screen clock always shows real time.
  */
 import run from "./data/run.json";
-import vo from "./data/vo.json";
-import { LINES, type LineId } from "./data/script";
+import voMatilda from "./data/vo.json";
+import voScott from "./data/vo.scott.json";
+import { LINES, VOICES, type LineId, type VoiceKey } from "./data/script";
+
+/** Which voice to render: `REMOTION_VOICE=scott pnpm render…` (Remotion passes REMOTION_* env vars into the bundle). */
+export const VOICE_KEY: VoiceKey = process.env.REMOTION_VOICE === "scott" ? "scott" : "matilda";
+if (!(VOICE_KEY in VOICES)) throw new Error(`unknown voice ${VOICE_KEY}`);
+const vo: Record<LineId, { file: string; seconds: number }> = VOICE_KEY === "scott" ? voScott : voMatilda;
 
 export const FPS = 30;
 const d = (id: LineId) => vo[id].seconds;

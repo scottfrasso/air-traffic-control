@@ -1,0 +1,42 @@
+{
+  "hook": {
+    "file": "vo/short/scott/hook.mp3",
+    "seconds": 7.653878,
+    "hash": "41d11c28b51c"
+  },
+  "hidden": {
+    "file": "vo/short/scott/hidden.mp3",
+    "seconds": 13.191837,
+    "hash": "367a48b99345"
+  },
+  "idea": {
+    "file": "vo/short/scott/idea.mp3",
+    "seconds": 5.982041,
+    "hash": "5a48b1b9b106"
+  },
+  "run": {
+    "file": "vo/short/scott/run.mp3",
+    "seconds": 9.743673,
+    "hash": "4d57fba3590a"
+  },
+  "order": {
+    "file": "vo/short/scott/order.mp3",
+    "seconds": 4.780408,
+    "hash": "e4825c519250"
+  },
+  "numbers": {
+    "file": "vo/short/scott/numbers.mp3",
+    "seconds": 6.269388,
+    "hash": "6f286c6c47a7"
+  },
+  "log": {
+    "file": "vo/short/scott/log.mp3",
+    "seconds": 4.91102,
+    "hash": "6411d013aee0"
+  },
+  "close": {
+    "file": "vo/short/scott/close.mp3",
+    "seconds": 1.906939,
+    "hash": "eb570d5030bf"
+  }
+}
