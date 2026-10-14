@@ -9,8 +9,9 @@ import voScott from "./data/vo.scott.json";
 import { LINES, VOICES, type LineId, type VoiceKey } from "./data/script";
 
 /** Which voice to render: `REMOTION_VOICE=scott pnpm render…` (Remotion passes REMOTION_* env vars into the bundle). */
-export const VOICE_KEY: VoiceKey = process.env.REMOTION_VOICE === "scott" ? "scott" : "matilda";
-if (!(VOICE_KEY in VOICES)) throw new Error(`unknown voice ${VOICE_KEY}`);
+const requested = process.env.REMOTION_VOICE;
+if (requested && !Object.hasOwn(VOICES, requested)) throw new Error(`unknown REMOTION_VOICE ${requested}; use one of ${Object.keys(VOICES).join(", ")}`);
+export const VOICE_KEY: VoiceKey = requested === "scott" ? "scott" : "matilda";
 const vo: Record<LineId, { file: string; seconds: number }> = VOICE_KEY === "scott" ? voScott : voMatilda;
 
 export const FPS = 30;

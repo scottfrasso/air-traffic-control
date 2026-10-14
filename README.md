@@ -5,7 +5,7 @@ Built on Cloudflare Workers and Artifacts for the "Build the next Git platform" 
 
 https://github.com/user-attachments/assets/b39d2151-e981-463f-94a3-d87822c23004
 
-🎬 Demo video (6:52). Full quality: [`submission/atc-demo.mp4`](submission/atc-demo.mp4)
+🎬 Demo video (6:52). Full quality: [`submission/atc-demo.mp4`](submission/atc-demo.mp4) · 60-second version: [`submission/atc-linkedin.mp4`](submission/atc-linkedin.mp4)
 
 ✈️ **Watch a recorded run, no setup or key needed: [https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay](https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay)** (use the 1X–8X buttons; click a parked plane to read its flight log)
 

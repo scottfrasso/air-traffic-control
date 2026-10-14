@@ -19,9 +19,15 @@ const env = Object.fromEntries(readFileSync(resolve(ROOT, ".env"), "utf8").split
 const key = process.env.ELEVENLABS_API_KEY ?? env.ELEVENLABS_API_KEY;
 if (!key) throw new Error("ELEVENLABS_API_KEY is not set");
 
-const arg = (name: string) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
+const arg = (name: string) => {
+  const i = process.argv.indexOf(name);
+  if (i < 0) return undefined;
+  const v = process.argv[i + 1];
+  if (!v || v.startsWith("--")) throw new Error(`${name} needs a value`);
+  return v;
+};
 const voiceKey = (arg("--voice") ?? "matilda") as VoiceKey;
-const VOICE = VOICES[voiceKey];
+const VOICE = Object.hasOwn(VOICES, voiceKey) ? VOICES[voiceKey] : undefined;
 if (!VOICE) throw new Error(`unknown voice ${voiceKey}; use one of ${Object.keys(VOICES).join(", ")}`);
 const short = process.argv.includes("--short");
 const lines: Record<string, string> = short ? SHORT_LINES : LINES;

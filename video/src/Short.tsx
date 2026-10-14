@@ -1,20 +1,23 @@
-/** ATCShort: the ~90-second LinkedIn cut, with burned-in captions (LinkedIn autoplays muted). */
+/** ATCShort: the ~60-second LinkedIn cut (about 65 s in the Scott voice), with burned-in captions (LinkedIn autoplays muted). */
 import { Audio } from "@remotion/media";
 import { AbsoluteFill, Sequence, staticFile, useCurrentFrame } from "remotion";
 import { Board, fade, PointBadge } from "./scene/Overlay";
 import { C, PIXEL, TERM } from "./scene/Stage";
 import { caption, longTime, SEGMENTS, shortVoFile, type ShortSegment } from "./short-timeline";
+import run from "./data/run.json";
 import { FPS, PAIRS } from "./timeline";
 import { Beat } from "./Video";
 
+const N = run.order.length;
 const NUMBERS = [
-  ["5", "changes in flight at once"],
+  [String(N), "changes in flight at once"],
   [String(PAIRS.length), "pairs test-merged and type-checked"],
   [String(PAIRS.filter((p) => p.status === "semantic_conflict").length), "real conflict, caught before anyone asked to merge"],
-  ["0", `rebases (rebasing on every merge: ${(5 * 4) / 2})`],
+  [String(run.rebased.length), `rebases (rebasing on every merge: ${(N * (N - 1)) / 2})`],
 ] as const;
 
-// A real flight log from the public replay run (shop-261011185716), trimmed to the lines that tell the story.
+// A real flight log, trimmed to the lines that tell the story. It is from the public replay run (shop-261011185716),
+// not the run on the other cards (run.json predates flight logs), and that run had a go-around: the title says so.
 const NOTE = [
   "ATC-PR: PR2",
   "ATC-Signal: semantic_conflict with PR1 on applyDiscount",
@@ -42,7 +45,7 @@ function Card({ seg, t }: { seg: ShortSegment; t: number }) {
       </Board>
     );
   return (
-    <Board t={t} from={seg.start} title="FLIGHT LOG, A GIT NOTE ON THE LANDED COMMIT">
+    <Board t={t} from={seg.start} title="FLIGHT LOG (A GIT NOTE) FROM ANOTHER RUN">
       <div style={{ position: "absolute", left: 160, top: 200, width: 1600, padding: "34px 44px", background: C.panel, border: `6px solid ${C.cyan}`, boxShadow: "10px 10px 0 #000" }}>
         <div style={{ font: `34px/1.2 ${TERM}`, color: C.dim, marginBottom: 18 }}>$ git log --notes=atc</div>
         {NOTE.map((l, i) => (
