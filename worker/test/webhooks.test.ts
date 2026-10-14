@@ -30,3 +30,14 @@ test("signed webhooks carry the HMAC of the body", async () => {
   assert.equal(f.calls[0]!.headers["x-atc-signature"], await signature("s3cret", '{"a":1}'));
   assert.match(f.calls[0]!.headers["x-atc-signature"]!, /^sha256=[0-9a-f]{64}$/);
 });
+
+test("a 200 whose body fails to cancel is still one delivery, not a re-send (review of #42)", async () => {
+  let calls = 0;
+  const fetcher = (async () => {
+    calls++;
+    const body = new ReadableStream({ start: (c) => c.error(new Error("stream broke")) });
+    return new Response(body, { status: 200 });
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await deliver("https://hook", null, "{}", fetcher, noWait), { ok: true, attempts: 1 });
+  assert.equal(calls, 1);
+});

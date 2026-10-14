@@ -18,7 +18,7 @@ Nothing.
 ## Works (verified against deployed Cloudflare resources)
 
 - **Acceptance test:** `./demo/run.sh` passes end to end, all six steps plus 3 extra traffic PRs that land in ATC order **without rebasing**, about 60 s
-  (last run 2026-10-11, `shop-261011102223`, after the landing-reliability fixes).
+  (run for every PR on 2026-10-14/15; last `shop-261014221127`).
 - **Landing reliability (#1, #3, #5, 2026-10-11):** the land check pins the fork head ATC checked and retries if the fork moved;
   the landing lock is token-owned and outlives the checker timeout; every pair of open PRs must have a speculative-merge result
   for their **current** heads before either is cleared or lands (missing or stale pairs are re-queued by the reconcile alarm,
@@ -50,7 +50,7 @@ Nothing.
   Idempotent; `--dry-run` shows the plan. Run against this account; untested on a second account.
 - **Tidy-up (#10, 2026-10-14):** storage is pruned in the reconcile alarm (never the public replay or the video's run), webhooks
   have a 5 s timeout and one retry, `check_main_conflict` replaces the parsed "on main:" prefix (existing DOs migrate in
-  place), duplicates removed. ADR-0024. Splitting `coordinator.ts` comes separately.
+  place), duplicates removed. ADR-0024. The read side and signal store were split out of `coordinator.ts` in #42.
 - **Review gate (#16, ADR-0023, 2026-10-14):** optional (off by default). PRs wait in REVIEW until a reviewer approves their
   current head, through the MCP `review` tool, the dashboard's APPROVE button or `POST /reviews`; the note goes into the
   flight log. `./demo/run.sh --review` runs it with a scripted reviewer.
@@ -116,11 +116,11 @@ passing; production always equal to `main` after a merge):
 #24 publish the submission · #25 public replay (#14) · #27, #29 the 60-second cut · #28 pair-check errors (#5) · #30, #31, #35 no PR stays pending,
 main never moves backwards (#2, #4) · #32 clearance wording (#6) · #33 queue consumer + DLQ (#7) · #34 checker lock (#8) ·
 #36 checks share work (#9) · #37 tests (#11) · #38 review gate (#16) · #39, #41 one-command deploy (#18) ·
-#40 and this PR, tidy-up and the Coordinator split (#10).
+#40, #42, #43 tidy-up and the Coordinator split (#10).
 
 Open:
+- (#21 finals prep is closed on GitHub, closed 2026-10-14 before this run; reopen it if ATC is selected on 10-16.)
 - #19 compare competing attempts: a design is on the issue (about half a day of work).
-- #21 finals prep is closed on GitHub (closed 2026-10-14 before this run; reopen it if ATC is selected on 10-16).
 - Ideas left by reviews: per-container cap on concurrent tsc runs (ADR-0013 limits); passing ATC's known "alone"
   results into pair checks; a second-account run of `pnpm setup:cloudflare`.
 

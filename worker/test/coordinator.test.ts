@@ -414,7 +414,6 @@ test("pruning drops old resolved signals of landed PRs only; abandoned and activ
     a.q("UPDATE forks SET status = ? WHERE name = ?", status, n);
     a.q("INSERT INTO signals(fork, kind, about_fork, symbol, message, data, dedupe_key, created_at, resolved_at) VALUES (?, 'overlap', NULL, NULL, 'm', '{}', ?, 1, 1)", n, `k-${n}`);
   }
-  a.addFork("keepalive"); // something active so reconcile runs its full pass
   await a.co.reconcile();
   assert.deepEqual(a.q<{ fork: string }>("SELECT fork FROM signals ORDER BY fork").map((r) => r.fork), ["gone1", "live1"]);
 });
