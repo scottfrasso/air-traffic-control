@@ -90,7 +90,7 @@ Full plan with reasons: [`handover/04-next.md`](handover/04-next.md). In short:
 1. ~~Landing reliability bugs #1, #3, #5.~~ Done 2026-10-11 (#22).
 2. ~~#15 flight log on the landed commit (context preservation), then #17 savings in numbers.~~ Done 2026-10-11 (#23);
    still to do: a 10–15 s flight-log beat and a recap with the real numbers in the video.
-3. #14 public read-only replay link; fill `<PUBLIC_REPLAY_URL>` in `submission/FORM_DRAFT.md`.
+3. ~~#14 public read-only replay link.~~ Done 2026-10-14 (ADR-0020): https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay
 4. If time: #18 one-command deploy, #16 review clearance.
 5. Video is approved (#13). Optional: re-render with a #15/#17 beat in place of the recap's "next" line.
 6. Secret scan, push, go public (#12) when the owner says so; the owner submits the form (#20) by 10-14 23:59 PDT.

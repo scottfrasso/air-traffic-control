@@ -1,5 +1,7 @@
 # ADR-0005: One shared API key guards every route except /health
 
+> Narrowed by [ADR-0020](0020-public-replay.md): the replay timeline of allow-listed baselines is readable without the key.
+
 - Status: Accepted
 - Date: 2026-10-10
 
