@@ -182,6 +182,7 @@ test("land: a PR on current main lands (main moves to it); a stale expected head
     // Another landing pinned to the old main: the guard refuses it instead of landing on a main it didn't check.
     const stale = await s.check({ mode: "land", fork: { ...s.a }, baseline: { ...base, expectedHead: before } });
     assert.deepEqual([stale.landed, stale.retry], [false, true]);
+    assert.match(stale.reason, /moved/); // the guard, not a failed push (review of #37)
     assert.equal(main(), ok.landedSha); // nothing moved
   } finally {
     s.cleanup();
@@ -202,6 +203,37 @@ test("land: a PR that fits alone but breaks on the new main is refused as a main
     assert.deepEqual([second.landed, second.mainConflict], [false, true]);
     assert.equal(second.typecheck.errors[0].file, "src/checkout.ts");
     assert.equal(main(), after);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("land: a fork that moved since ATC checked it is refused with retry (review of #37)", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const bare = join(s.root, "shop.git");
+    execFileSync("git", ["clone", "-q", "--bare", s.base.remote, bare]);
+    const head = execFileSync("git", ["rev-parse", "main"], { cwd: bare, encoding: "utf8" }).trim();
+    const r = await s.check({ mode: "land", fork: { ...s.c, expectedHead: "0".repeat(40) }, baseline: { name: "shop", remote: bare, token: "", expectedHead: head } });
+    assert.deepEqual([r.landed, r.retry], [false, true]);
+    assert.match(r.reason, /moved/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("notes: flight logs are written to refs/notes/atc, and a retry doesn't duplicate them (review of #37)", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const bare = join(s.root, "shop.git");
+    execFileSync("git", ["clone", "-q", "--bare", s.base.remote, bare]);
+    const head = execFileSync("git", ["rev-parse", "main"], { cwd: bare, encoding: "utf8" }).trim();
+    const input = { mode: "notes", baseline: { name: "shop", remote: bare, token: "" }, notes: [{ sha: head, note: "ATC flight log: PR1\n\nATC-PR: PR1" }] };
+    const first = await s.check(input);
+    assert.deepEqual(first.written, [head]);
+    await s.check(input); // retried after a push that did land
+    const note = execFileSync("git", ["notes", "--ref=atc", "show", head], { cwd: bare, encoding: "utf8" });
+    assert.equal(note.match(/ATC-PR: PR1/g)?.length, 1);
   } finally {
     s.cleanup();
   }

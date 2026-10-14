@@ -298,6 +298,11 @@ test("landing: main moves to the landed commit, only the conflicting PR goes aro
   const rechecks = a.pipelines.filter((p) => p.params.kind === "recheck").map((p) => p.params.fork);
   assert.deepEqual(rechecks, [PC]); // …and is re-checked on the new main; b is not (it must push first)
   assert.equal(a.q("SELECT * FROM flight_logs WHERE fork = ?", PA).length, 1);
+  // What the winner and its agent are told (review of #37).
+  assert.deepEqual(res.rebaseRequired, [PB]);
+  assert.match(res.atc ?? "", /PR2 must go around/);
+  assert.match(a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'landed'", PA)[0]!.message, /PR2 must go around \(conflict\)/);
+  assert.equal(a.heads.get("base-repo"), `landed-${PA}1`); // main really moved (the fake checker pushed it)
   assert.match((await a.co.getClearance(PB)).message, /go around/);
 });
 
@@ -346,4 +351,14 @@ test("a published replay's baseline is never pruned (ADR-0020)", async () => {
   await a.co.reconcile();
   assert.ok(a.q<{ n: number }>("SELECT count(*) AS n FROM event_log")[0]!.n > KEEP_EVENTS + 500);
   assert.deepEqual([...keptBaselines({ PUBLIC_REPLAY_BASELINES: "x, y" })].sort(), ["booking-261010213346", "x", "y"]);
+});
+
+test("landing: the Coordinator pins the main it checked; if main moved, the checker refuses and nothing lands (review of #37)", async () => {
+  const a = airport();
+  await readyToLand(a);
+  a.heads.set("base-repo", "main9"); // someone pushed main after ATC read it
+  a.onHeadRead = async (repo) => (repo === "base-repo" ? "main0" : undefined); // …and ATC's read is stale
+  const res = await a.co.requestLand(PA);
+  assert.deepEqual([res.landed, res.retry], [false, true]);
+  assert.equal(a.fork(PA)!.status, "active");
 });

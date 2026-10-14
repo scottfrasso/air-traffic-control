@@ -84,10 +84,14 @@ export function airport(baseline = "base-repo", vars: Record<string, string> = {
     /** Override what Artifacts answers for one read of `repo` (to model a stale or racing read). */
     onHeadRead: undefined as undefined | ((repo: string) => Promise<string | undefined>),
     /** What the checker container answers. Default: a landing succeeds onto main, notes are written. */
-    checker: async (input: { mode: string; fork?: { expectedHead?: string } }): Promise<unknown> =>
-      input.mode === "land"
-        ? { mode: "land", landed: true, landedSha: `landed-${input.fork?.expectedHead ?? "x"}`, forkHead: input.fork?.expectedHead, merged: true }
-        : { mode: "notes", written: [] },
+    // Like the real one: refuses (retry) unless main is where the Coordinator pinned it, and moves main on success.
+    checker: async (input: { mode: string; fork?: { expectedHead?: string }; baseline?: { expectedHead?: string } }): Promise<unknown> => {
+      if (input.mode !== "land") return { mode: "notes", written: [] };
+      if (input.baseline?.expectedHead !== heads.get(baseline)) return { mode: "land", landed: false, retry: true, reason: "main moved; retry" };
+      const landedSha = `landed-${input.fork?.expectedHead ?? "x"}`;
+      heads.set(baseline, landedSha);
+      return { mode: "land", landed: true, landedSha, forkHead: input.fork?.expectedHead, merged: true };
+    },
     /** Add an active fork the way createFork leaves it (without going through Artifacts). */
     addFork(name: string, base = heads.get(baseline)!) {
       q(
