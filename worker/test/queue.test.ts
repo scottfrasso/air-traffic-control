@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { consumeBatch, retryDelaySeconds, type QueueMessage } from "../src/queue";
+import { consumeBatch, retryDelaySeconds, routePushEvent, type QueueMessage } from "../src/queue";
 
 const msg = (id: string, body: string, attempts = 1) => {
   const m = { id, body, attempts, acked: false, retried: undefined as number | undefined };
@@ -26,4 +26,21 @@ test("one failing message is retried on its own; the others are acked and not re
 
 test("retries back off and are capped at a minute", () => {
   assert.deepEqual([1, 2, 3, 4, 10].map(retryDelaySeconds), [5, 10, 20, 40, 60]);
+});
+
+test("routing: only pushes to main reach the baseline's Coordinator, ensure first (review of #33)", async () => {
+  const calls: string[] = [];
+  const env = { COORDINATOR: { getByName: (n: string) => ({ ensure: async (b: string) => void calls.push(`${n} ensure ${b}`), onPush: async (r: string, sha: string, src: string) => void calls.push(`${n} onPush ${r} ${sha} ${src}`) }) } } as unknown as Env;
+  const push = (ref: string) => ({ type: "cf.artifacts.repo.pushed", source: { repoName: "shop--pr1" }, payload: { ref, after: "abc", commits: [] } });
+  await routePushEvent(env, push("refs/heads/feature") as never);
+  await routePushEvent(env, { type: "cf.artifacts.repo.created", source: { repoName: "shop--pr1" }, payload: {} } as never);
+  assert.deepEqual(calls, []);
+  await routePushEvent(env, push("refs/heads/main") as never);
+  assert.deepEqual(calls, ["shop ensure shop", "shop onPush shop--pr1 abc event"]);
+});
+
+test("a thrown non-Error is logged by its value, not as undefined", async () => {
+  const logs: string[] = [];
+  await consumeBatch([msg("9", "x")], async () => { throw "plain string"; }, (l) => logs.push(l));
+  assert.match(logs[0]!, /plain string/);
 });

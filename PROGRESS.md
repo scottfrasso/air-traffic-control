@@ -51,6 +51,9 @@ Nothing.
 - **One-command deploy (#18, ADR-0025, 2026-10-14):** `pnpm setup:cloudflare` creates the queues and Artifacts namespace if missing,
   points `wrangler.jsonc` at the account, generates the API key, deploys with secrets and writes `.env` for `run.sh`.
   Idempotent; `--dry-run` shows the plan. Run against this account; untested on a second account.
+- **Tidy-up (#10, 2026-10-14):** storage is pruned in the reconcile alarm (never the public replay or the video's run), webhooks
+  have a 5 s timeout and one retry, `check_main_conflict` replaces the parsed "on main:" prefix (existing DOs migrate in
+  place), duplicates removed. ADR-0024. Splitting `coordinator.ts` comes separately.
 - **Flight log on main (#15, ADR-0019, 2026-10-11):** each landing attaches the PR's story (intent, signals, every clearance
   change with its reason, go-arounds) to the landed commit as a git note under `refs/notes/atc`. `run.sh` step 8 checks every
   landed PR has it (`shop-261011185716`). Agents read it with `get_history` (MCP) or `GET /history`; on the dashboard, click a parked plane.

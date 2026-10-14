@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { airport } from "./harness/coordinator";
+import { KEEP_EVENTS, keptBaselines } from "../src/coordinator";
 import type { ForkIndex } from "../src/artifacts";
 
 // The real Coordinator Durable Object on node:sqlite (see harness/). Run through `pnpm test`, which loads the harness.
@@ -239,7 +240,7 @@ test("after the last restart the alarm stays up, so the final give-up still fire
   assert.equal(a.events("check.gave_up").length, 1);
 });
 
-test("a fork event whose live head can't be read is dropped, not applied (review of #31)", async () => {
+test("a fork event whose live head can't be read is retried by the queue, not applied (reviews of #31, #35)", async () => {
   const a = airport();
   await a.co.ensure("base-repo");
   a.addFork("a");
@@ -248,7 +249,7 @@ test("a fork event whose live head can't be read is dropped, not applied (review
     if (repo === "a") throw new Error("Artifacts 503");
     return undefined;
   };
-  await a.co.onPush("a", "a1", "event"); // a retried, older event during an outage
+  await assert.rejects(a.co.onPush("a", "a1", "event"), /verify push/); // a retried, older event during an outage: the queue redelivers it
   assert.equal(a.fork("a")!.head_sha, "a2");
   assert.equal(a.events("push.event_unverified").length, 1);
 });
@@ -297,6 +298,11 @@ test("landing: main moves to the landed commit, only the conflicting PR goes aro
   const rechecks = a.pipelines.filter((p) => p.params.kind === "recheck").map((p) => p.params.fork);
   assert.deepEqual(rechecks, [PC]); // …and is re-checked on the new main; b is not (it must push first)
   assert.equal(a.q("SELECT * FROM flight_logs WHERE fork = ?", PA).length, 1);
+  // What the winner and its agent are told (review of #37).
+  assert.deepEqual(res.rebaseRequired, [PB]);
+  assert.match(res.atc ?? "", /PR2 must go around/);
+  assert.match(a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'landed'", PA)[0]!.message, /PR2 must go around \(conflict\)/);
+  assert.equal(a.heads.get("base-repo"), `landed-${PA}1`); // main really moved (the fake checker pushed it)
   assert.match((await a.co.getClearance(PB)).message, /go around/);
 });
 
@@ -318,4 +324,78 @@ test("landing: the checker refusing (main moved under it) answers retry and land
   assert.deepEqual([res.landed, res.retry], [false, true]);
   assert.equal(a.fork(PA)!.status, "active");
   assert.equal(a.meta("landing"), ""); // the lock is released
+});
+
+// ── storage pruning (issue #10) ──
+
+const fill = (a: ReturnType<typeof airport>, n: number) =>
+  a.q("WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < ?) INSERT INTO event_log(at, kind, fork, detail) SELECT i, 'filler', NULL, '{}' FROM k", n);
+
+test("the alarm keeps storage bounded: only the newest events are kept", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a"); // something in flight, so reconcile runs its full pass
+  fill(a, KEEP_EVENTS + 500);
+  await a.co.reconcile();
+  const n = a.q<{ n: number }>("SELECT count(*) AS n FROM event_log")[0]!.n;
+  assert.ok(n <= KEEP_EVENTS + 10, `${n} events left`);
+  assert.equal(a.q("SELECT * FROM event_log WHERE kind = 'baseline.registered'").length, 0); // the oldest went first
+});
+
+test("a published replay's baseline is never pruned (ADR-0020)", async () => {
+  const a = airport("shop-261011185716", { PUBLIC_REPLAY_BASELINES: "shop-261011185716" });
+  a.heads.set("shop-261011185716", "main0");
+  await a.co.ensure("shop-261011185716");
+  a.addFork("a");
+  fill(a, KEEP_EVENTS + 500);
+  await a.co.reconcile();
+  assert.ok(a.q<{ n: number }>("SELECT count(*) AS n FROM event_log")[0]!.n > KEEP_EVENTS + 500);
+  assert.deepEqual([...keptBaselines({ PUBLIC_REPLAY_BASELINES: "x, y" })].sort(), ["booking-261010213346", "x", "y"]);
+});
+
+test("landing: the Coordinator pins the main it checked; if main moved, the checker refuses and nothing lands (review of #37)", async () => {
+  const a = airport();
+  await readyToLand(a);
+  a.heads.set("base-repo", "main9"); // someone pushed main after ATC read it
+  a.onHeadRead = async (repo) => (repo === "base-repo" ? "main0" : undefined); // …and ATC's read is stale
+  const res = await a.co.requestLand(PA);
+  assert.deepEqual([res.landed, res.retry], [false, true]);
+  assert.equal(a.fork(PA)!.status, "active");
+});
+
+// ── check_main_conflict (review of #40) ──
+
+test("a PR that fits alone but not on main is flagged by the column: it goes around and land is refused with rebase_required", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  await stuckFork(a, "base-repo--pr1");
+  await a.co.applySingle(JSON.stringify({ repo: "base-repo--pr1", forkSha: "base-repo--pr11", baseHead: "main0", mainConflict: true, result: { ok: false, errors: [], output: "src/a.ts(1,1): error TS2345: boom" } }));
+  const f = a.fork("base-repo--pr1")!;
+  assert.equal(f.check_main_conflict, 1);
+  assert.doesNotMatch(String(f.check_detail), /^on main:/); // the flag, not a prefix
+  assert.equal((await a.co.getClearance("base-repo--pr1")).clearance, "go_around");
+  const res = await a.co.requestLand("base-repo--pr1");
+  assert.match(res.reason ?? "", /doesn't fit on current main/);
+  assert.equal(a.q("SELECT * FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL").length, 1);
+});
+
+test("an existing Durable Object without the column gets it added (idempotent) and old prefixed rows still read", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE forks(name TEXT PRIMARY KEY, check_detail TEXT)"); // as before the column existed
+  const cols = () => (db.prepare("SELECT name FROM pragma_table_info('forks')").all() as Array<{ name: string }>).map((r) => r.name);
+  const { COLUMNS } = await import("../src/schema");
+  for (let i = 0; i < 2; i++) for (const c of COLUMNS) if (!cols().includes(c.column)) db.exec(c.ddl);
+  assert.ok(cols().includes("check_main_conflict"));
+  const { mainConflict } = await import("../src/landing");
+  assert.equal(mainConflict({ check_detail: "on main: x" } as never), true);
+});
+
+test("deferred main reads during one landing are logged once (review of #40)", async () => {
+  const a = airport();
+  await a.co.ensure("base-repo");
+  a.addFork("a");
+  a.q("INSERT INTO meta(key, value) VALUES ('landing', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify({ token: "t", at: Date.now() }));
+  for (let i = 0; i < 3; i++) await a.co.reconcile();
+  assert.equal(a.events("baseline.read_deferred").length, 1);
 });

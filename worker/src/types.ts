@@ -19,6 +19,8 @@ export type ForkRow = {
   land_requested_at: number | null;
   landed_at: number | null;
   check_status: "unknown" | "pending" | "green" | "red" | "error";
+  /** 1: the PR is fine alone but doesn't fit on current main, so it must go around (was an "on main:" detail prefix). */
+  check_main_conflict?: number;
   check_sha: string | null;
   check_base: string | null;
   check_detail: string | null;

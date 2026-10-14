@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { forkName, headOf, type ForkIndex } from "./artifacts";
+import { forkName, headOf, repoRef, type ForkIndex } from "./artifacts";
 import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
@@ -12,11 +12,18 @@ import { analyzePair, describeError } from "./conflicts";
 import { NoteWriter, takeBatch } from "./notes";
 import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
 import { computeSavings, type LogEvent } from "./savings";
-import { SCHEMA } from "./schema";
+import { COLUMNS, SCHEMA } from "./schema";
+import { deliver } from "./webhooks";
 import { DERIVED_KINDS, deriveSignals, intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
 import type { CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalData, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
+/** Storage bounds (prune): a 5-PR demo run writes about 600 events and 40 snapshots. */
+export const KEEP_EVENTS = 20_000;
+export const KEEP_SNAPSHOTS = 5_000;
+/** Baselines whose recorded runs must never be pruned: the public replays, and the run the submitted video shows. */
+export const keptBaselines = (env: Pick<Env, "PUBLIC_REPLAY_BASELINES">) =>
+  new Set([...(env.PUBLIC_REPLAY_BASELINES ?? "").split(","), "booking-261010213346"].map((s) => s.trim()).filter(Boolean));
 /** Stop polling after this long without a push or API activity, so idle DOs hibernate (and pick up new deploys). */
 const RECONCILE_IDLE_MS = 10 * 60_000;
 
@@ -31,6 +38,8 @@ export class Coordinator extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    for (const c of COLUMNS)
+      if (!this.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${c.table}')`).toArray().some((r) => r.name === c.column)) this.sql.exec(c.ddl);
   }
 
   // ── meta ────────────────────────────────────────────────────────────────
@@ -155,19 +164,7 @@ export class Coordinator extends DurableObject<Env> {
     const hooks = this.sql.exec<{ url: string; secret: string | null }>("SELECT url, secret FROM webhooks").toArray();
     if (!hooks.length) return;
     const body = JSON.stringify({ type: "atc.event", baseline: this.meta("baseline"), event });
-    for (const h of hooks) {
-      this.ctx.waitUntil(
-        (async () => {
-          const headers: Record<string, string> = { "content-type": "application/json", "user-agent": "atc-webhooks/1" };
-          if (h.secret) {
-            const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(h.secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-            const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)));
-            headers["x-atc-signature"] = `sha256=${[...sig].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-          }
-          await fetch(h.url, { method: "POST", headers, body }).catch(() => undefined);
-        })(),
-      );
-    }
+    for (const h of hooks) this.ctx.waitUntil(deliver(h.url, h.secret, body));
   }
 
   // ── forks ───────────────────────────────────────────────────────────────
@@ -193,7 +190,6 @@ export class Coordinator extends DurableObject<Env> {
     const forked = await base.fork(name, { description: `agentmesh fork for ${agent}`, defaultBranchOnly: true });
     const baselineRead = await base.createToken("read", 6 * 3600);
 
-    const subscriptionId: string | null = null; // attached by the Worker via attachSubscription (ADR-0009)
 
     const now = Date.now();
     this.sql.exec(
@@ -202,8 +198,8 @@ export class Coordinator extends DurableObject<Env> {
        ON CONFLICT(name) DO UPDATE SET agent = excluded.agent, status = 'active', created_at = excluded.created_at,
          base_sha = excluded.base_sha, head_sha = excluded.head_sha, processed_sha = excluded.processed_sha,
          subscription_id = excluded.subscription_id, remote = excluded.remote, diff_lines = 0,
-         land_requested_at = NULL, check_status = 'unknown', check_sha = NULL, check_detail = NULL`,
-      name, agent, pr, now, baseHead.hash, baseHead.hash, baseHead.hash, subscriptionId, forked.remote,
+         land_requested_at = NULL, check_status = 'unknown', check_sha = NULL, check_detail = NULL, check_main_conflict = 0`,
+      name, agent, pr, now, baseHead.hash, baseHead.hash, baseHead.hash, null, forked.remote, // subscription: attachSubscription (ADR-0009)
     );
     this.log("fork.created", { agent, pr, baseSha: baseHead.hash }, name);
     await this.scheduleReconcile();
@@ -244,9 +240,10 @@ export class Coordinator extends DurableObject<Env> {
       // Same for a fork: a retried or reordered event can carry an older head than one already applied (review of #33).
       const live = await headOf(this.env, repo).catch(() => null);
       if (!live) {
-        // Can't tell whether the event is current: drop it; reconcile reads the fork's head within seconds.
+        // Can't tell whether the event is current. Throw, so the queue redelivers it with a back-off (and after
+        // max_retries keeps it in the DLQ); meanwhile reconcile reads the fork's head too (review of #35).
         this.log("push.event_unverified", { sha }, repo);
-        return;
+        throw new Error(`couldn't read ${repo}'s head to verify push ${sha.slice(0, 7)}; retry`);
       }
       if (live.hash !== sha) {
         this.log("push.event_stale", { sha, live: live.hash }, repo);
@@ -293,7 +290,15 @@ export class Coordinator extends DurableObject<Env> {
     if (!baseline) return;
     // A landing in progress may already have pushed main; onLanded records that head itself. Reading now would take
     // ATC's own landing for an outside push and re-check everyone, go-arounds included (review of #31).
-    if (this.landingInProgress()) return;
+    if (this.landingInProgress()) {
+      // onLanded records the head; the next read after it confirms. Logged once per landing, not every 5 s (review of #40).
+      const lock = this.meta("landing") ?? "";
+      if (this.meta("read_deferred_for") !== lock) {
+        this.setMeta("read_deferred_for", lock);
+        this.log("baseline.read_deferred", { source });
+      }
+      return;
+    }
     const epoch = this.meta("main_epoch");
     const live = await headOf(this.env, baseline).catch(() => null);
     if (!live) return;
@@ -319,8 +324,8 @@ export class Coordinator extends DurableObject<Env> {
    * kind "push": full pipeline (index, overlap signals, PR-on-main check, pair merges).
    * kind "recheck": main moved; only re-verify that the PR still merges onto the new main and typechecks.
    * kind "pairs": a pair check was lost or went stale; re-run just those pairs at the current heads.
+   * Returns false if the instance couldn't be created (usually: the same push was already started).
    */
-  /** Returns false if the instance couldn't be created (usually: the same push was already started). */
   /** `restart`: the n-th time ATC starts this PR's checks again by itself (a new instance id, see restartStuckChecks). */
   private async startPipeline(fork: string, sha: string, kind: "push" | "recheck" | "pairs" = "push", others: Array<{ name: string; sha: string }> = [], restart = 0): Promise<boolean> {
     const main = this.meta("baseline_head") ?? "";
@@ -381,7 +386,7 @@ export class Coordinator extends DurableObject<Env> {
     const row = this.fork(fork)!;
     // A result stands, unless the push itself was never indexed: a re-check alone can't finish that PR's checks.
     if (row.processed_sha === sha && row.check_sha === sha && (row.check_status === "green" || row.check_status === "red")) return false;
-    this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ? WHERE name = ?", sha, error.slice(0, 500), fork);
+    this.sql.exec("UPDATE forks SET check_status = 'error', check_sha = ?, check_detail = ?, check_main_conflict = 0 WHERE name = ?", sha, error.slice(0, 500), fork);
     this.emitSignal({
       fork, kind: "check_failed", about_fork: null, symbol: null,
       message: `ATC couldn't run the checks on your push ${sha.slice(0, 7)} (${error.slice(0, 120)}). It retries by itself; you can also push again.`,
@@ -623,10 +628,13 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private setCheck(fork: string, sha: string, ok: boolean, detail: string, base: string | null) {
+  private setCheck(fork: string, sha: string, ok: boolean, detail: string, base: string | null, onMain = false) {
     const row = this.fork(fork);
     if (!row || row.head_sha !== sha) return; // stale result; a newer push is being checked
-    this.sql.exec("UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ? WHERE name = ?", ok ? "green" : "red", sha, base, detail, fork);
+    this.sql.exec(
+      "UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ?, check_main_conflict = ? WHERE name = ?",
+      ok ? "green" : "red", sha, base, detail, !ok && onMain ? 1 : 0, fork,
+    );
     // The checks ran after all: an earlier "ATC couldn't run the checks" no longer applies (pair ones are per pair).
     this.sql.exec("UPDATE signals SET resolved_at = ? WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", Date.now(), fork);
   }
@@ -635,12 +643,12 @@ export class Coordinator extends DurableObject<Env> {
   async applySingle(json: string): Promise<void> {
     const r = JSON.parse(json) as SingleResult;
     const errs = r.result.errors.map(describeError).join("\n") || r.result.output.slice(0, 500);
-    const detail = r.result.ok ? "merges onto main and typechecks" : r.mainConflict ? `on main: ${errs}` : errs;
+    const detail = r.result.ok ? "merges onto main and typechecks" : errs;
     if (r.baseHead && r.baseHead !== this.meta("baseline_head")) {
       this.log("check.single.stale", { checkedOn: r.baseHead, timings: r.timings ?? [] }, r.repo); // main moved during the check; a recheck follows
       return;
     }
-    this.setCheck(r.repo, r.forkSha, r.result.ok, detail, r.baseHead);
+    this.setCheck(r.repo, r.forkSha, r.result.ok, detail, r.baseHead, !!r.mainConflict);
     this.log("check.single", { sha: r.forkSha, ok: r.result.ok, onMain: r.baseHead, mainConflict: !!r.mainConflict, errors: r.result.errors.length, timings: r.timings ?? [] }, r.repo);
   }
 
@@ -827,7 +835,8 @@ export class Coordinator extends DurableObject<Env> {
       this.log("land.denied", { reason }, fork);
       if (kind)
         this.emitSignal({ fork, kind, about_fork: null, symbol: null, message: reason, data: { baselineHead }, dedupe_key: `${kind}:${fork}:${me.head_sha}:${baselineHead}:${reason.slice(0, 40)}` });
-      return { landed: false, fork, reason, baselineHead, atc: this.sequence().find((e) => e.fork === fork) ? clearanceMessage(this.sequence().find((e) => e.fork === fork)!) : undefined };
+      const entry = this.sequence().find((e) => e.fork === fork); // built once (it's the costliest read here)
+      return { landed: false, fork, reason, baselineHead, atc: entry ? clearanceMessage(entry) : undefined };
     };
 
     const gate = landGate({
@@ -879,10 +888,8 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async repoRef(repo: string, scope: "read" | "write") {
-    using handle = await this.env.ARTIFACTS.get(repo);
-    const [token, info] = await Promise.all([handle.createToken(scope, 600), handle.info()]);
-    return { name: repo, remote: info.remote, token: token.plaintext };
+  private repoRef(repo: string, scope: "read" | "write") {
+    return repoRef(this.env, repo, scope, 600);
   }
 
   /**
@@ -1087,8 +1094,25 @@ export class Coordinator extends DurableObject<Env> {
     );
     await this.requeuePairs();
     await this.restartStuckChecks();
+    this.prune();
     if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
+  }
+
+  /**
+   * Storage stays bounded (issue #10): keep the newest events and snapshots, and drop resolved signals of PRs that are
+   * no longer in flight once they're a week old (their story is already in the flight log). Never for a baseline whose
+   * recorded run is published (ADR-0020) or kept for the video: pruning would cut its replay.
+   */
+  private prune() {
+    const baseline = this.meta("baseline") ?? "";
+    if (keptBaselines(this.env).has(baseline)) return;
+    this.sql.exec("DELETE FROM event_log WHERE id <= (SELECT max(id) FROM event_log) - ?", KEEP_EVENTS);
+    this.sql.exec("DELETE FROM snapshots WHERE id <= (SELECT max(id) FROM snapshots) - ?", KEEP_SNAPSHOTS);
+    this.sql.exec(
+      "DELETE FROM signals WHERE resolved_at IS NOT NULL AND resolved_at < ? AND fork NOT IN (SELECT name FROM forks WHERE status = 'active')",
+      Date.now() - 7 * 24 * 3600_000,
+    );
   }
 
   /** Mark activity so the reconcile alarm keeps running; called on every API call and push. */

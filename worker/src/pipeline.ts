@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
-import { indexFork } from "./artifacts";
+import { indexFork, repoRef } from "./artifacts";
 import { checkerFor, type RepoRef } from "./checker";
 
 export interface PipelineParams {
@@ -91,8 +91,4 @@ export class PushPipeline extends WorkflowEntrypoint<Env, PipelineParams> {
 }
 
 /** Short-lived read token + remote for a repo, for the checker container. */
-async function readRef(env: Env, repo: string): Promise<RepoRef> {
-  using handle = await env.ARTIFACTS.get(repo);
-  const [token, info] = await Promise.all([handle.createToken("read", 900), handle.info()]);
-  return { name: repo, remote: info.remote, token: token.plaintext };
-}
+const readRef = (env: Env, repo: string): Promise<RepoRef> => repoRef(env, repo, "read", 900);

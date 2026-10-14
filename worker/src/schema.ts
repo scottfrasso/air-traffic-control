@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS forks(
   check_status TEXT NOT NULL DEFAULT 'unknown',  -- unknown | pending | green | red | error (its check pipeline failed for good)
   check_sha TEXT,
   check_base TEXT,                   -- main commit the PR was merged onto for its check
-  check_detail TEXT
+  check_detail TEXT,
+  check_main_conflict INTEGER NOT NULL DEFAULT 0  -- 1: fine alone, but doesn't fit on current main (go around)
 );
 
 CREATE TABLE IF NOT EXISTS touched(
@@ -86,3 +87,8 @@ CREATE TABLE IF NOT EXISTS event_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL, kind TEXT NOT NULL, fork TEXT, detail TEXT NOT NULL);
 `;
+
+/** Columns added after a table first shipped: existing Durable Objects get them through ALTER TABLE (idempotent). */
+export const COLUMNS: Array<{ table: string; column: string; ddl: string }> = [
+  { table: "forks", column: "check_main_conflict", ddl: "ALTER TABLE forks ADD COLUMN check_main_conflict INTEGER NOT NULL DEFAULT 0" },
+];

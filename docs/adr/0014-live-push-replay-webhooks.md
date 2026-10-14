@@ -9,6 +9,11 @@
   polling only while reconnecting. Browsers can't receive HTTP webhooks, so this is the "webhooks to the dashboard" channel.
 - **Outbound webhooks:** `POST /api/repos/:b/webhooks {url, secret?}` (https only). Every event is POSTed as
   `{type: "atc.event", baseline, event}`, with `x-atc-signature: sha256=<HMAC>` when a secret is set.
+  Each POST has a 5 s timeout and one retry a second later on a timeout, network error, 5xx or 429; a 4xx isn't
+  retried (`worker/src/webhooks.ts`, issue #10). Secrets are stored in the Coordinator's storage in plain text, because
+  the HMAC needs them; anyone with the API key can already read every event. Delivery is at least once and unordered (a retry after a slow 2xx
+  repeats an event; dedupe on `event.id`). The 5 s timeout includes time queued behind Workers' 6 concurrent
+  connections, so a slow receiver can drop events in a burst; `GET /timeline` has everything.
 - **Recording:** each flush also stores a compact snapshot (forks, sequence, open conflict and rebase signals), but only when it differs
   from the last one. `GET /timeline` returns all snapshots plus all events.
   Since ADR-0019 a snapshot also carries the run's savings, and the timeline carries the landed PRs' flight logs once.

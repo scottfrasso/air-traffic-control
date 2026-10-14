@@ -30,6 +30,7 @@ the raw spike findings (milestone 1).
 | [0021](docs/adr/0021-checks-never-stay-pending.md) | Checks never stay pending: re-check on any main move, record failures, restart stuck runs | Accepted |
 | [0022](docs/adr/0022-coordinator-tests-in-node.md) | Coordinator DO tests in plain Node on node:sqlite | Accepted |
 | [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted |
+| [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
