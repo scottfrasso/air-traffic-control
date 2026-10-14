@@ -4,8 +4,8 @@ import { isPushed, type ArtifactsEvent } from "./events";
 import { deletePushSubscription } from "./subscriptions";
 import { checkerFor, type LandResult, type NotesResult, type PairResult, type SingleResult } from "./checker";
 import {
-  approachQueue, forksWaitingOnPairs, isGreen, landingOrder, mayRecordPairFailure, mayRelease, outstandingPairs, pairResultIsCurrent, pairsToQueue, parseLock, takeLock,
-  type PairCheckRow, type PairQueueRow,
+  approachQueue, forksWaitingOnPairs, landGate, mayRelease, outstandingPairs, pairFailure, pairPartners, pairResultIsCurrent, pairResultRow, pairsToQueue, parseLock, queuedPair,
+  takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
 import { analyzePair, describeError } from "./conflicts";
@@ -423,25 +423,38 @@ export class Coordinator extends DurableObject<Env> {
 
   /** What the pipeline should check for a push: the other active forks to merge with. */
   async checkPlan(fork: string, sha: string): Promise<{ current: boolean; others: Array<{ name: string; sha: string }> }> {
-    const row = this.fork(fork);
-    if (!row || row.status !== "active" || row.head_sha !== sha) return { current: false, others: [] };
-    const others = this.activeForks().filter((f) => f.name !== fork && f.head_sha !== f.base_sha);
-    for (const o of others) this.markPairQueued(row, o);
+    const forks = this.activeForks();
+    const others = pairPartners(forks, fork, sha);
+    if (!others) return { current: false, others: [] };
+    const me = forks.find((f) => f.name === fork)!;
+    for (const o of others) this.markPairQueued(me, o);
     return { current: true, others: others.map((f) => ({ name: f.name, sha: f.head_sha })) };
   }
 
   private markPairQueued(x: ForkRow, y: ForkRow) {
-    const [a, b] = x.name < y.name ? [x, y] : [y, x];
+    const q = queuedPair(x, y, Date.now());
     this.sql.exec(
       `INSERT INTO pair_queue(fork_a, fork_b, sha_a, sha_b, queued_at) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, queued_at = excluded.queued_at`,
-      a.name, b.name, a.head_sha, b.head_sha, Date.now(),
+      q.fork_a, q.fork_b, q.sha_a, q.sha_b, q.queued_at,
     );
   }
 
-  /** Pairs of active PRs whose current heads have no speculative-merge result yet (issue #5). */
+  private pairChecks() {
+    return this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b, status, detail, checked_at FROM pair_checks").toArray();
+  }
+
+  private savePairCheck(c: PairCheckRow) {
+    this.sql.exec(
+      `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, status = excluded.status, detail = excluded.detail, checked_at = excluded.checked_at`,
+      c.fork_a, c.fork_b, c.sha_a, c.sha_b, c.status ?? "error", c.detail ?? "{}", c.checked_at ?? Date.now(),
+    );
+  }
+
+  /** Pairs of active PRs whose current heads have no final speculative-merge result yet (issue #5). */
   private outstandingPairs() {
-    return outstandingPairs(this.activeForks(), this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b FROM pair_checks").toArray());
+    return outstandingPairs(this.activeForks(), this.pairChecks());
   }
 
   /** Re-queue pair checks that are missing or stale (a result was dropped as not current, or a check was lost). */
@@ -458,7 +471,8 @@ export class Coordinator extends DurableObject<Env> {
     for (const need of due) this.markPairQueued(this.fork(need.a)!, this.fork(need.b)!);
     for (const need of due) {
       const prev = queue.find((q) => q.fork_a === need.a && q.fork_b === need.b);
-      this.log("check.pair.requeued", { a: need.a, b: need.b, reason: indexing.has(need.a) || indexing.has(need.b) ? "indexing stuck" : prev ? "stale or lost" : "never checked" }, null);
+      const reason = need.failedAt !== undefined ? "retry after error" : indexing.has(need.a) || indexing.has(need.b) ? "indexing stuck" : prev ? "stale or lost" : "never checked";
+      this.log("check.pair.requeued", { a: need.a, b: need.b, reason }, null);
       if (!(await this.startPipeline(need.a, need.shaA, "pairs", [{ name: need.b, sha: need.shaB }])))
         this.sql.exec("DELETE FROM pair_queue WHERE fork_a = ? AND fork_b = ? AND sha_a = ? AND sha_b = ?", need.a, need.b, need.shaA, need.shaB);
     }
@@ -497,7 +511,6 @@ export class Coordinator extends DurableObject<Env> {
     const r = JSON.parse(json) as PairResult & { error?: string };
     if (r.error) throw new Error(`pair check failed: ${r.error}`); // the step retries; after that, applyPairFailure
 
-    const fresh = pairResultIsCurrent(this.activeForks(), r.a, r.aloneA.sha, r.b, r.aloneB.sha);
     const breaking: Record<string, string[]> = {};
     for (const row of this.sql
       .exec<{ fork: string; name: string }>("SELECT fork, name FROM symbol_changes WHERE change IN ('signature_changed', 'removed') AND fork IN (?, ?)", r.a, r.b)
@@ -505,20 +518,18 @@ export class Coordinator extends DurableObject<Env> {
       breaking[row.fork] = [...(breaking[row.fork] ?? []), row.name];
     const v = analyzePair(r, breaking);
 
-    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh, symbol: v.symbol, errors: v.newErrors.map(describeError), timings: r.timings ?? [] }, null);
-    if (!fresh) {
+    const row = pairResultRow(
+      this.activeForks(), r.a, r.aloneA.sha, r.b, r.aloneB.sha, v.status,
+      JSON.stringify({ newErrors: v.newErrors, symbol: v.symbol, changer: v.changer, conflicts: v.conflicts }), Date.now(),
+    );
+    this.log("check.pair", { a: r.a, b: r.b, status: v.status, fresh: !!row, symbol: v.symbol, errors: v.newErrors.map(describeError), timings: r.timings ?? [] }, null);
+    if (!row) {
       // Not for both PRs' current heads: recording it would overwrite a newer result, or mark a push ATC hasn't
       // seen yet as checked without raising its conflicts. Drop it and make sure the current heads get checked.
       await this.requeuePairs();
       return { status: `${v.status} (stale)` };
     }
-    const [x, y] = [r.a, r.b].sort() as [string, string];
-    this.sql.exec(
-      `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, status = excluded.status, detail = excluded.detail, checked_at = excluded.checked_at`,
-      x, y, x === r.a ? r.aloneA.sha : r.aloneB.sha, x === r.a ? r.aloneB.sha : r.aloneA.sha, v.status,
-      JSON.stringify({ newErrors: v.newErrors, symbol: v.symbol, changer: v.changer, conflicts: v.conflicts }), Date.now(),
-    );
+    this.savePairCheck(row);
     for (const [me, other] of [[r.a, r.b], [r.b, r.a]] as const) this.resolveSignals({ fork: me, kind: "check_failed", about_fork: other });
 
     if (v.status === "clean" || v.status === "inherited_failure") {
@@ -556,20 +567,22 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
-   * A pair check that kept failing (container error, timeout). Record it as checked with status "error" so it can't
-   * block landing forever, and tell both PRs. The land-time typecheck on main still catches a real conflict.
+   * A pair check that kept failing (container error, timeout) after its step retries. It stays outstanding, so neither
+   * PR is cleared, and the reconcile alarm runs it again after a back-off. Once PAIR_MAX_ATTEMPTS attempts have failed
+   * it counts as checked, so a broken checker can't block landing forever, and both PRs are told. The land-time
+   * typecheck on main still catches a real conflict.
    */
   async applyPairFailure(a: string, shaA: string, b: string, shaB: string, error: string): Promise<void> {
-    this.log("check.pair.failed", { a, b, shaA, shaB, error: error.slice(0, 300) }, null);
-    if (!pairResultIsCurrent(this.activeForks(), a, shaA, b, shaB)) return; // a newer push re-queues it anyway
-    // A duplicate run (re-queued while the first was slow) failing must not overwrite a real result.
-    if (!mayRecordPairFailure(this.sql.exec<PairCheckRow>("SELECT fork_a, fork_b, sha_a, sha_b, status FROM pair_checks").toArray(), a, shaA, b, shaB)) return;
-    const [x, sx, y, sy] = a < b ? [a, shaA, b, shaB] : [b, shaB, a, shaA];
-    this.sql.exec(
-      `INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, ?, 'error', ?, ?)
-       ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_a = excluded.sha_a, sha_b = excluded.sha_b, status = excluded.status, detail = excluded.detail, checked_at = excluded.checked_at`,
-      x, y, sx, sy, JSON.stringify({ error: error.slice(0, 500) }), Date.now(),
-    );
+    const outcome = pairFailure(this.activeForks(), this.pairChecks(), a, shaA, b, shaB, error, Date.now());
+    this.log("check.pair.failed", { a, b, shaA, shaB, error: error.slice(0, 300), ...(outcome.record ? { attempt: outcome.attempts, final: outcome.final } : { dropped: outcome.why }) }, null);
+    if (!outcome.record) return; // heads moved (a newer push re-queues it), or a real result is already in
+    this.savePairCheck(outcome.row);
+    if (!outcome.final) {
+      // The retry runs from the reconcile alarm: keep it running even if no agent is calling the API right now.
+      this.touch();
+      await this.scheduleReconcile();
+      return;
+    }
     for (const [me, other] of [[a, b], [b, a]] as const)
       this.emitSignal({
         fork: me, kind: "check_failed", about_fork: other, symbol: null,
@@ -666,33 +679,16 @@ export class Coordinator extends DurableObject<Env> {
       return { landed: false, fork, reason, baselineHead, atc: this.sequence().find((e) => e.fork === fork) ? clearanceMessage(this.sequence().find((e) => e.fork === fork)!) : undefined };
     };
 
-    const goAround = this.goAroundMap().get(fork);
-    if (goAround) return deny(goAround, null);
-    if (me.processed_sha !== me.head_sha || me.check_sha !== me.head_sha || me.check_status === "pending")
-      return { landed: false, fork, reason: "Checks for your latest push are still running; retry in a few seconds.", baselineHead, retry: true };
-    if (me.check_base !== baselineHead) {
-      // Main moved since this PR was checked: re-verify on the new main (merge queue — no rebase needed).
-      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
-      await this.startPipeline(fork, me.head_sha, "recheck");
-      return { landed: false, fork, reason: "Main moved; re-checking your PR on the new main. Retry in a few seconds.", baselineHead, retry: true };
-    }
-    if (!isGreen(me, baselineHead)) {
-      const detail = me.check_detail ?? "";
-      return detail.startsWith("on main:")
-        ? deny(`Your PR doesn't fit on current main: ${detail.slice(9)}. Rebase onto main and fix.`, "rebase_required")
-        : deny(`Your PR does not typecheck at ${me.head_sha.slice(0, 7)}: ${detail}`.trim());
-    }
-
-    // Never land before every pair check against the other PRs' current heads is in (issue #5).
-    if (forksWaitingOnPairs(this.outstandingPairs()).has(fork)) {
-      await this.requeuePairs();
-      return { landed: false, fork, reason: "Still checking your PR against the other open PRs; retry in a few seconds.", baselineHead, retry: true };
-    }
-
-    const ahead = this.rivals(fork).filter((r) => landingOrder(r, me, baselineHead) < 0);
-    if (ahead.length) {
-      const r = ahead[0]!;
-      return deny(`${r.name} conflicts with your fork and is closer to landing (it ${r.land_requested_at ? "already requested landing" : "is ahead"}${r.diff_lines < me.diff_lines ? " and has a smaller diff" : ""}). Wait for it to land, then rebase.`);
+    const gate = landGate({
+      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork), rivals: this.rivals(fork),
+    });
+    if (gate.kind === "deny") return deny(gate.reason, gate.signal);
+    if (gate.kind === "retry") {
+      if (gate.then === "recheck") {
+        this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
+        await this.startPipeline(fork, me.head_sha, "recheck");
+      } else if (gate.then === "requeue_pairs") await this.requeuePairs();
+      return { landed: false, fork, reason: gate.reason, baselineHead, retry: true };
     }
 
     // One landing at a time (issue #3): a token so a landing that outlived its lock can't release someone else's.
