@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,6 +76,8 @@ test("two pair checks in parallel on one shared cache both give the right answer
     }
     for (const r of [bc, ac]) assert.deepEqual([r.aloneA.ok, r.aloneB.ok, r.merge.clean, r.merge.typecheck.ok], [true, true, true, true]);
     assert.deepEqual(readdirSync(join(s.cache, "tc")).filter((f) => !f.endsWith(".json")), []); // no temp files left behind
+    assert.deepEqual(readdirSync(join(s.cache, "tsbuild")).filter((f) => !f.endsWith(".tsbuildinfo")), []);
+    assert.deepEqual(readdirSync(s.cache).filter((f) => f.startsWith("git.lock")), []); // no lock or lock debris
   } finally {
     s.cleanup();
   }
@@ -91,6 +93,39 @@ test("an environment failure (no tsc) is not cached; the next run gets the real 
     assert.deepEqual([real.result.ok, real.result.cached], [true, false]);
     const again = await s.check({ mode: "single", repo: s.c, baseline: s.base });
     assert.deepEqual([again.result.ok, again.result.cached], [true, true]); // real outcomes are cached
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a lock left by a killed check is broken once, and every waiting check still gets the right answer (review of #34)", { timeout: 120_000 }, async () => {
+  const s = airspace();
+  try {
+    await s.check({ mode: "single", repo: s.c, baseline: s.base }); // creates the cache dirs
+    // A check that held the lock and was killed by the hard timeout: its pid is gone.
+    const dead = execFileSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" }).trim();
+    mkdirSync(join(s.cache, "git.lock"));
+    writeFileSync(join(s.cache, "git.lock", "pid"), dead);
+    const results = await Promise.all(
+      [s.a, s.b, s.c, s.a, s.b, s.c].map((r, i) => s.check({ mode: "pair", a: r, b: [s.b, s.c, s.a][i % 3]!, baseline: s.base })),
+    );
+    for (const r of results) assert.equal(r.error, undefined, r.error);
+    assert.equal(existsSync(join(s.cache, "git.lock")), false); // released at the end
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("an old lock directory with no owner (from older code) doesn't wedge the container", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    await s.check({ mode: "single", repo: s.c, baseline: s.base });
+    const lock = join(s.cache, "git.lock");
+    mkdirSync(lock);
+    utimesSync(lock, new Date(2026, 0, 1), new Date(2026, 0, 1));
+    const r = await s.check({ mode: "single", repo: s.a, baseline: s.base });
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.result.ok, true);
   } finally {
     s.cleanup();
   }

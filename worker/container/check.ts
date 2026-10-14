@@ -39,28 +39,72 @@ mkdirSync(WORK, { recursive: true });
 // directory (mkdir is atomic). Typechecks and merges in their own worktrees stay parallel.
 const LOCK = join(CACHE, "git.lock");
 const LOCK_STALE_MS = 300_000; // longer than the checker's hard timeout (240 s), so only a lost lock is ever broken
+const BREAK = `${LOCK}.break`;
+const BREAK_STALE_MS = 10_000;
 let lockDepth = 0;
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as { code?: string }).code === "EPERM"; } };
+const lockOwner = (): { pid: number; age: number } | null => {
+  let age = 0;
+  try { age = Date.now() - statSync(LOCK).mtimeMs; } catch { return null; } // no lock
+  let pid = 0;
+  try { pid = Number(readFileSync(join(LOCK, "pid"), "utf8")); } catch { /* an empty dir (older code): only age can break it */ }
+  return { pid, age };
+};
+/** Move a directory out of the way, then delete it: the rename is atomic, so a lock is never half-removed. */
+const discard = (path: string) => {
+  const gone = `${path}.gone.${process.pid}.${Date.now()}`;
+  try { renameSync(path, gone); } catch { return false; }
+  rmSync(gone, { recursive: true, force: true });
+  return true;
+};
+
+/**
+ * Break a lock whose owner died (the hard timeout kills the whole process group) or that is far too old. Only one
+ * process breaks at a time (the .break guard), and it re-reads the owner first, so it can't remove a live lock that
+ * another breaker just replaced (review of #34).
+ */
+function breakIfStale(seen: { pid: number; age: number }) {
+  if (!((seen.pid && !alive(seen.pid)) || seen.age > LOCK_STALE_MS || (!seen.pid && seen.age > BREAK_STALE_MS))) return;
+  try { mkdirSync(BREAK); } catch {
+    try { if (Date.now() - statSync(BREAK).mtimeMs > BREAK_STALE_MS) discard(BREAK); } catch { /* gone already */ }
+    return;
+  }
+  try {
+    const now = lockOwner();
+    if (now && now.pid === seen.pid) discard(LOCK); // still the same dead (or ancient) owner
+  } finally {
+    rmSync(BREAK, { recursive: true, force: true });
+  }
+}
+
 function withGitLock<T>(fn: () => T): T {
   if (lockDepth > 0) { lockDepth++; try { return fn(); } finally { lockDepth--; } }
-  for (let waited = 0; ; waited += 20) {
+  // The lock is built under a private name with its pid file, then renamed into place: it never exists without an
+  // owner, and renaming onto a held (non-empty) lock fails atomically.
+  const mine = `${LOCK}.${process.pid}`;
+  for (;;) {
+    rmSync(mine, { recursive: true, force: true });
+    mkdirSync(mine);
+    writeFileSync(join(mine, "pid"), String(process.pid));
     try {
-      mkdirSync(LOCK);
-      writeFileSync(join(LOCK, "pid"), String(process.pid));
+      renameSync(mine, LOCK);
       break;
     } catch (e) {
-      if ((e as { code?: string }).code !== "EEXIST") throw e;
-      // Held. Break it if its owner died (the checker's hard timeout kills processes) or it is far too old.
-      let pid = 0;
-      let age = 0;
-      try { pid = Number(readFileSync(join(LOCK, "pid"), "utf8")); age = Date.now() - statSync(LOCK).mtimeMs; } catch { /* being created or removed */ }
-      if ((pid && !alive(pid)) || age > LOCK_STALE_MS) rmSync(LOCK, { recursive: true, force: true });
-      else sleep(20);
+      const code = (e as { code?: string }).code;
+      if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "EPERM") { rmSync(mine, { recursive: true, force: true }); throw e; }
+      const owner = lockOwner();
+      if (owner) breakIfStale(owner);
+      sleep(20);
     }
   }
   lockDepth = 1;
-  try { return fn(); } finally { lockDepth = 0; rmSync(LOCK, { recursive: true, force: true }); }
+  try {
+    return fn();
+  } finally {
+    lockDepth = 0;
+    if (lockOwner()?.pid === process.pid) discard(LOCK); // only ever release our own lock
+  }
 }
 const WRITES = new Set(["init", "fetch", "update-ref", "worktree", "notes", "gc", "prune"]);
 
@@ -82,6 +126,8 @@ const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
 const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
 function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
+  // The subcommand: the first argument that isn't an option. Every `-c` value here contains "=", so it's skipped;
+  // a bare `-C <path>` would be misread (not used).
   const sub = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
   if (dir === repoDir && WRITES.has(sub) && lockDepth === 0) return withGitLock(() => git(args, opts));
   // No automatic gc: it would rewrite the shared repo while another check reads it.
@@ -104,7 +150,8 @@ function fetchMain(repo: RepoRef, label: string): string {
   const ref = `refs/agentmesh/${repo.name}`;
   // Fetch and read the ref under one lock, so another check's fetch of the same repo can't move it in between.
   return withGitLock(() => {
-    timed(`fetch ${label}`, () => git(["fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token }));
+    // Bounded: a stalled remote must not hold the lock (and every other check in this container) until the hard timeout.
+    timed(`fetch ${label}`, () => git([...LOW_SPEED, "fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token, timeoutMs: FETCH_TIMEOUT_MS }));
     return git(["rev-parse", ref]).out;
   });
 }
@@ -214,6 +261,7 @@ function typecheck(rev: string, label: string, buildInfo: string | null): Typech
 /** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
 const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"];
 const NOTE_TIMEOUT_MS = 30_000;
+const FETCH_TIMEOUT_MS = 60_000;
 
 /**
  * Add flight log notes to the baseline's refs/notes/atc. ATC calls this in the background after it has recorded the
