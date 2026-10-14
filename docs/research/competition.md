@@ -12,7 +12,7 @@ Related: [ADR-0017](../adr/0017-competition-requirements.md) (what the rules for
 - **Finals:** each finalist gets **10 minutes live on stage** at Cloudflare Connect, Moscone West, SF, on **2026-10-21**.
   Cloudflare covers travel for up to 2 people per team. The winner must be there in person.
 - **Prize:** 1st place gets $25K in Cloudflare credits (valid 12 months) and the VIP speaker dinner.
-- **Eligibility:** US or Canada resident, 18 or older. One submission per entrant.
+- **Eligibility:** legal resident (where you live, not citizenship) of the US, Canada, UK, Australia, South Africa or Finland, 18 or older at the start (terms §3). One submission per entrant.
   **Automated entry is prohibited**, so a human fills in and submits the form. (The browser recon below was read-only.)
 
 ## Hard requirements (from the official rules PDF)

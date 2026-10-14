@@ -7,7 +7,7 @@ Paste each block as plain text. Limits are the form's `maxlength`; check them wi
 
 - **Team name:** ATC
 - **Primary contact name / email:** Scott Frasso / _(fill in)_
-- **Team location:** _(city, state/province, country; must be US or Canada)_
+- **Team location:** _(city, state/province, country; the entrant must legally reside in the US, Canada, UK, Australia, South Africa or Finland; terms §3)_
 - **First attendee:** Scott Frasso / _(email)_
 - **Second attendee:** _(optional)_
 
