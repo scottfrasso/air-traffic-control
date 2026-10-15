@@ -46,18 +46,21 @@ if they didn't conflict, which ships the task twice.
   It comes after the PR's own checks in the sequence and the gate: a red attempt hears that it fails typecheck first.
   An attempt that stands down is never "ahead" of a rival in HOLD or the gate (it won't land), as for REVIEW.
 - **A quiet winner hands over** (2026-10-15). The attempt that ships (ATC's pick or a person's) must show signs of
-  life: a push, a `request_land` or a `declare_intent` (table `fork_activity`; reads like `get_clearance` don't count).
-  If it shows none for `stallSeconds` (default 15 min, per baseline: `POST /settings {"stallSeconds": n}`, 10 s to a
-  day), counted from when it became the one to ship, ATC sets it aside and compares the rest again, so an agent that
-  stopped can't stall the others. Only once its checks are in (they're ATC's job, not the agent's).
-  - It gets STAND DOWN with basis `stalled` ("…hasn't pushed, asked to land or declared an intent for 15 min, so PR4
-    gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
+  life: a push, a `request_land`, a `declare_intent`, or its agent polling its own `get_clearance` or `get_signals`
+  (table `fork_activity`). Polls count so that an agent told to HOLD, or waiting, is alive while it obeys; only an
+  agent that has really stopped goes quiet. If it shows none for `stallSeconds` (default 15 min, per baseline:
+  `POST /settings {"stallSeconds": n}`, 10 s to a day), ATC sets it aside and compares the rest again, so an agent
+  that stopped can't stall the others. The clock starts at the latest of: its last sign of life, when it became the
+  one to ship, and when its current head's checks last finished (`fork_checked`; check time is ATC's, not the
+  agent's), and it only runs once its checks are in. A DO from before `fork_activity` falls back to when the head
+  was seen, landing asked for, or an intent declared. A person picking a set-aside PR gives it a fresh start.
+  - It gets STAND DOWN with basis `stalled` ("…its agent showed no sign of life (a push, a land request, an intent or a
+    clearance check) for 15 min, so PR4 gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
   - Table `task_stalls` remembers when: it stays aside until its agent acts again. Without it, the heir becoming
     ATC's pick would restart the quiet one's clock and the two would swap back and forth.
   - When it acts again (any push or land request), it competes like any attempt; if it is still the better one, it
     ships. The heir's flight log says `ATC-Chosen-Over: PR3 (PR3 went quiet for 15 min)`.
-  - A winner waiting in REVIEW whose agent keeps polling `request_land` (as the demo's does) isn't quiet; one whose
-    agent stopped is, and hands over like any other.
+  - A winner in HOLD or REVIEW whose agent keeps polling isn't quiet; one whose agent stopped is, and hands over.
 - **After the winner lands**, the attempts that were in flight stand down **for good** ("PR2 already landed this
   task …"), shown even over GO AROUND, since rebasing changes nothing. The landing sends them neither a go-around nor
   "stay in line", and ATC doesn't re-check them then or later (other landings, pushes to main, the stuck-check

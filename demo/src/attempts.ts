@@ -180,7 +180,7 @@ export const wrapCost = (): Cents => WRAP_PRICE;
   }, 180_000, 2000);
   const quiet = (await entry(q.fork))!;
   say("system", `ATC ${quiet.pr} ${quiet.clearance.toUpperCase()}: ${quiet.reason}`);
-  check(quiet.clearance === "stand_down" && /hasn't pushed, asked to land or declared an intent for 20 s/.test(quiet.reason), `after ${Math.round((Date.now() - t0) / 1000)} s, PR${q.pr} is set aside as quiet and PR${w.pr} is ${handed.clearance.toUpperCase()}`);
+  check(quiet.clearance === "stand_down" && /showed no sign of life .* for 20 s/.test(quiet.reason), `after ${Math.round((Date.now() - t0) / 1000)} s, PR${q.pr} is set aside as quiet and PR${w.pr} is ${handed.clearance.toUpperCase()}`);
   let wl: LandResponse;
   for (;;) {
     wl = await mesh.call<LandResponse>("POST", "/land", { fork: w.fork });

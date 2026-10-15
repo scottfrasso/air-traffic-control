@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS task_choices(task TEXT PRIMARY KEY, winner TEXT NOT N
 -- Each PR's agent's last sign of life: a push, a land request or an intent (issue #19: a quiet winner hands over).
 CREATE TABLE IF NOT EXISTS fork_activity(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
 
+-- When each PR's current head last got a check result: a quiet winner's clock doesn't count ATC's own check time.
+CREATE TABLE IF NOT EXISTS fork_checked(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
+
 -- Attempts ATC set aside because they went quiet while they were the one to ship; aside until their agent acts again.
 CREATE TABLE IF NOT EXISTS task_stalls(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
 

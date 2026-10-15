@@ -463,6 +463,18 @@ test("the Coordinator: leaving a task ends a person's pick; coming back doesn't 
 
 // ── a quiet winner hands its task over (an agent that stopped mustn't stall the others) ──
 
+/** The sequence row for `fork`, read the way the dashboard does (get_clearance would count as the agent polling). */
+const row = async (a: ReturnType<typeof airport>, fork: string) =>
+  (JSON.parse(await a.co.stateJson()) as { sequence: Array<{ fork: string; clearance: string; reason: string }> }).sequence.find((e) => e.fork === fork)!;
+
+/** `ms` pass with no sign of life from `fork`'s agent (and its pick and checks are that old too). */
+function age(a: ReturnType<typeof airport>, fork: string, ms: number) {
+  a.q("UPDATE task_leaders SET at = at - ?", ms);
+  for (const t of ["fork_activity", "head_seen", "fork_checked"]) a.q(`UPDATE ${t} SET at = at - ? WHERE fork = ?`, ms, fork);
+  a.q("UPDATE intents SET created_at = created_at - ? WHERE fork = ?", ms, fork);
+  a.q("UPDATE forks SET created_at = created_at - ? WHERE name = ?", ms, fork);
+}
+
 test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's pick, hands the task to the next", () => {
   const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")]; // pr2 is better
   const ctx = { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1000]]), lastActive: new Map([["x--pr2", 500]]), stallMs: 60_000 };
@@ -471,7 +483,7 @@ test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's 
   assert.deepEqual(v.get("x--pr1"), { kind: "chosen", over: [{ fork: "x--pr2", reason: "PR2 went quiet for 60 s" }] });
   const down = v.get("x--pr2") as { kind: string; basis: string; winner: string; reason: string };
   assert.deepEqual([down.kind, down.basis, down.winner], ["stand_down", "stalled", "x--pr1"]);
-  assert.match(down.reason, /hasn't pushed, asked to land or declared an intent for 60 s, so PR1 gets the task\. Push or ask to land to compete again\./);
+  assert.match(down.reason, /its agent showed no sign of life \(a push, a land request, an intent or a clearance check\) for 60 s, so PR1 gets the task\. Push or ask to land to compete again\./);
   // Activity after it became the pick keeps it: the clock runs from the later of the two.
   assert.equal(attemptVerdicts(group, [], { ...ctx, lastActive: new Map([["x--pr2", 30_000]]), now: 1000 + 60_000 }).get("x--pr2")?.kind, "chosen");
 });
@@ -513,12 +525,11 @@ test("the Coordinator: a quiet winner hands over; the heir lands; the quiet PR t
   await a.co.setStallSeconds(30);
   (a.co as unknown as { flush(): void }).flush(); // Y becomes ATC's pick
   assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
-  // Y's agent stopped: 31 s pass with no push, land request or intent from it.
-  a.q("UPDATE task_leaders SET at = at - 31000");
-  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  // Y's agent stopped: 31 s pass with no sign of life from it.
+  age(a, Y, 31_000);
   const cx = await a.co.getClearance(X);
   assert.equal(cx.clearance, "cleared", cx.message);
-  assert.match((await a.co.getClearance(Y)).message, /stand down\. This PR was the one to ship for t, but it hasn't pushed, asked to land or declared an intent for 30 s, so PR1 gets the task/);
+  assert.match((await row(a, Y)).reason, /^This PR was the one to ship for t, but its agent showed no sign of life .* for 30 s, so PR1 gets the task/);
   (a.co as unknown as { flush(): void }).flush(); // records the stall and the new pick
   assert.equal(a.events("attempt.stalled").length, 1);
   (a.co as unknown as { flush(): void }).flush();
@@ -527,18 +538,53 @@ test("the Coordinator: a quiet winner hands over; the heir lands; the quiet PR t
   const landed = await a.co.requestLand(X);
   assert.equal(landed.landed, true, landed.reason);
   assert.match(a.q<{ note: string }>("SELECT note FROM flight_logs WHERE fork = ?", X)[0]!.note, /^ATC-Chosen-Over: PR2 \(PR2 went quiet for 30 s\)$/m);
-  assert.match((await a.co.getClearance(Y)).message, /PR1 already landed this task/);
+  assert.match((await row(a, Y)).reason, /PR1 already landed this task/);
 });
 
 test("the Coordinator: a quiet winner that asks to land is back in, and lands", async () => {
   const { a, X, Y } = await twoAttempts();
   await a.co.setStallSeconds(30);
   (a.co as unknown as { flush(): void }).flush();
-  a.q("UPDATE task_leaders SET at = at - 31000");
-  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  age(a, Y, 31_000);
   (a.co as unknown as { flush(): void }).flush(); // set aside
-  assert.equal((await a.co.getClearance(Y)).clearance, "stand_down");
+  assert.equal((await row(a, Y)).clearance, "stand_down");
   const r = await a.co.requestLand(Y); // a sign of life
   assert.equal(r.landed, true, r.reason);
   assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+});
+
+test("the Coordinator: an agent that polls its clearance while it holds or waits is alive; check time doesn't count", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  await a.co.getClearance(Y); // Y's agent polls (e.g. while told to HOLD): a sign of life
+  assert.equal((await row(a, X)).clearance, "stand_down");
+  // Checks that ran longer than stallSeconds: the clock starts when they finished, not at the push.
+  age(a, Y, 31_000);
+  a.q("INSERT OR REPLACE INTO fork_checked(fork, at) VALUES (?, ?)", Y, Date.now());
+  assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+test("the Coordinator: a person picking a set-aside PR gives it a fresh start", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush(); // Y set aside, X leads
+  assert.equal((await row(a, Y)).clearance, "stand_down");
+  assert.ok((await a.co.choose(Y, "sam")).ok);
+  assert.equal((await row(a, Y)).clearance, "cleared");
+  assert.equal(a.q("SELECT 1 FROM task_stalls WHERE fork = ?", Y).length, 0);
+});
+
+test("the Coordinator: a DO from before fork_activity: a recent push counts as a sign of life", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  a.q("DELETE FROM fork_activity"); // as if recorded before this table existed
+  a.q("UPDATE task_leaders SET at = at - 31000");
+  a.q("UPDATE forks SET created_at = created_at - 31000");
+  a.q("UPDATE intents SET created_at = created_at - 31000");
+  assert.equal((await row(a, X)).clearance, "stand_down"); // Y's head was seen just now (head_seen): alive
 });

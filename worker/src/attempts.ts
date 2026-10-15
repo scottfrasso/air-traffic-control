@@ -84,8 +84,10 @@ export type VerdictContext = {
   now?: number;
   /** task → since when its leader (in `leaders`) has been ATC's pick. */
   leaderSince?: Map<string, number>;
-  /** fork → its agent's last push, land request or intent (default: when the PR opened). */
+  /** fork → its agent's last sign of life: a push, land request, intent, or its own clearance/signals poll. */
   lastActive?: Map<string, number>;
+  /** fork → when its current head's checks last finished (the clock doesn't run while ATC is checking it). */
+  checkedAt?: Map<string, number>;
   /** How long the attempt to ship may be quiet before the next one gets the task (STALL_MS). */
   stallMs?: number;
   /** fork → when ATC set it aside as quiet (table `task_stalls`); it stays aside until its agent acts again. */
@@ -194,7 +196,7 @@ export function attemptVerdicts(
     for (const q of stalled)
       out.set(q.fork.name, {
         kind: "stand_down", winner: heir?.fork.name ?? "", final: false, basis: "stalled",
-        reason: `This PR was the one to ship for ${task}, but it hasn't pushed, asked to land or declared an intent for ${duration(ctx.stallMs ?? STALL_MS)}, so ${heir ? prLabel(heir.fork.name) : "another attempt"} gets the task. Push or ask to land to compete again.`,
+        reason: `This PR was the one to ship for ${task}, but its agent showed no sign of life (a push, a land request, an intent or a clearance check) for ${duration(ctx.stallMs ?? STALL_MS)}, so ${heir ? prLabel(heir.fork.name) : "another attempt"} gets the task. Push or ask to land to compete again.`,
       });
   }
   return out;
@@ -210,7 +212,7 @@ function isStalled(task: string, a: Attempt, ctx: VerdictContext): boolean {
   const now = ctx.now ?? Date.now();
   // The clock starts when it became the one to ship: a loser has no reason to act until then.
   const since = ctx.leaders?.get(task) === a.fork.name ? (ctx.leaderSince?.get(task) ?? now) : now;
-  const last = Math.max(lastActive, since);
+  const last = Math.max(lastActive, since, ctx.checkedAt?.get(a.fork.name) ?? 0);
   return now - last >= (ctx.stallMs ?? STALL_MS);
 }
 

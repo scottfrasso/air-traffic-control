@@ -89,13 +89,14 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
       // How long the attempt that ships may be quiet before the next one gets its task (issue #19). 10 s to a day.
       if (b.stallSeconds !== undefined && (typeof b.stallSeconds !== "number" || !Number.isFinite(b.stallSeconds) || b.stallSeconds < 10 || b.stallSeconds > 86_400))
         throw new HttpError(400, "stallSeconds must be a number from 10 to 86400");
+      // The review switch can be refused (a landing in progress): try it first, so a refusal changes nothing.
       let out: Record<string, unknown> = {};
-      if (typeof b.stallSeconds === "number") out = { ...out, ...(await stub.setStallSeconds(b.stallSeconds)) };
       if (typeof b.review === "boolean") {
         const r = await stub.setReviewRequired(b.review);
-        if (r.error) return json({ error: r.error, ...out }, 409);
-        out = { ...out, ...r };
+        if (r.error) return json({ error: r.error }, 409);
+        out = { ...r };
       }
+      if (typeof b.stallSeconds === "number") out = { ...out, ...(await stub.setStallSeconds(b.stallSeconds)) };
       return json(out);
     },
   ],

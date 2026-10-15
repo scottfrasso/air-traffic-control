@@ -525,6 +525,7 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
   async getSignals(fork: string, includeResolved = false): Promise<SignalRow[]> {
+    if (this.fork(fork)?.status === "active") this.markActive(fork); // an agent polling is alive (a HOLD, a wait)
     return signalsFor(this.sql, fork, includeResolved);
   }
 
@@ -594,6 +595,7 @@ export class Coordinator extends DurableObject<Env> {
       "UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ?, check_main_conflict = ? WHERE name = ?",
       ok ? "green" : "red", sha, base, detail, !ok && onMain ? 1 : 0, fork,
     );
+    this.sql.exec("INSERT INTO fork_checked(fork, at) VALUES (?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at", fork, Date.now());
     // The checks ran after all: an earlier "ATC couldn't run the checks" no longer applies (pair ones are per pair).
     this.sql.exec("UPDATE signals SET resolved_at = ? WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", Date.now(), fork);
   }
@@ -811,7 +813,20 @@ export class Coordinator extends DurableObject<Env> {
     return attemptVerdicts(attempts, landed, {
       leaders: new Map(leaders.map((r) => [r.task, r.fork])),
       leaderSince: new Map(leaders.map((r) => [r.task, r.at])),
-      lastActive: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM fork_activity").toArray().map((r) => [r.fork, r.at])),
+      // Signs of life. A DO from before fork_activity existed has none yet: fall back to when the head was seen, landing
+      // was asked for, or an intent declared, so a live leader isn't set aside the moment this code deploys.
+      lastActive: new Map(
+        this.sql
+          .exec<{ fork: string; at: number }>(
+            `SELECT fork, max(at) AS at FROM (
+               SELECT fork, at FROM fork_activity UNION ALL SELECT fork, at FROM head_seen
+               UNION ALL SELECT name AS fork, land_requested_at AS at FROM forks WHERE land_requested_at IS NOT NULL
+               UNION ALL SELECT fork, max(created_at) AS at FROM intents GROUP BY fork) GROUP BY fork`,
+          )
+          .toArray()
+          .map((r) => [r.fork, r.at]),
+      ),
+      checkedAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM fork_checked").toArray().map((r) => [r.fork, r.at])),
       stalledAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM task_stalls").toArray().map((r) => [r.fork, r.at])),
       stallMs: this.stallMs(),
       sentAround,
@@ -893,6 +908,9 @@ export class Coordinator extends DurableObject<Env> {
       "INSERT INTO task_choices(task, winner, by, at) VALUES (?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at",
       task, fork, who, Date.now(),
     );
+    // A person picking it gives it a fresh start: not set aside as quiet, and its clock starts now (review of #48).
+    this.sql.exec("DELETE FROM task_stalls WHERE fork = ?", fork);
+    this.sql.exec("INSERT INTO task_leaders(task, fork, at) VALUES (?, ?, ?) ON CONFLICT(task) DO UPDATE SET fork = excluded.fork, at = excluded.at", task, fork, Date.now());
     this.log("attempt.chosen", { task, by: who }, fork);
     this.touch();
     this.syncAttemptSignals();
@@ -902,6 +920,7 @@ export class Coordinator extends DurableObject<Env> {
   /** What ATC tells one PR: its place in the landing sequence and why. */
   async getClearance(fork: string): Promise<{ fork: string; pr: string; position: number | null; clearance: string; message: string }> {
     const row = this.fork(fork);
+    if (row?.status === "active") this.markActive(fork); // its agent polling: alive, even while it holds or waits
     if (!row) return { fork, pr: prLabel(fork), position: null, clearance: "unknown", message: `ATC: ${prLabel(fork)} is not in this airspace.` };
     if (row.status === "landed") return { fork, pr: prLabel(fork), position: null, clearance: "landed", message: `ATC: ${prLabel(fork)} has landed.` };
     const e = this.sequence().find((x) => x.fork === fork);
@@ -911,7 +930,7 @@ export class Coordinator extends DurableObject<Env> {
 
   // ── review gate (issue #16, ADR-0023) ───────────────────────────────────
 
-  /** The agent flying this PR did something (push, land request, intent). Reads (clearance, signals) don't count. */
+  /** The agent flying this PR did something: a push, land request, intent, or polled its own clearance or signals. */
   private markActive(fork: string) {
     this.sql.exec("INSERT INTO fork_activity(fork, at) VALUES (?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at", fork, Date.now());
   }
