@@ -38,15 +38,18 @@ function createServer(env: Env) {
     {
       description:
         "Tell other agents what you plan to touch before you start. Returns any in-flight work (other forks' changes and intents) that overlaps. " +
-        "Overlaps are context, not commands: decide yourself whether to proceed, coordinate, or wait.",
+        "Overlaps are context, not commands: decide yourself whether to proceed, coordinate, or wait. " +
+        "If you were given a task id (a ticket, or the prompt's id), pass it as `task`: PRs naming the same task are competing attempts, " +
+        "and once all are checked ATC picks one to ship and tells the others to stand down, with why.",
       inputSchema: z.object({
         fork: z.string().describe("Your fork name, from start_work"),
         description: z.string().describe("One line: what you are about to do"),
         files: z.array(z.string()).default([]).describe("Repo-relative paths you expect to modify"),
         symbols: z.array(z.string()).default([]).describe("Exported symbols you expect to change or depend on"),
+        task: z.string().max(100).optional().describe("The task you're working on (e.g. a ticket id). Other PRs on the same task compete with yours"),
       }),
     },
-    async ({ fork, description, files, symbols }) => text(await (await coordinatorFor(env, baselineOf(fork))).declareIntent(fork, description, files, symbols)),
+    async ({ fork, description, files, symbols, task }) => text(await (await coordinatorFor(env, baselineOf(fork))).declareIntent(fork, description, files, symbols, task ?? null)),
   );
 
   server.registerTool(
@@ -72,7 +75,7 @@ function createServer(env: Env) {
     {
       description:
         "Ask Air Traffic Control (ATC) where your PR is in the landing sequence and why: cleared to land, follow another PR, hold for a conflicting PR (fix the conflict while you hold and you won't need to go around), " +
-        "go around (rebase onto the new main, fix, push, then land), or standby while checks run.",
+        "go around (rebase onto the new main, fix, push, then land), stand down (another attempt at the same task ships instead; the reason says why), or standby while checks run.",
       inputSchema: z.object({ fork: z.string().describe("Your fork name, from start_work") }),
     },
     async ({ fork }) => text(await (await coordinatorFor(env, baselineOf(fork))).getClearance(fork)),

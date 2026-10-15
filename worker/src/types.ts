@@ -68,7 +68,7 @@ export interface CoordinatorState {
   /** ATC landing sequence with one clearance + reason per PR. */
   sequence: import("./atc").SequenceEntry[];
   signals: SignalRow[];
-  intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number }>;
+  intents: Array<{ id: number; fork: string; description: string; files: string[]; symbols: string[]; created_at: number; task: string | null }>;
   /** Landed PRs' flight logs, oldest first (ADR-0019). */
   flightLogs: FlightLogEntry[];
   /** What ATC saved in this run, from the event log (issue #17). */
@@ -104,6 +104,9 @@ export type SignalRow = {
 export type ReviewResult =
   | { ok: true; fork: string; sha: string; verdict: string; clearance?: string }
   | { ok: false; status: number; error: string };
+
+/** What choose() answers: the pick recorded, or refused with an HTTP status and why (issue #19). */
+export type ChooseResult = { ok: true; task: string; winner: string; by: string; clearance?: string } | { ok: false; status: number; error: string };
 
 export type LandResponse = {
   landed: boolean;

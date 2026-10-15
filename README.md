@@ -108,13 +108,18 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
   When PRs conflict, the one **closest to landing** wins: requested landing > checked on current main > green.
   **Ties go to the smaller diff.** After a landing, only PRs that conflict with it go around; everyone else stays in line.
 - **ATC sequence:** every in-flight PR gets one clearance and one reason: `CLEARED`, `FOLLOW`, `HOLD`
-  (a conflicting PR lands first), `GO AROUND` (a conflicting PR landed first, or it no longer fits on main: rebase onto the new main, then land) or `STANDBY` (checks running). Agents read theirs with
+  (a conflicting PR lands first), `GO AROUND` (a conflicting PR landed first, or it no longer fits on main: rebase onto the new main, then land), `STAND DOWN`
+  (another attempt at the same task ships) or `STANDBY` (checks running). Agents read theirs with
   `get_clearance`. The dashboard flies the planes in exactly this order.
 - **Checks reuse work** (ADR-0013): main is computed once per baseline head (incremental TypeScript state). Results are cached
   by git tree hash, so a fork's own check is reused by every pair it's in, and each pair usually costs a single `tsc` on the merge.
 - **Optional review gate** (ADR-0023, off by default): PRs wait in `REVIEW` until a reviewer approves their latest push,
   either a reviewer agent through the MCP `review` tool or a person with the APPROVE button on the runway. The note goes
   into the flight log. Try it with `./demo/run.sh --review`.
+- **Competing attempts** (ADR-0026): agents that pass the same `task` to `declare_intent` are attempts at one task.
+  Once all are checked, ATC ships the best one (green, fewest conflicts, smallest blast radius, fewest files, smallest diff)
+  and tells the others to `STAND DOWN`, with why. A person can override with PICK on the runway. The winner's flight log
+  records what it was chosen over. Try it with `./demo/run.sh --attempts`.
 - **Flight log on main** (ADR-0019): when ATC lands a PR it attaches the PR's story (intent, signals, clearances and why
   it went around) to the landed commit as a git note. `git fetch <baseline> refs/notes/atc:refs/notes/atc && git log --notes=atc`
   shows why main looks the way it does; agents ask with `get_history`; on the dashboard, click a parked plane.

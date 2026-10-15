@@ -1,3 +1,4 @@
+import type { AttemptVerdict } from "./attempts";
 import type { ForkRow } from "./types";
 
 /**
@@ -75,6 +76,8 @@ export type GateInput = {
   checkRetriesLeft?: boolean;
   /** Active PRs with an open conflict against this one. */
   rivals: ForkRow[];
+  /** Competing attempts at the same task (issue #19): this PR stands down, or waits for another attempt's checks. */
+  attempt?: AttemptVerdict;
 };
 
 export type Gate =
@@ -82,10 +85,11 @@ export type Gate =
   /** Ask again shortly. `then`: what ATC starts first (a re-check on the new main, or the missing pair checks). */
   | { kind: "retry"; reason: string; then?: "recheck" | "requeue_pairs" }
   /** Refused. `signal`: the signal to send the PR (none for a go-around, which already has its own). */
-  | { kind: "deny"; reason: string; signal: "rebase_required" | "land_blocked" | null };
+  | { kind: "deny"; reason: string; signal: "rebase_required" | "land_blocked" | "stand_down" | null };
 
 /** May this PR land now? The checks run in this order; the first that fails decides (ADR-0011, issues #3 and #5). */
-export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, awaitingReview, checkRetriesLeft = true }: GateInput): Gate {
+export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, awaitingReview, checkRetriesLeft = true, attempt }: GateInput): Gate {
+  if (attempt?.kind === "stand_down" && attempt.final) return { kind: "deny", reason: attempt.reason, signal: "stand_down" };
   if (goAround) return { kind: "deny", reason: goAround, signal: null };
   if (checkErrored(me)) {
     const why = firstLine(me.check_detail ?? "unknown error");
@@ -107,6 +111,8 @@ export function landGate({ me, baselineHead, goAround, waitingOnPairs, rivals, a
   }
   // Never land before every pair check against the other PRs' current heads is in (issue #5).
   if (waitingOnPairs) return { kind: "retry", reason: "Still checking your PR against the other open PRs; retry in a few seconds.", then: "requeue_pairs" };
+  if (attempt?.kind === "stand_down") return { kind: "deny", reason: attempt.reason, signal: "stand_down" };
+  if (attempt?.kind === "wait") return { kind: "retry", reason: `${attempt.reason} Retry in a few seconds.` };
   const r = rivals.find((x) => landingOrder(x, me, baselineHead) < 0);
   if (r)
     return {

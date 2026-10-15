@@ -1,3 +1,4 @@
+import type { AttemptVerdict } from "./attempts";
 import { checkDetail, checkErrored, isGreen, landingOrder, mainConflict } from "./landing";
 import type { ForkRow } from "./types";
 
@@ -6,7 +7,7 @@ import type { ForkRow } from "./types";
  * the way a controller would say it. Agents read their own row through `get_clearance`; the dashboard shows all rows.
  */
 
-export type Clearance = "cleared" | "follow" | "hold" | "go_around" | "checking" | "fix" | "review";
+export type Clearance = "cleared" | "follow" | "hold" | "go_around" | "checking" | "fix" | "review" | "stand_down";
 
 export interface SequenceEntry {
   fork: string;
@@ -44,6 +45,8 @@ export function buildSequence(
   checksGaveUp: Set<string> = new Set(),
   /** Review gate (issue #16): PRs that would be cleared or follow but aren't approved at their head, and why. */
   review: Map<string, string> = new Map(),
+  /** Competing attempts at the same task (issue #19): who stands down, and who waits for the other to be checked. */
+  attempts: Map<string, AttemptVerdict> = new Map(),
 ): SequenceEntry[] {
   const active = forks.filter((f) => f.status === "active").sort((a, b) => landingOrder(a, b, baselineHead));
   const byName = new Map(active.map((f) => [f.name, f]));
@@ -59,6 +62,12 @@ export function buildSequence(
 
     if (f.head_sha === f.base_sha) {
       entry("checking", "No changes pushed yet.");
+      continue;
+    }
+    const attempt = attempts.get(f.name);
+    // Another attempt at this task already landed: nothing this PR does (a go-around included) changes that.
+    if (attempt?.kind === "stand_down" && attempt.final) {
+      entry("stand_down", attempt.reason, attempt.winner);
       continue;
     }
     if (goAround.has(f.name)) {
@@ -88,9 +97,18 @@ export function buildSequence(
       entry("checking", "Checking against the other PRs.");
       continue;
     }
+    if (attempt?.kind === "stand_down") {
+      entry("stand_down", attempt.reason, attempt.winner);
+      continue;
+    }
+    if (attempt?.kind === "wait") {
+      entry("checking", attempt.reason);
+      continue;
+    }
     // A conflicting PR that is ahead in the order lands first; this one holds.
     // A rival still waiting for review isn't ahead: it can't land, so it mustn't hold up an approved PR (review of #38).
-    const ahead = mine.find((c) => !review.has(c.other) && landingOrder(byName.get(c.other)!, f, baselineHead) < 0);
+    // Nor is one that stands down (issue #19): it won't land at all.
+    const ahead = mine.find((c) => !review.has(c.other) && attempts.get(c.other)?.kind !== "stand_down" && landingOrder(byName.get(c.other)!, f, baselineHead) < 0);
     if (ahead) {
       // Not "then rebase": fixing the conflict while holding avoids the go-around, which is the point (issue #6).
       entry("hold", `Conflicts with ${prLabel(ahead.other)}${on(ahead)}. Lands after ${prLabel(ahead.other)}. Fix it now to avoid a go-around.`, ahead.other);
@@ -121,7 +139,7 @@ export function buildSequence(
 
 /** What ATC tells one agent. */
 export function clearanceMessage(e: SequenceEntry): string {
-  const words: Record<Clearance, string> = { cleared: "cleared to land", follow: "number " + e.position, hold: "hold", go_around: "go around", checking: "standby", fix: "hold", review: "waiting for review" };
+  const words: Record<Clearance, string> = { cleared: "cleared to land", follow: "number " + e.position, hold: "hold", go_around: "go around", checking: "standby", fix: "hold", review: "waiting for review", stand_down: "stand down" };
   return `ATC: ${e.pr}, ${words[e.clearance]}. ${e.reason}`;
 }
 

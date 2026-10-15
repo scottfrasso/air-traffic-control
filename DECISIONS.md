@@ -32,6 +32,7 @@ the raw spike findings (milestone 1).
 | [0023](docs/adr/0023-review-gate.md) | Optional review gate: REVIEW clearance, approval per head | Accepted |
 | [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Accepted |
 | [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted |
+| [0026](docs/adr/0026-competing-attempts.md) | Competing attempts at one task: compare, STAND DOWN, pick | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
