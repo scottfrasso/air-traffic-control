@@ -12,6 +12,9 @@ _Last updated 2026-10-15. The competition entry is submitted; the repo is public
 ## Blocked
 
 Nothing.
+
+## Notes
+
 - Workers Paid is active. The Worker's Queues-only subscription token is installed (`CLOUDFLARE_AGENTMESH_WORKER_API_KEY` → secret `CF_API_TOKEN`).
 - Heads-up: the main `CLOUDFLARE_API_TOKEN` (used by seed/teardown) expires **2026-10-15 21:59 UTC**, one day after the deadline.
 
@@ -84,7 +87,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** public GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 148 tests (`pnpm test`), strict TypeScript in every package.
+  clean before the first push), 149 tests (`pnpm test`), strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 

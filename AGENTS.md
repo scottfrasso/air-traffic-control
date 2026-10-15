@@ -5,7 +5,7 @@ Guidance for any coding agent (Claude Code or otherwise) working in this repo.
 ## Mission
 
 See `prompt.md`. Build a coordination layer for many coding agents on one repo,
-on Cloudflare Workers + Artifacts. Deadline: 2026-10-14.
+on Cloudflare Workers + Artifacts. The competition entry was submitted on 2026-10-14; the repo is public.
 
 ## Competition (read before changing scope)
 
@@ -16,7 +16,8 @@ on Cloudflare Workers + Artifacts. Deadline: 2026-10-14.
 - Hard requirements: 5–10 min demo video, public repo with LICENSE, a person submits the form (no automated entry).
 - Priority work is in GitHub issues labelled `competition` (`P0` > `P1` > `P2`). The current plan, in order, is in
   `handover/04-next.md` (local only; `handover/` is gitignored) and summarised under Next in `PROGRESS.md`.
-- The repo stays private and unpushed until the owner says otherwise. Never submit the form or change repo visibility yourself.
+- The repo is public: never commit secrets or personal details (email, location). `handover/` stays local.
+  Never change repo visibility yourself.
 - Put new research in `docs/research/` so it isn't looked up twice.
 
 ## Documentation sources — use these, never guess an API
