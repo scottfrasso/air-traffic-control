@@ -24,6 +24,10 @@ if they didn't conflict, which ships the task twice.
   doesn't count, and one sent around (GO AROUND) counts as decided and not green: ATC doesn't re-check it until it
   pushes, so waiting for it could take forever. A checker error ATC will still retry is not decided: a passing
   error mustn't lose the comparison.
+  - **Except ATC's own pick.** Table `task_leaders` remembers which attempt ATC chose last per task. If an unrelated
+    landing sends *that* one around, the others wait for it for up to `LEADER_WAIT_MS` (= `CHECK_STUCK_MS`, 20 min)
+    from when it was sent around, so a routine rebase doesn't hand the task to the attempt ATC ranked worse. After
+    that it counts as not green like any other go-around.
 - **Ranking** (`compareAttempts`, pure, in `attempts.ts`), the first step that differs decides and is the reason:
   1. green on current main (pairs in, not sent around);
   2. fewer open conflicts with other in-flight PRs (not counting the other attempts);
@@ -44,11 +48,14 @@ if they didn't conflict, which ships the task twice.
   task …"), shown even over GO AROUND, since rebasing changes nothing. The landing sends them neither a go-around nor
   "stay in line", and doesn't re-check them; they get a `stand_down` signal. Only a landing after the PR was opened
   counts, so a task key reused later (a follow-up on the same ticket) isn't blocked by an old landing.
-  The winner's CLEARED reason says "Chosen over PR1 (same task)" when the loser conflicts with it. To keep a loser's work (it adds something), the agent declares an
+  The winner's CLEARED reason says "Chosen over PR1 (same task)" when the loser conflicts with it; a PR outside the
+  task is never credited with beating a loser, and FOLLOW doesn't list losers as waiting for it.
+  If a final loser declares a new task, ATC re-checks it on current main right away (the landing had skipped it). To keep a loser's work (it adds something), the agent declares an
   intent with a new task and pushes; then it is an ordinary PR again.
 - **A person can override:** `POST /choose {fork, by}` or the dashboard's PICK button on a STAND DOWN row (with a
-  key, never on the public replay). Table `task_choices(task, winner, by, at)` keeps the latest pick per task. The
-  chosen PR still passes every other check. Refused (409) for a PR with no task, the only attempt, a task that has
+  key, never on the public replay). Table `task_choices(task, winner, by, at, sha)` keeps the latest pick per task, for the
+  head the person saw: once the picked PR pushes again, ATC ranks again. The chosen PR still passes every other check.
+  A pick needs another attempt with pushed changes. Refused (409) for a PR with no task, the only attempt, a task that has
   already landed, or during a landing. When the pick differs from ATC's ranking the reason says so ("picked by … over
   ATC's ranking (which preferred PR2: …)"); when it agrees, ATC's reason is kept with "confirmed by …".
 - **Flight log:** the winner's note gets `ATC-Chosen-Over: PR1 (<reason>)` (up to three). `stand_down` is a story
@@ -60,7 +67,11 @@ if they didn't conflict, which ships the task twice.
 - Identity is not enforced for `choose`, as for reviews (ADR-0005): `by` is a label.
 - A loser that keeps pushing makes the winner wait again for each push's checks (each wait is bounded). Not
   prevented: a later push may make it the better attempt, which is the point of comparing.
-- With no intent naming a task (the default), nothing about attempts is computed: one indexed `LIMIT 1` query.
+- With no intent naming a task (the default), nothing about attempts is computed: one meta read (`tasks_seen`,
+  set by `declare_intent`). Once a baseline has seen a task, each read groups its intents by fork (indexed); fine at
+  demo scale, worth a cache for very long-lived baselines.
+- A loser's `stand_down` note stays open while its task is contested and nothing replaced it, so a winner's new push
+  doesn't resolve and re-open it.
 - The verdicts are recomputed from state on every read; the stand-down signals are synced when state is flushed
   (and on a refused landing or a pick), so they can lag the clearance by the 120 ms flush delay.
 - `./demo/run.sh --attempts [--browser]` runs it end to end: two attempts, STAND DOWN, a pick (in a real browser with

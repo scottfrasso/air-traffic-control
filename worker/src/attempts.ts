@@ -1,5 +1,5 @@
 import { prLabel } from "./atc";
-import { isGreen } from "./landing";
+import { CHECK_STUCK_MS, isGreen } from "./landing";
 import type { ForkRow } from "./types";
 
 /**
@@ -32,8 +32,14 @@ export type AttemptVerdict =
   /** It ships. `over`: the attempts it beat and why (for its flight log). */
   | { kind: "chosen"; over: Array<{ fork: string; reason: string }> };
 
-/** A person's pick for a task (table `task_choices`). */
-export type TaskChoice = { task: string; winner: string; by: string; at: number };
+/** A person's pick for a task (table `task_choices`), for the winner's head at the time: a new push ends it. */
+export type TaskChoice = { task: string; winner: string; by: string; at: number; sha: string | null };
+
+/**
+ * ATC's pick for a task that an unrelated landing sent around keeps the task this long while it fixes the go-around,
+ * so a routine rebase doesn't hand the task to the attempt ATC ranked worse (review of #45). Then it counts as not green.
+ */
+export const LEADER_WAIT_MS = CHECK_STUCK_MS;
 
 /** Task keys are compared trimmed and case-insensitive; null for none. */
 export function normalizeTask(raw: unknown): string | null {
@@ -53,6 +59,11 @@ export type VerdictContext = {
   goAround?: Set<string>;
   /** PRs whose checks ATC stopped restarting (CHECK_MAX_RESTARTS): only a new push retries them. */
   gaveUp?: Set<string>;
+  /** task → the attempt ATC chose last (table `task_leaders`). */
+  leaders?: Map<string, string>;
+  /** fork → when it was sent around (its open rebase_required signal). */
+  sentAround?: Map<string, number>;
+  now?: number;
 };
 
 /**
@@ -133,7 +144,8 @@ export function attemptVerdicts(
     const group = members.map((a) => ({ ...a, green: isGreenNow(a.fork, ctx) }));
     const ranked = [...group].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1));
     const best = ranked[0]!;
-    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
+    // A pick is for the head the person saw: once the picked PR pushes again, ATC ranks again (review of #45).
+    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner && (c.sha === null || a.fork.head_sha === c.sha))).sort((x, y) => y.at - x.at)[0];
     if (choice) {
       const winner = group.find((a) => a.fork.name === choice.winner)!;
       const atc = (l: Attempt) => {
@@ -146,12 +158,22 @@ export function attemptVerdicts(
       out.set(winner.fork.name, { kind: "chosen", over });
       continue;
     }
-    const waiting = group.filter((a) => !decided(a.fork, ctx));
+    // ATC's pick, sent around by another PR's landing: the task stays its own while it fixes that, up to LEADER_WAIT_MS.
+    const sentAt = (a: Attempt) => ctx.sentAround?.get(a.fork.name);
+    const held = (a: Attempt) =>
+      ctx.leaders?.get(task) === a.fork.name && (ctx.goAround ?? new Set()).has(a.fork.name) && (ctx.now ?? Date.now()) - (sentAt(a) ?? 0) < LEADER_WAIT_MS;
+    const waiting = group.filter((a) => held(a) || !decided(a.fork, ctx));
     if (waiting.length) {
       for (const a of group)
         if (!waiting.includes(a) && a.green) {
           const on = waiting.map((w) => w.fork.name);
-          out.set(a.fork.name, { kind: "wait", on, reason: `Waiting for ${on.map(prLabel).join(", ")}, another attempt at the same task (${task}), to finish its checks; then ATC picks one.` });
+          const leader = waiting.find(held);
+          out.set(a.fork.name, {
+            kind: "wait", on,
+            reason: leader
+              ? `Waiting for ${prLabel(leader.fork.name)}, ATC's pick for this task (${task}): another landing sent it around, and it gets ${Math.round(LEADER_WAIT_MS / 60_000)} min to fix that before ATC picks again.`
+              : `Waiting for ${on.map(prLabel).join(", ")}, another attempt at the same task (${task}), to finish its checks; then ATC picks one.`,
+          });
         }
       continue;
     }

@@ -493,12 +493,20 @@ export class Coordinator extends DurableObject<Env> {
     if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
     const conflicts = intentConflicts(this.snapshot(), fork, files, symbols);
     const key = task === undefined ? (this.tasks().get(fork) ?? null) : normalizeTask(task);
+    const before = this.attemptVerdicts().get(fork);
     this.sql.exec(
       "INSERT INTO intents(fork, description, files, symbols, created_at, task) VALUES (?, ?, ?, ?, ?, ?)",
       fork, description, JSON.stringify(files), JSON.stringify(symbols), Date.now(), key,
     );
     this.log("intent.declared", { description, files, symbols, conflicts: conflicts.length, task: key }, fork);
+    if (key) this.setMeta("tasks_seen", "1");
     this.syncDerivedSignals();
+    // Left a task that had already landed: the landing skipped re-checking this PR (it couldn't land then). It can now,
+    // so check it on current main, which also tells it if it conflicts with what landed (review of #45).
+    if (before?.kind === "stand_down" && before.final && this.attemptVerdicts().get(fork)?.kind !== "stand_down" && row.head_sha !== row.base_sha) {
+      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
+      await this.startPipeline(fork, row.head_sha, "recheck");
+    }
     // Who else is on this task: the agent learns it competes before it writes any code.
     const rivals = key ? this.attempts().filter((a) => a.task === key && a.fork.name !== fork).map((a) => a.fork.name) : [];
     return { fork, recorded: true, overlaps: conflicts, ...(key ? { task: key, sameTask: rivals } : {}) };
@@ -739,7 +747,13 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Any intent names a task? If not (the usual case), nothing about attempts needs computing. */
   private anyTasks(): boolean {
-    return this.sql.exec("SELECT 1 FROM intents WHERE task IS NOT NULL LIMIT 1").toArray().length > 0;
+    // A flag set by declareIntent, so the usual case (no task ever) costs one meta read. Missing on a DO that recorded
+    // tasks before the flag existed: look once, and remember.
+    const seen = this.meta("tasks_seen");
+    if (seen !== null) return seen === "1";
+    const any = this.sql.exec("SELECT 1 FROM intents WHERE task IS NOT NULL LIMIT 1").toArray().length > 0;
+    this.setMeta("tasks_seen", any ? "1" : "0");
+    return any;
   }
 
   /** Active PRs that name a task, with what compareAttempts needs. */
@@ -771,7 +785,13 @@ export class Coordinator extends DurableObject<Env> {
       .toArray()
       .flatMap((r) => (tasks.get(r.name) ? [{ fork: r.name, task: tasks.get(r.name)!, landedAt: r.landed_at }] : []));
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const sentAround = new Map(
+      this.sql.exec<{ fork: string; at: number }>("SELECT fork, max(created_at) AS at FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL GROUP BY fork").toArray().map((r) => [r.fork, r.at]),
+    );
     return attemptVerdicts(attempts, landed, {
+      leaders: new Map(this.sql.exec<{ task: string; fork: string }>("SELECT task, fork FROM task_leaders").toArray().map((r) => [r.task, r.fork])),
+      sentAround,
+      now: Date.now(),
       baselineHead: this.meta("baseline_head") ?? "",
       pairsPending: known.pairsPending ?? forksWaitingOnPairs(this.outstandingPairs()),
       choices: this.sql.exec<TaskChoice>("SELECT * FROM task_choices").toArray(),
@@ -782,13 +802,29 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Tell each attempt that stands down, once per (head, winner, reason); resolve the notes that no longer hold. */
   private syncAttemptSignals() {
-    const open0 = this.sql.exec("SELECT 1 FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL LIMIT 1").toArray().length > 0;
-    if (!open0 && !this.anyTasks()) return;
-    const down = standDowns(this.attemptVerdicts());
+    if (!this.anyTasks()) return; // stand_down signals exist only once some intent named a task
+    const verdicts = this.attemptVerdicts();
+    const down = standDowns(verdicts);
+    // Remember ATC's pick per task, so a go-around from another landing doesn't hand the task over (attemptVerdicts).
+    const tasks = this.tasks();
+    for (const [fork, v] of verdicts) {
+      const task = v.kind === "chosen" ? tasks.get(fork) : null;
+      if (task)
+        this.sql.exec("INSERT INTO task_leaders(task, fork, at) VALUES (?, ?, ?) ON CONFLICT(task) DO UPDATE SET fork = excluded.fork, at = excluded.at WHERE task_leaders.fork <> excluded.fork", task, fork, Date.now());
+    }
     const open = this.sql.exec<{ id: number; fork: string; dedupe_key: string }>("SELECT id, fork, dedupe_key FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL").toArray();
     const keys = new Map<string, string>();
     for (const [fork, v] of down) keys.set(fork, `stand_down:${fork}:${this.fork(fork)?.head_sha ?? ""}:${v.winner}:${v.final ? "final" : v.reason.slice(0, 60)}`);
-    for (const s of open) if (keys.get(s.fork) !== s.dedupe_key) this.sql.exec("UPDATE signals SET resolved_at = ? WHERE id = ?", Date.now(), s.id);
+    // A note stays open while its task is still contested and nothing replaced it: when the winner pushes again, the
+    // loser is briefly undecided (waiting, or its pair checks are out), and re-opening the note each time is just noise.
+    const contested = new Set(this.attempts().filter((x) => x.fork.head_sha !== x.fork.base_sha).map((x) => x.task).filter((t, i, all) => all.indexOf(t) !== i));
+    const stillOpen = (fork: string) => {
+      const v = verdicts.get(fork);
+      if (v?.kind === "stand_down" || v?.kind === "chosen") return false; // replaced, or it ships now
+      const task = tasks.get(fork);
+      return this.fork(fork)?.status === "active" && !!task && contested.has(task);
+    };
+    for (const s of open) if (keys.get(s.fork) !== s.dedupe_key && !stillOpen(s.fork)) this.sql.exec("UPDATE signals SET resolved_at = ? WHERE id = ?", Date.now(), s.id);
     for (const [fork, v] of down)
       this.emitSignal({ fork, kind: "stand_down", about_fork: v.winner, symbol: null, message: this.relabel(v.reason), data: { winner: v.winner, final: v.final }, dedupe_key: keys.get(fork)! });
   }
@@ -805,13 +841,15 @@ export class Coordinator extends DurableObject<Env> {
     if (!task) return refuse(409, `${prLabel(fork)} hasn't named a task (declare_intent with a task)`);
     const verdict = this.attemptVerdicts().get(fork);
     if (verdict?.kind === "stand_down" && verdict.final) return refuse(409, verdict.reason);
-    if (this.attempts().filter((a) => a.task === task).length < 2) return refuse(409, `${prLabel(fork)} is the only attempt at ${task}: nothing to choose`);
+    // Only attempts with pushed changes count, as in attemptVerdicts: a pick against one with nothing pushed would do nothing.
+    if (this.attempts().filter((a) => a.task === task && a.fork.head_sha !== a.fork.base_sha).length < 2 || row.head_sha === row.base_sha)
+      return refuse(409, `${prLabel(fork)} has no other attempt at ${task} with pushed changes: nothing to choose`);
     // A landing in flight passed the gate with the old pick; changing it now would mislead the log (as for review).
     if (this.landingInProgress()) return refuse(409, "a landing is in progress; pick again in a few seconds");
     const who = by.trim().slice(0, 60) || "a person";
     this.sql.exec(
-      "INSERT INTO task_choices(task, winner, by, at) VALUES (?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at",
-      task, fork, who, Date.now(),
+      "INSERT INTO task_choices(task, winner, by, at, sha) VALUES (?, ?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at, sha = excluded.sha",
+      task, fork, who, Date.now(), row.head_sha,
     );
     this.log("attempt.chosen", { task, by: who }, fork);
     this.touch();

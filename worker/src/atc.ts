@@ -124,19 +124,24 @@ export function buildSequence(
     }
     if (!leader) {
       leader = f.name;
-      const beat = mine[0];
+      // A rival that stands down to ANOTHER PR isn't one this PR beat (review of #45): don't credit it with that.
+      const shown = mine.filter((c) => {
+        const v = attempts.get(c.other);
+        return v?.kind !== "stand_down" || v.winner === f.name;
+      });
+      const beat = shown[0];
       // A rival skipped only because it awaits review didn't lose on merit: say so (this text goes into git notes).
       // Cite review only if the rival would otherwise have been ahead; if it lost on merit, say why (review of #38).
       const skippedForReview = beat && review.has(beat.other) && landingOrder(byName.get(beat.other)!, f, baselineHead) < 0;
       const why = skippedForReview ? `${prLabel(beat.other)} is waiting for review` : f.land_requested_at !== null ? "requested landing first" : "smaller diff";
       // A rival that stands down didn't lose on landing order: say what it lost on (this text goes into git notes; review of #45).
       if (beat && attempts.get(beat.other)?.kind === "stand_down") entry("cleared", `Cleared to land. Chosen over ${prLabel(beat.other)} (same task).`);
-      else entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : "Cleared to land. No conflicts.");
+      else entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : mine.length ? "Cleared to land." : "Cleared to land. No conflicts.");
       continue;
     }
     // Its only conflicts are with PRs behind it (one ahead would have made it hold): they wait for it.
     // One name per PR: a pair can have several open conflict signals (different symbols, files or errors).
-    const behind = [...new Set(mine.map((c) => prLabel(c.other)))];
+    const behind = [...new Set(mine.filter((c) => attempts.get(c.other)?.kind !== "stand_down").map((c) => prLabel(c.other)))]; // one standing down won't land
     entry("follow", `Follow ${prLabel(leader)}. ${behind.length ? `${behind.join(", ")} will wait for you.` : "No conflicts."}`, leader);
   }
   return out;
