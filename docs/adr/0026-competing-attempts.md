@@ -13,7 +13,8 @@ if they didn't conflict, which ships the task twice.
   ticket id, or the id of the prompt an orchestrator handed out. It is stored on the intent (`intents.task`, trimmed and
   lower-cased) and a PR's task is the one its **latest** intent names. A later `declare_intent` without `task` keeps the
   PR's task (re-planning mustn't silently leave it, or the task could ship twice); `""` (or `null` over HTTP) clears it.
-  `declare_intent` answers `sameTask`: the other PRs already on it.
+  `declare_intent` answers `sameTask` (the other PRs already on it) and `landedBy` (PRs that already landed it), so a
+  late duplicate learns before writing code that the task has shipped; ATC doesn't block it (see below).
   - The design on the issue also had a fallback (≥ 70 % overlap of declared files and symbols). It was dropped: two
     different tasks often touch the same files, and a false match would tell real work to stand down. An explicit key
     can't be wrong that way.
@@ -57,7 +58,8 @@ if they didn't conflict, which ships the task twice.
 - **A person can override:** `POST /choose {fork, by}` or the dashboard's PICK button on a STAND DOWN row (with a
   key, never on the public replay). Table `task_choices(task, winner, by, at)` keeps the latest pick per task. It holds across
   the picked PR's pushes (a go-around fix ATC asked for mustn't undo it) until someone picks again, or the picked PR
-  is abandoned or leaves the task: a person's pick is a person's to change. The chosen PR still passes every other
+  is abandoned or leaves the task (declaring another task deletes the pick, so coming back doesn't revive it): a
+  person's pick is a person's to change. The chosen PR still passes every other
   check. A pick needs another live attempt with pushed changes (final losers of an earlier landing don't count). Refused (409) for a PR with no task, the only attempt, a task that has
   already landed, or during a landing. When the pick differs from ATC's ranking the reason says so ("picked by … over
   ATC's ranking (which preferred PR2: …)"); when it agrees, ATC's reason is kept with "confirmed by …".
@@ -68,6 +70,9 @@ if they didn't conflict, which ships the task twice.
 - Best-of-N runs need nothing but a shared `task`: ATC picks and says why; nothing ships twice.
 - A green attempt can wait for its rival's checks (bounded: checks always end, ADR-0021).
 - Identity is not enforced for `choose`, as for reviews (ADR-0005): `by` is a label.
+- Nothing times out a winner that stalls: if the chosen PR's agent stops, or it waits in REVIEW, the others stand
+  down until it lands, is abandoned, or a person picks another. A PR that names a task only after it landed isn't
+  stopped either (`landedBy` tells it); both are left to the agents and people, not guessed by ATC.
 - A loser that keeps pushing makes the winner wait again for each push's checks (each wait is bounded). Not
   prevented: a later push may make it the better attempt, which is the point of comparing.
 - With no intent naming a task (the default), nothing about attempts is computed: one meta read (`tasks_seen`,

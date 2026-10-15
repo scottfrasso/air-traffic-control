@@ -493,7 +493,10 @@ export class Coordinator extends DurableObject<Env> {
     const row = this.fork(fork);
     if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
     const conflicts = intentConflicts(this.snapshot(), fork, files, symbols);
-    const key = task === undefined ? (this.anyTasks() ? (this.tasks().get(fork) ?? null) : null) : normalizeTask(task);
+    const previous = this.anyTasks() ? (this.tasks().get(fork) ?? null) : null;
+    const key = task === undefined ? previous : normalizeTask(task);
+    // Leaving a task ends a person's pick of this PR for it: coming back later mustn't revive it (review of #45).
+    if (previous && previous !== key) this.sql.exec("DELETE FROM task_choices WHERE task = ? AND winner = ?", previous, fork);
     const before = this.attemptVerdicts().get(fork);
     this.sql.exec(
       "INSERT INTO intents(fork, description, files, symbols, created_at, task) VALUES (?, ?, ?, ?, ?, ?)",
@@ -510,7 +513,11 @@ export class Coordinator extends DurableObject<Env> {
     }
     // Who else is on this task: the agent learns it competes before it writes any code.
     const rivals = key ? this.attempts().filter((a) => a.task === key && a.fork.name !== fork).map((a) => a.fork.name) : [];
-    return { fork, recorded: true, overlaps: conflicts, ...(key ? { task: key, sameTask: rivals } : {}) };
+    // PRs that already landed this task: a late duplicate learns it before writing code (review of #45).
+    const landedBy = key
+      ? this.sql.exec<{ name: string }>("SELECT name FROM forks WHERE status = 'landed' ORDER BY landed_at").toArray().map((r) => r.name).filter((n) => this.tasks().get(n) === key)
+      : [];
+    return { fork, recorded: true, overlaps: conflicts, ...(key ? { task: key, sameTask: rivals, landedBy } : {}) };
   }
 
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
@@ -853,11 +860,11 @@ export class Coordinator extends DurableObject<Env> {
     if (!row || row.status !== "active") return refuse(404, `unknown or inactive fork ${fork}`);
     const task = this.tasks().get(fork);
     if (!task) return refuse(409, `${prLabel(fork)} hasn't named a task (declare_intent with a task)`);
-    const verdict = this.attemptVerdicts().get(fork);
+    const verdicts = this.attemptVerdicts();
+    const verdict = verdicts.get(fork);
     if (verdict?.kind === "stand_down" && verdict.final) return refuse(409, this.relabel(verdict.reason));
     // Only attempts with pushed changes count, as in attemptVerdicts: a pick against one with nothing pushed would do nothing.
     // Final losers from an earlier landing don't compete either (review of #45).
-    const verdicts = this.attemptVerdicts();
     const live = (a: Attempt) => a.task === task && a.fork.head_sha !== a.fork.base_sha && !(verdicts.get(a.fork.name)?.kind === "stand_down" && (verdicts.get(a.fork.name) as { final: boolean }).final);
     if (this.attempts().filter(live).length < 2 || row.head_sha === row.base_sha)
       return refuse(409, `${prLabel(fork)} has no other attempt at ${task} with pushed changes: nothing to choose`);
@@ -1014,7 +1021,6 @@ export class Coordinator extends DurableObject<Env> {
     if (!lock) return { landed: false, fork, reason: "Another landing is in progress; retry shortly.", baselineHead, retry: true };
     this.setMeta("landing", JSON.stringify({ ...lock, fork }));
     try {
-      const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
       // The story up to the moment it lands. A bug in building it must never fail a landing: fall back to the basics.
       let note: string;
       try {
@@ -1023,12 +1029,23 @@ export class Coordinator extends DurableObject<Env> {
         this.log("notes.build_failed", { error: (err as Error).message.slice(0, 300) }, fork);
         note = minimalFlightLog(me.name, me.agent, baselineHead);
       }
-      // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
-      const result = JSON.parse(
-        await checkerFor(this.env, baseline, "land").run({
-          mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead },
-        }),
-      ) as LandResult & { error?: string };
+      // Tokens and the land run itself can fail outright (a container restarting after a deploy, a network error).
+      // That is a retry, not a 500: nothing landed that ATC knows of, and if the push did go through, the next request
+      // reads the new main and re-checks the PR (ADR-0018).
+      let result: LandResult & { error?: string };
+      try {
+        const [forkRef, baseRef] = await Promise.all([this.repoRef(fork, "read"), this.repoRef(baseline, "write")]);
+        // Pin both heads (issue #1): land exactly the fork commit ATC checked, onto exactly the main it was checked on.
+        result = JSON.parse(
+          await checkerFor(this.env, baseline, "land").run({
+            mode: "land", fork: { ...forkRef, expectedHead: me.head_sha }, baseline: { ...baseRef, expectedHead: baselineHead },
+          }),
+        ) as LandResult & { error?: string };
+      } catch (err) {
+        const error = (err as Error).message.slice(0, 300);
+        this.log("land.failed", { error }, fork);
+        return { landed: false, fork, reason: `ATC couldn't run the landing (${error.slice(0, 120)}); retry in a few seconds.`, baselineHead, retry: true };
+      }
       if (result.error) return deny(`Landing failed: ${result.error}`);
       if (result.retry) return { landed: false, fork, reason: result.reason ?? "retry", baselineHead, retry: true };
       if (!result.landed || !result.landedSha) {
