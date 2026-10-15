@@ -40,7 +40,16 @@ CREATE TABLE IF NOT EXISTS intents(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fork TEXT NOT NULL, description TEXT NOT NULL,
   files TEXT NOT NULL, symbols TEXT NOT NULL,   -- JSON arrays
-  created_at INTEGER NOT NULL);
+  created_at INTEGER NOT NULL,
+  task TEXT);                        -- the task this PR is an attempt at (issue #19), normalized; NULL for none
+
+CREATE INDEX IF NOT EXISTS intents_by_fork ON intents(fork, id);
+
+-- A person's pick among competing attempts at one task (issue #19, ADR-0026); the latest per task counts.
+CREATE TABLE IF NOT EXISTS task_choices(task TEXT PRIMARY KEY, winner TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+
+-- ATC's own latest pick per task, so an attempt sent around by another landing keeps the task a while (issue #19).
+CREATE TABLE IF NOT EXISTS task_leaders(task TEXT PRIMARY KEY, fork TEXT NOT NULL, at INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS signals(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,4 +104,5 @@ CREATE TABLE IF NOT EXISTS event_log(
 /** Columns added after a table first shipped: existing Durable Objects get them through ALTER TABLE (idempotent). */
 export const COLUMNS: Array<{ table: string; column: string; ddl: string }> = [
   { table: "forks", column: "check_main_conflict", ddl: "ALTER TABLE forks ADD COLUMN check_main_conflict INTEGER NOT NULL DEFAULT 0" },
+  { table: "intents", column: "task", ddl: "ALTER TABLE intents ADD COLUMN task TEXT" },
 ];

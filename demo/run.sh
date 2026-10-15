@@ -5,4 +5,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 command -v pnpm >/dev/null || { echo "pnpm is required" >&2; exit 1; }
 [ -d node_modules ] || pnpm install --silent
+# --attempts: the competing-attempts scenario (issue #19) instead of the main demo.
+if [ "${1:-}" = "--attempts" ]; then shift; exec pnpm exec tsx src/attempts.ts "$@"; fi
 exec pnpm exec tsx src/run.ts "$@"

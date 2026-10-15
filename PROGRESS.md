@@ -16,7 +16,8 @@ Nothing.
 ## Notes
 
 - Workers Paid is active. The Worker's Queues-only subscription token is installed (`CLOUDFLARE_AGENTMESH_WORKER_API_KEY` → secret `CF_API_TOKEN`).
-- Heads-up: the main `CLOUDFLARE_API_TOKEN` (used by seed/teardown) expires **2026-10-15 21:59 UTC**, one day after the deadline.
+- The main `CLOUDFLARE_API_TOKEN` (deploys, seed/teardown, `run.sh`) expires **2026-10-15 21:59 UTC**: rotate it before deploying or running
+  the demos after that. The running Worker doesn't use it (it has its own Queues-only token).
 
 ## Works (verified against deployed Cloudflare resources)
 
@@ -54,6 +55,11 @@ Nothing.
 - **Tidy-up (#10, 2026-10-14):** storage is pruned in the reconcile alarm (never the public replay or the video's run), webhooks
   have a 5 s timeout and one retry, `check_main_conflict` replaces the parsed "on main:" prefix (existing DOs migrate in
   place), duplicates removed. ADR-0024. The read side and signal store were split out of `coordinator.ts` in #42.
+- **Competing attempts (#19, ADR-0026, 2026-10-15):** PRs naming the same `task` in `declare_intent` compete. Once all are
+  checked, ATC ships the best (green > fewer conflicts > fewer breaking/changed exported symbols > fewer files > smaller diff
+  > earlier); the others get STAND DOWN with the reason, a signal, and a refused landing. A person can override (`POST /choose`,
+  dashboard PICK). The winner's git note has `ATC-Chosen-Over`. `./demo/run.sh --attempts --browser` passes against production
+  (PICK clicked in headless Chromium).
 - **Review gate (#16, ADR-0023, 2026-10-14):** optional (off by default). PRs wait in REVIEW until a reviewer approves their
   current head, through the MCP `review` tool, the dashboard's APPROVE button or `POST /reviews`; the note goes into the
   flight log. `./demo/run.sh --review` runs it with a scripted reviewer.
@@ -87,7 +93,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** public GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 149 tests (`pnpm test`), strict TypeScript in every package.
+  clean before the first push), 180 tests (`pnpm test`), strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 
@@ -101,6 +107,8 @@ Nothing.
   usually caught by the Coordinator's 5 s reconcile poll (ADR-0006). Both paths are live; the event log shows which one fired.
 - **Auth:** one shared API key for every agent and the dashboard (ADR-0005). Agent identity is not authenticated.
 - **Go-around fixes are the agent's job.** ATC merges PRs that fit; when one doesn't fit, the agent merges main and fixes it.
+- **Competing attempts are found only by an explicit `task` key** (ADR-0026), not by guessing from overlapping intents. Their
+  "blast radius" counts changed exported symbols; it doesn't weight them by how many files on main use them (not indexed).
 - **Typecheck is the only CI**, by design (prompt.md: no CI beyond typecheck).
 - **Alarm-kept DOs run stale code across deploys** (ADR-0009). Mitigated by a 10-minute idle cutoff, fresh baselines per run, and teardown.
 
@@ -119,11 +127,10 @@ passing; production always equal to `main` after a merge):
 #24 publish the submission · #25 public replay (#14) · #27, #29 the 60-second cut · #28 pair-check errors (#5) · #30, #31, #35 no PR stays pending,
 main never moves backwards (#2, #4) · #32 clearance wording (#6) · #33 queue consumer + DLQ (#7) · #34 checker lock (#8) ·
 #36 checks share work (#9) · #37 tests (#11) · #38 review gate (#16) · #39, #41 one-command deploy (#18) ·
-#40, #42, #43 tidy-up and the Coordinator split (#10).
+#40, #42, #43 tidy-up and the Coordinator split (#10) · #44 docs after submission · #45 competing attempts (#19).
 
 Open:
 - (#21 finals prep is closed on GitHub, closed 2026-10-14 before this run; reopen it if ATC is selected on 10-16.)
-- #19 compare competing attempts: a design is on the issue (about half a day of work).
 - Ideas left by reviews: per-container cap on concurrent tsc runs (ADR-0013 limits); passing ATC's known "alone"
   results into pair checks; a second-account run of `pnpm setup:cloudflare`.
 

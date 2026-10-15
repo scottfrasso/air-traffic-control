@@ -23,12 +23,14 @@ export interface FlightLogInput {
   landed: boolean;
   /** The approval it landed with, when the review gate is on (issue #16). */
   review?: { verdict: string; reviewer: string; note: string };
+  /** Other attempts at the same task this PR was chosen over, each with why (issue #19). */
+  chosenOver?: string[];
 }
 
-const WORD: Record<string, string> = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD", review: "REVIEW" };
+const WORD: Record<string, string> = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD", review: "REVIEW", stand_down: "STAND DOWN" };
 
 /** Signal kinds worth keeping: what other work this PR ran into. Go-arounds get their own trailer. */
-const STORY_KINDS = new Set(["semantic_conflict", "merge_conflict", "signature_change", "intent_overlap", "overlap", "check_failed"]);
+const STORY_KINDS = new Set(["semantic_conflict", "merge_conflict", "signature_change", "intent_overlap", "overlap", "check_failed", "stand_down"]);
 
 /** One clearance per change of clearance, from the recorded sequence snapshots (oldest first). */
 export function clearanceHistory(snapshots: SequenceSnapshot[], fork: string): ClearanceStep[] {
@@ -66,6 +68,7 @@ export function flightLogNote(f: FlightLogInput): string {
   for (const c of steps) lines.push(`ATC-Clearance: ${WORD[c.clearance] ?? c.clearance.toUpperCase()} (${oneLine(c.reason, 160)})`);
   for (const s of f.signals.filter((x) => x.kind === "rebase_required").sort((a, b) => a.created_at - b.created_at).slice(-3))
     lines.push(`ATC-Go-Around: ${s.about_fork ? `sent around after ${oneLine(prLabel(s.about_fork), 80)} landed (conflict${s.symbol ? ` on ${oneLine(s.symbol, 80)}` : ""})${f.landed ? "; landed after a new push" : ""}` : oneLine(s.message)}`);
+  for (const c of (f.chosenOver ?? []).slice(0, 3)) lines.push(`ATC-Chosen-Over: ${oneLine(c, 240)}`);
   if (f.review) lines.push(`ATC-Review: ${f.review.verdict === "approve" ? "approved" : "changes requested"} by ${oneLine(f.review.reviewer, 60)}${f.review.note ? ` (${oneLine(f.review.note, 160)})` : ""}`);
   lines.push(`ATC-Diff-Lines: ${f.diffLines}`, f.landed ? `ATC-Landed-Onto: ${f.onto.slice(0, 12)}` : `ATC-In-Flight-On: ${f.onto.slice(0, 12)}`);
   // git strips trailing whitespace from notes; do the same so ATC's copy and git's stay identical (idempotent retries).

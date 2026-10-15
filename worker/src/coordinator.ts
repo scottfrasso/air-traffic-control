@@ -8,6 +8,7 @@ import {
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
+import { attemptVerdicts, normalizeTask, standDowns, type Attempt, type AttemptVerdict, type TaskChoice } from "./attempts";
 import { analyzePair, describeError } from "./conflicts";
 import { NoteWriter, takeBatch } from "./notes";
 import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
@@ -16,7 +17,7 @@ import { COLUMNS, SCHEMA } from "./schema";
 import { deliver } from "./webhooks";
 import { intentConflicts, type DesiredSignal, type IndexSnapshot, type SignalKind } from "./signals";
 import { emitSignal, indexSnapshot, relabel, resolveSignals, signalsFor, syncDerivedSignals } from "./signalstore";
-import type { ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalRow } from "./types";
+import type { ChooseResult, ReviewResult, CoordinatorState, FlightLogEntry, ForkCredentials, ForkRow, LandResponse, Overlap, PushSource, SignalRow } from "./types";
 
 const RECONCILE_MS = 5_000;
 /** Storage bounds (prune): a 5-PR demo run writes about 600 events and 40 snapshots. */
@@ -97,6 +98,11 @@ export class Coordinator extends DurableObject<Env> {
 
   private flush() {
     if (!this.meta("baseline")) return;
+    try {
+      this.syncAttemptSignals();
+    } catch (err) {
+      console.error("stand-down signals failed", err); // never at the cost of the snapshot and the live push
+    }
     const model = this.readModel();
     const full = JSON.stringify(model);
     recordSnapshot(this.sql, model); // for replay, only when the airspace actually changed
@@ -389,8 +395,9 @@ export class Coordinator extends DurableObject<Env> {
     // while a Workflow is being created must not be overwritten by a decision made on the old state.
     const restarts: Array<{ name: string; sha: string; kind: "push" | "recheck"; attempt: number }> = [];
     const goAround = this.goAroundMap(); // sent around on purpose and not re-checked (onLanded): a new push decides
+    const finals = this.finalLosers(); // can't land: nothing to check until they push or leave the task
     for (const f of this.activeForks()) {
-      if (goAround.has(f.name)) continue;
+      if (goAround.has(f.name) || finals.has(f.name)) continue;
       const s = stuckCheck(f, runs.get(f.name), head, now);
       if (!s) continue;
       if ("giveUp" in s) {
@@ -477,17 +484,33 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /** Record what an agent plans to touch; return in-flight work it collides with. */
-  async declareIntent(fork: string, description: string, files: string[], symbols: string[]) {
+  /**
+   * `task`: the task this PR is an attempt at (issue #19); PRs whose latest intents name the same task compete.
+   * Left out (undefined), the PR keeps the task it had: re-declaring a plan mustn't silently leave the task (review of
+   * #45). An empty string or null clears it.
+   */
+  async declareIntent(fork: string, description: string, files: string[], symbols: string[], task?: string | null) {
     const row = this.fork(fork);
     if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
     const conflicts = intentConflicts(this.snapshot(), fork, files, symbols);
+    const key = task === undefined ? (this.anyTasks() ? (this.tasks().get(fork) ?? null) : null) : normalizeTask(task);
+    const before = this.attemptVerdicts().get(fork);
     this.sql.exec(
-      "INSERT INTO intents(fork, description, files, symbols, created_at) VALUES (?, ?, ?, ?, ?)",
-      fork, description, JSON.stringify(files), JSON.stringify(symbols), Date.now(),
+      "INSERT INTO intents(fork, description, files, symbols, created_at, task) VALUES (?, ?, ?, ?, ?, ?)",
+      fork, description, JSON.stringify(files), JSON.stringify(symbols), Date.now(), key,
     );
-    this.log("intent.declared", { description, files, symbols, conflicts: conflicts.length }, fork);
+    this.log("intent.declared", { description, files, symbols, conflicts: conflicts.length, task: key }, fork);
+    if (key) this.setMeta("tasks_seen", "1");
     this.syncDerivedSignals();
-    return { fork, recorded: true, overlaps: conflicts };
+    // Left a task that had already landed: the landing skipped re-checking this PR (it couldn't land then). It can now,
+    // so check it on current main, which also tells it if it conflicts with what landed (review of #45).
+    if (before?.kind === "stand_down" && before.final && this.attemptVerdicts().get(fork)?.kind !== "stand_down" && row.head_sha !== row.base_sha) {
+      this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
+      await this.startPipeline(fork, row.head_sha, "recheck");
+    }
+    // Who else is on this task: the agent learns it competes before it writes any code.
+    const rivals = key ? this.attempts().filter((a) => a.task === key && a.fork.name !== fork).map((a) => a.fork.name) : [];
+    return { fork, recorded: true, overlaps: conflicts, ...(key ? { task: key, sameTask: rivals } : {}) };
   }
 
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
@@ -580,7 +603,8 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Main moved: re-verify every waiting PR against the new main (no rebase needed unless it no longer fits). */
   private async recheckAll(except: Set<string>) {
-    const due = forksToRecheck(this.activeForks(), this.meta("baseline_head") ?? "", except);
+    // Final losers can't land (issue #19): re-checking them on every main move is wasted work (review of #45).
+    const due = forksToRecheck(this.activeForks(), this.meta("baseline_head") ?? "", new Set([...except, ...this.finalLosers()]));
     // Mark them all before the first await; then start each only if nothing changed meanwhile (a result or a push).
     for (const f of due) this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
     for (const { name, head_sha } of due) {
@@ -708,7 +732,146 @@ export class Coordinator extends DurableObject<Env> {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const forks = this.activeForks();
     const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
-    return buildSequence(forks, this.conflictMap(), this.meta("baseline_head") ?? "", this.goAroundMap(), forksWaitingOnPairs(this.outstandingPairs()), gaveUp, this.reviewWaits());
+    const pairsPending = forksWaitingOnPairs(this.outstandingPairs());
+    const conflicts = this.conflictMap();
+    const goAround = this.goAroundMap();
+    return buildSequence(forks, conflicts, this.meta("baseline_head") ?? "", goAround, pairsPending, gaveUp, this.reviewWaits(), this.attemptVerdicts({ pairsPending, conflicts, goAround, gaveUp }));
+  }
+
+  // ── competing attempts at one task (issue #19, ADR-0026) ───────────────
+
+  /** fork → the task its latest intent names (null: none). */
+  private tasks(): Map<string, string | null> {
+    return new Map(
+      this.sql.exec<{ fork: string; task: string | null }>("SELECT fork, task FROM intents WHERE id IN (SELECT max(id) FROM intents GROUP BY fork)").toArray().map((r) => [r.fork, r.task]),
+    );
+  }
+
+  /** Any intent names a task? If not (the usual case), nothing about attempts needs computing. */
+  private anyTasks(): boolean {
+    // A flag set by declareIntent, so the usual case (no task ever) costs one meta read. Missing on a DO that recorded
+    // tasks before the flag existed: look once, and remember.
+    const seen = this.meta("tasks_seen");
+    if (seen !== null) return seen === "1";
+    const any = this.sql.exec("SELECT 1 FROM intents WHERE task IS NOT NULL LIMIT 1").toArray().length > 0;
+    this.setMeta("tasks_seen", any ? "1" : "0");
+    return any;
+  }
+
+  /** Active PRs that name a task, with what compareAttempts needs. */
+  private attempts(conflicts = this.conflictMap(), tasks = this.tasks()): Attempt[] {
+    const forks = this.activeForks().filter((f) => tasks.get(f.name));
+    const count = (q: string, fork: string) => this.sql.exec<{ n: number }>(q, fork).one().n;
+    return forks.map((f) => {
+      const task = tasks.get(f.name)!;
+      const others = new Set((conflicts.get(f.name) ?? []).map((c) => c.other).filter((o) => tasks.get(o) !== task && this.fork(o)?.status === "active"));
+      // When it started naming this task: the oldest intent in its latest unbroken run of intents naming it.
+      const run = this.sql.exec<{ task: string | null; created_at: number }>("SELECT task, created_at FROM intents WHERE fork = ? ORDER BY id DESC", f.name).toArray();
+      let since = f.created_at;
+      for (const i of run) {
+        if (i.task !== task) break;
+        since = i.created_at;
+      }
+      return {
+        fork: f, task, conflicts: others.size, since,
+        breaking: count("SELECT count(*) AS n FROM symbol_changes WHERE fork = ? AND change IN ('signature_changed', 'removed')", f.name),
+        symbols: count("SELECT count(*) AS n FROM symbol_changes WHERE fork = ?", f.name),
+        files: count("SELECT count(*) AS n FROM touched WHERE fork = ?", f.name),
+      };
+    });
+  }
+
+  /** Pass what the caller already computed; anything left out is read here (only when some intent names a task). */
+  private attemptVerdicts(
+    known: { pairsPending?: Set<string>; conflicts?: Map<string, Conflict[]>; goAround?: Map<string, string>; gaveUp?: Set<string> } = {},
+  ): Map<string, AttemptVerdict> {
+    if (!this.anyTasks()) return new Map();
+    const tasks = this.tasks();
+    const attempts = this.attempts(known.conflicts ?? this.conflictMap(), tasks);
+    if (!attempts.length) return new Map();
+    const landed = this.sql
+      .exec<{ name: string; landed_at: number }>("SELECT name, landed_at FROM forks WHERE status = 'landed' ORDER BY landed_at")
+      .toArray()
+      .flatMap((r) => (tasks.get(r.name) ? [{ fork: r.name, task: tasks.get(r.name)!, landedAt: r.landed_at }] : []));
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const sentAround = new Map(
+      this.sql.exec<{ fork: string; at: number }>("SELECT fork, max(created_at) AS at FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL GROUP BY fork").toArray().map((r) => [r.fork, r.at]),
+    );
+    return attemptVerdicts(attempts, landed, {
+      leaders: new Map(this.sql.exec<{ task: string; fork: string }>("SELECT task, fork FROM task_leaders").toArray().map((r) => [r.task, r.fork])),
+      sentAround,
+      now: Date.now(),
+      baselineHead: this.meta("baseline_head") ?? "",
+      pairsPending: known.pairsPending ?? forksWaitingOnPairs(this.outstandingPairs()),
+      choices: this.sql.exec<TaskChoice>("SELECT * FROM task_choices").toArray(),
+      goAround: new Set((known.goAround ?? this.goAroundMap()).keys()),
+      gaveUp: known.gaveUp ?? new Set(attempts.filter((a) => !checkRetriesLeft(a.fork, runs.get(a.fork.name))).map((a) => a.fork.name)),
+    });
+  }
+
+  /** PRs that stand down for good (another attempt at their task landed): they can't land, so ATC doesn't check them. */
+  private finalLosers(): Set<string> {
+    return new Set([...standDowns(this.attemptVerdicts())].filter(([, v]) => v.final).map(([f]) => f));
+  }
+
+  /** Tell each attempt that stands down, once per (head, winner, basis); resolve the notes that no longer hold. */
+  private syncAttemptSignals() {
+    if (!this.anyTasks()) return; // stand_down signals exist only once some intent named a task
+    const verdicts = this.attemptVerdicts();
+    const down = standDowns(verdicts);
+    // Remember ATC's pick per task, so a go-around from another landing doesn't hand the task over (attemptVerdicts).
+    const tasks = this.tasks();
+    for (const [fork, v] of verdicts) {
+      const task = v.kind === "chosen" ? tasks.get(fork) : null;
+      if (task)
+        this.sql.exec("INSERT INTO task_leaders(task, fork, at) VALUES (?, ?, ?) ON CONFLICT(task) DO UPDATE SET fork = excluded.fork, at = excluded.at WHERE task_leaders.fork <> excluded.fork", task, fork, Date.now());
+    }
+    const open = this.sql.exec<{ id: number; fork: string; dedupe_key: string }>("SELECT id, fork, dedupe_key FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL").toArray();
+    const keys = new Map<string, string>();
+    for (const [fork, v] of down) keys.set(fork, `stand_down:${fork}:${this.fork(fork)?.head_sha ?? ""}:${v.winner}:${v.basis}`);
+    // A note stays open while its task is still contested and nothing replaced it: when the winner pushes again, the
+    // loser is briefly undecided (waiting, or its pair checks are out), and re-opening the note each time is just noise.
+    const contested = new Set(this.attempts().filter((x) => x.fork.head_sha !== x.fork.base_sha).map((x) => x.task).filter((t, i, all) => all.indexOf(t) !== i));
+    const stillOpen = (fork: string) => {
+      const v = verdicts.get(fork);
+      if (v?.kind === "stand_down" || v?.kind === "chosen") return false; // replaced, or it ships now
+      const task = tasks.get(fork);
+      return this.fork(fork)?.status === "active" && !!task && contested.has(task);
+    };
+    for (const s of open) if (keys.get(s.fork) !== s.dedupe_key && !stillOpen(s.fork)) this.sql.exec("UPDATE signals SET resolved_at = ? WHERE id = ?", Date.now(), s.id);
+    for (const [fork, v] of down)
+      this.emitSignal({ fork, kind: "stand_down", about_fork: v.winner, symbol: null, message: this.relabel(v.reason), data: { winner: v.winner, final: v.final }, dedupe_key: keys.get(fork)! });
+  }
+
+  /**
+   * A person picks which attempt at a task ships (dashboard PICK, or POST /choose). It overrides ATC's ranking until
+   * someone picks again; the winner still has to pass every other check.
+   */
+  async choose(fork: string, by: string): Promise<ChooseResult> {
+    const refuse = (status: number, error: string): ChooseResult => ({ ok: false, status, error: this.relabel(error) });
+    const row = this.fork(fork);
+    if (!row || row.status !== "active") return refuse(404, `unknown or inactive fork ${fork}`);
+    const task = this.tasks().get(fork);
+    if (!task) return refuse(409, `${prLabel(fork)} hasn't named a task (declare_intent with a task)`);
+    const verdict = this.attemptVerdicts().get(fork);
+    if (verdict?.kind === "stand_down" && verdict.final) return refuse(409, this.relabel(verdict.reason));
+    // Only attempts with pushed changes count, as in attemptVerdicts: a pick against one with nothing pushed would do nothing.
+    // Final losers from an earlier landing don't compete either (review of #45).
+    const verdicts = this.attemptVerdicts();
+    const live = (a: Attempt) => a.task === task && a.fork.head_sha !== a.fork.base_sha && !(verdicts.get(a.fork.name)?.kind === "stand_down" && (verdicts.get(a.fork.name) as { final: boolean }).final);
+    if (this.attempts().filter(live).length < 2 || row.head_sha === row.base_sha)
+      return refuse(409, `${prLabel(fork)} has no other attempt at ${task} with pushed changes: nothing to choose`);
+    // A landing in flight passed the gate with the old pick; changing it now would mislead the log (as for review).
+    if (this.landingInProgress()) return refuse(409, "a landing is in progress; pick again in a few seconds");
+    const who = by.trim().slice(0, 60) || "a person";
+    this.sql.exec(
+      "INSERT INTO task_choices(task, winner, by, at) VALUES (?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at",
+      task, fork, who, Date.now(),
+    );
+    this.log("attempt.chosen", { task, by: who }, fork);
+    this.touch();
+    this.syncAttemptSignals();
+    return { ok: true, task, winner: fork, by: who, clearance: this.sequence().find((e) => e.fork === fork)?.clearance };
   }
 
   /** What ATC tells one PR: its place in the landing sequence and why. */
@@ -823,13 +986,20 @@ export class Coordinator extends DurableObject<Env> {
     };
 
     const waits = this.reviewWaits();
+    const pairsPending = forksWaitingOnPairs(this.outstandingPairs());
+    const attempts = this.attemptVerdicts({ pairsPending });
     const gate = landGate({
-      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: forksWaitingOnPairs(this.outstandingPairs()).has(fork),
-      rivals: this.rivals(fork).filter((r) => !waits.has(r.name)), // a rival waiting for review can't land, so it isn't ahead
+      me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: pairsPending.has(fork), attempt: attempts.get(fork),
+      // A rival waiting for review, or standing down (issue #19), can't land, so it isn't ahead.
+      rivals: this.rivals(fork).filter((r) => !waits.has(r.name) && attempts.get(r.name)?.kind !== "stand_down"),
       checkRetriesLeft: checkRetriesLeft(me, this.sql.exec<CheckRun>("SELECT * FROM check_runs WHERE fork = ?", fork).toArray()[0]),
       awaitingReview: waits.get(fork),
     });
-    if (gate.kind === "deny") return deny(gate.reason, gate.signal);
+    if (gate.kind === "deny") {
+      // A stand-down's signal is kept by syncAttemptSignals (one per head and winner), not one per denied request.
+      if (gate.signal === "stand_down") this.syncAttemptSignals();
+      return deny(gate.reason, gate.signal === "stand_down" ? null : gate.signal);
+    }
     if (gate.kind === "retry") {
       if (gate.then === "recheck") {
         this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", fork);
@@ -894,9 +1064,13 @@ export class Coordinator extends DurableObject<Env> {
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
     this.resolveSignals({ fork: winner.name });
+    // Other attempts at the winner's task now stand down for good (issue #19): telling them to go around (rebase, fix,
+    // push) or re-checking them would be wasted work, since they can't land (review of #45). They get a stand_down.
+    const finals = this.finalLosers(); // every final loser, whoever won its task: none of them is told to stay in line
+    for (const f of finals) this.resolveSignals({ fork: f, about_fork: winner.name });
     const split = afterLanding(
       winner.name,
-      this.activeForks(),
+      this.activeForks().filter((f) => !finals.has(f.name)),
       this.sql
         .exec<OpenConflict>("SELECT fork, about_fork, symbol, message FROM signals WHERE about_fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL ORDER BY id", winner.name)
         .toArray(),
@@ -924,7 +1098,8 @@ export class Coordinator extends DurableObject<Env> {
       data: { newHead }, dedupe_key: `landed:${winner.name}:${newHead}`,
     });
     this.syncDerivedSignals();
-    await this.recheckAll(new Set(goAround));
+    this.syncAttemptSignals();
+    await this.recheckAll(new Set([...goAround, ...finals]));
     return {
       landed: true,
       fork: winner.name,
@@ -996,6 +1171,10 @@ export class Coordinator extends DurableObject<Env> {
       clearances: clearanceHistory(snapshots, f.name),
       onto,
       landed,
+      chosenOver: (() => {
+        const v = this.attemptVerdicts().get(f.name);
+        return v?.kind === "chosen" ? v.over.map((o) => `${prLabel(o.fork)} (${this.relabel(o.reason)})`) : undefined;
+      })(),
       review: this.reviewRequired()
         ? this.sql.exec<{ verdict: string; reviewer: string; note: string }>("SELECT verdict, reviewer, note FROM reviews WHERE fork = ? AND sha = ?", f.name, f.head_sha).toArray()[0]
         : undefined,
@@ -1050,6 +1229,7 @@ export class Coordinator extends DurableObject<Env> {
     );
     await this.requeuePairs();
     await this.restartStuckChecks();
+    this.syncAttemptSignals(); // time alone can change a verdict (a sent-around pick's wait ends); one meta read if no tasks
     this.prune();
     if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
@@ -1094,9 +1274,10 @@ export class Coordinator extends DurableObject<Env> {
   private checksAwaitingRestart(): boolean {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const goAround = this.goAroundMap();
+    const finals = this.finalLosers();
     // Pending at any restart count: after the last restart, the alarm must still be up for the final give-up (review of #31).
     return this.activeForks().some(
-      (f) => !goAround.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || (f.check_status === "error" && checkRetriesLeft(f, runs.get(f.name)))),
+      (f) => !goAround.has(f.name) && !finals.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || (f.check_status === "error" && checkRetriesLeft(f, runs.get(f.name)))),
     );
   }
 

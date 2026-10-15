@@ -52,9 +52,10 @@
   .c-go_around { color: var(--red); }
   .c-checking { color: var(--cyan); }
   .c-review { color: var(--amber); }
-  .seq button.approve { grid-column: 3; justify-self: start; margin-top: 6px; font: 9px/1 "Press Start 2P", monospace; color: var(--green); background: transparent; border: 2px solid var(--green); cursor: pointer; padding: 5px 8px; white-space: nowrap; }
-  .seq button.approve:hover { background: var(--green); color: var(--bg, #0f1530); }
-  .seq button.approve:disabled { opacity: 0.5; cursor: default; }
+  .c-stand_down { color: var(--dim); }
+  .seq button.approve, .seq button.pick { grid-column: 3; justify-self: start; margin-top: 6px; font: 9px/1 "Press Start 2P", monospace; color: var(--green); background: transparent; border: 2px solid var(--green); cursor: pointer; padding: 5px 8px; white-space: nowrap; }
+  .seq button.approve:hover, .seq button.pick:hover { background: var(--green); color: var(--bg, #0f1530); }
+  .seq button.approve:disabled, .seq button.pick:disabled { opacity: 0.5; cursor: default; }
   .landed { color: var(--dim); margin-top: 10px; }
   .landed b { color: var(--green); font-weight: normal; }
   .landed button { padding: 0 2px; font: inherit; color: var(--green); background: none; border: 0; border-bottom: 2px dotted var(--green); cursor: pointer; }
@@ -352,7 +353,7 @@
   }
 
   // ── ATC panel ──────────────────────────────────────────────────────────
-  const WORD = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD", review: "REVIEW" };
+  const WORD = { cleared: "CLEARED", follow: "FOLLOW", hold: "HOLD", go_around: "GO AROUND", checking: "STANDBY", fix: "HOLD", review: "REVIEW", stand_down: "STAND DOWN" };
 
   function logLine(e) {
     const d = e.detail || {};
@@ -364,6 +365,8 @@
       case "land.merged": return [`${who} landed`, "good"];
       case "land.denied": return [`${who} landing denied`, "bad"];
       case "signal.rebase_required": return [`${who} told to rebase`, "bad"];
+      case "signal.stand_down": return [`${who} stands down (same task)`, ""];
+      case "attempt.chosen": return [`${who} picked for ${d.task || "its task"}`, "good"];
       default: return null;
     }
   }
@@ -373,7 +376,8 @@
     const seq = state.sequence || [];
     const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
       <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span>${
-        (state.awaitingReview || []).includes(e.fork) && e.clearance !== "go_around" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}</li>`).join("");
+        (state.awaitingReview || []).includes(e.fork) && e.clearance !== "go_around" && e.clearance !== "stand_down" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}${
+        e.clearance === "stand_down" && !e.final && key && !replaying ? `<button type="button" class="pick" data-pick="${esc(e.fork)}" title="Ship this attempt instead of ${esc(pr(e.behind || ""))}">PICK</button>` : ""}</li>`).join("");
     const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at);
     const logged = new Set((state.flightLogs || []).map((l) => l.fork));
     const names = landed.map((f) => logged.has(f.name) ? `<button type="button" data-flight="${esc(f.name)}" title="Show flight log">${esc(pr(f.name))}</button>` : `<b>${esc(pr(f.name))}</b>`);
@@ -388,6 +392,19 @@
         body: JSON.stringify({ fork: b.dataset.approve, sha: b.dataset.sha, verdict: "approve", reviewer: "a person on the dashboard" }), // the head shown
       }).catch((err) => new Response(JSON.stringify({ error: `network error: ${err.message}` }), { status: 599 }));
       if (!res.ok) { // e.g. the PR moved since this was drawn: say why, then let the next refresh redraw it
+        b.disabled = false;
+        b.textContent = "REFUSED";
+        b.title = ((await res.json().catch(() => ({}))).error) || `HTTP ${res.status}`;
+      }
+    }));
+    // A person choosing between competing attempts at one task (issue #19): this one ships instead.
+    document.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      const res = await fetch(`/api/repos/${encodeURIComponent(repo)}/choose`, {
+        method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ fork: b.dataset.pick, by: "a person on the dashboard" }),
+      }).catch((err) => new Response(JSON.stringify({ error: `network error: ${err.message}` }), { status: 599 }));
+      if (!res.ok) {
         b.disabled = false;
         b.textContent = "REFUSED";
         b.title = ((await res.json().catch(() => ({}))).error) || `HTTP ${res.status}`;

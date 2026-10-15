@@ -76,7 +76,7 @@ export function readModel(sql: SqlStorage, live: Live): CoordinatorState {
       .toArray()
       .map((r) => ({ ...r, data: JSON.parse(r.data) as SignalData })),
     intents: sql
-      .exec<{ id: number; fork: string; description: string; files: string; symbols: string; created_at: number }>("SELECT * FROM intents ORDER BY id")
+      .exec<{ id: number; fork: string; description: string; files: string; symbols: string; created_at: number; task: string | null }>("SELECT * FROM intents ORDER BY id")
       .toArray()
       .map((i) => ({ ...i, files: JSON.parse(i.files) as string[], symbols: JSON.parse(i.symbols) as string[] })),
     flightLogs: flightLogs(sql),

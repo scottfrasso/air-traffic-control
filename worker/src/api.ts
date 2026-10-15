@@ -38,9 +38,11 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     "POST",
     /^\/intents$/,
     async (stub, request) => {
-      const b = await body<{ fork?: string; description?: string; files?: string[]; symbols?: string[] }>(request);
+      const b = await body<{ fork?: string; description?: string; files?: string[]; symbols?: string[]; task?: unknown }>(request);
       if (!b.fork || !b.description) throw new HttpError(400, "fork and description are required");
-      return json(await stub.declareIntent(b.fork, b.description, b.files ?? [], b.symbols ?? []));
+      // Left out: the PR keeps its task; null or "" clears it (issue #19).
+      if (b.task !== undefined && b.task !== null && (typeof b.task !== "string" || b.task.length > 100)) throw new HttpError(400, "task must be a string of at most 100 characters");
+      return json(await stub.declareIntent(b.fork, b.description, b.files ?? [], b.symbols ?? [], b.task as string | null | undefined));
     },
   ],
   [
@@ -62,6 +64,18 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
       if (typeof b.sha !== "string" || !b.sha) throw new HttpError(400, "sha (the head you reviewed) is required");
       for (const k of ["note", "reviewer"] as const) if (b[k] !== undefined && typeof b[k] !== "string") throw new HttpError(400, `${k} must be a string`);
       const r = await stub.review(b.fork, b.verdict, (b.note as string | undefined) ?? "", (b.reviewer as string | undefined) ?? "reviewer", b.sha);
+      return r.ok ? json(r) : json({ error: r.error }, r.status);
+    },
+  ],
+  [
+    "POST",
+    /^\/choose$/,
+    async (stub, request) => {
+      // A person picks which attempt at a task ships (issue #19).
+      const b = await body<{ fork?: unknown; by?: unknown }>(request);
+      if (typeof b.fork !== "string" || !b.fork) throw new HttpError(400, "fork is required");
+      if (b.by !== undefined && typeof b.by !== "string") throw new HttpError(400, "by must be a string");
+      const r = await stub.choose(b.fork, (b.by as string | undefined) ?? "a person");
       return r.ok ? json(r) : json({ error: r.error }, r.status);
     },
   ],
