@@ -460,3 +460,216 @@ test("the Coordinator: leaving a task ends a person's pick; coming back doesn't 
   assert.equal((await a.co.getClearance(X)).clearance, "stand_down"); // ATC's ranking again
   assert.equal((await a.co.getClearance(Y)).clearance, "cleared");
 });
+
+// ── a quiet winner hands its task over (an agent that stopped mustn't stall the others) ──
+
+/** The sequence row for `fork`, read the way the dashboard does (get_clearance would count as the agent polling). */
+const row = async (a: ReturnType<typeof airport>, fork: string) =>
+  (JSON.parse(await a.co.stateJson()) as { sequence: Array<{ fork: string; clearance: string; reason: string }> }).sequence.find((e) => e.fork === fork)!;
+
+/** `ms` pass with no sign of life from `fork`'s agent (and its pick and checks are that old too). */
+function age(a: ReturnType<typeof airport>, fork: string, ms: number) {
+  a.q("UPDATE task_leaders SET at = at - ?", ms);
+  for (const t of ["fork_activity", "head_seen", "fork_checked"]) a.q(`UPDATE ${t} SET at = at - ? WHERE fork = ?`, ms, fork);
+  a.q("UPDATE intents SET created_at = created_at - ? WHERE fork = ?", ms, fork);
+  a.q("UPDATE forks SET created_at = created_at - ? WHERE name = ?", ms, fork);
+}
+
+test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's pick, hands the task to the next", () => {
+  const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")]; // pr2 is better
+  const ctx = { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1000]]), lastActive: new Map([["x--pr2", 500]]), stallMs: 60_000 };
+  assert.equal(attemptVerdicts(group, [], { ...ctx, now: 1000 + 59_000 }).get("x--pr2")?.kind, "chosen"); // not yet
+  const v = attemptVerdicts(group, [], { ...ctx, now: 1000 + 60_000 });
+  assert.deepEqual(v.get("x--pr1"), { kind: "chosen", over: [{ fork: "x--pr2", reason: "PR2 went quiet for 60 s" }] });
+  const down = v.get("x--pr2") as { kind: string; basis: string; winner: string; reason: string };
+  assert.deepEqual([down.kind, down.basis, down.winner], ["stand_down", "stalled", "x--pr1"]);
+  assert.match(down.reason, /its agent showed no sign of life \(a push, a land request, an intent or a clearance check\) for 60 s, so PR1 gets the task\. Push or ask to land to compete again\./);
+  // Activity after it became the pick keeps it: the clock runs from the later of the two.
+  assert.equal(attemptVerdicts(group, [], { ...ctx, lastActive: new Map([["x--pr2", 30_000]]), now: 1000 + 60_000 }).get("x--pr2")?.kind, "chosen");
+});
+
+test("verdicts: the clock starts when an attempt becomes the one to ship, not at its last action", () => {
+  // pr1 has been quiet for an hour as a loser (it was told to stand down). It just became the pick: not stalled.
+  const group = [attempt("x--pr1"), attempt("x--pr2", { breaking: 1 })];
+  const v = attemptVerdicts(group, [], { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), lastActive: new Map([["x--pr1", 0]]), stallMs: 60_000, now: 3_600_000 });
+  assert.equal(v.get("x--pr1")?.kind, "chosen");
+});
+
+test("verdicts: set aside, it stays aside until its agent acts again; a person's pick doesn't protect a quiet PR", () => {
+  const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")];
+  // pr1 now leads (the heir), so pr2's own clock would restart; the stall memory keeps it aside.
+  const base = { baselineHead: "main", leaders: new Map([["t", "x--pr1"]]), leaderSince: new Map([["t", 70_000]]), stallMs: 60_000, now: 80_000 };
+  const aside = attemptVerdicts(group, [], { ...base, stalledAt: new Map([["x--pr2", 70_000]]), lastActive: new Map([["x--pr2", 500]]) });
+  assert.equal(aside.get("x--pr1")?.kind, "chosen");
+  // Its agent pushes (or asks to land): it competes again, and being better, it ships.
+  const back = attemptVerdicts(group, [], { ...base, stalledAt: new Map([["x--pr2", 70_000]]), lastActive: new Map([["x--pr2", 75_000]]) });
+  assert.equal(back.get("x--pr2")?.kind, "chosen");
+  // A pick of a quiet PR hands over too.
+  const picked = attemptVerdicts(group, [], { ...base, choices: [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }], leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), lastActive: new Map([["x--pr2", 1]]) });
+  assert.equal(picked.get("x--pr1")?.kind, "chosen");
+});
+
+test("verdicts: still being checked isn't quiet (checks are ATC's job), and three attempts hand over in rank order", () => {
+  const pending = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2", {}, { check_status: "pending" })];
+  const p = attemptVerdicts(pending, [], { baselineHead: "main", choices: [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }], leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), stallMs: 60_000, now: 999_999 });
+  assert.equal(p.get("x--pr2")?.kind, "chosen");
+  const three = [attempt("x--pr1", { breaking: 2 }), attempt("x--pr2"), attempt("x--pr3", { breaking: 1 })];
+  const v = attemptVerdicts(three, [], { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), stallMs: 60_000, now: 999_999 });
+  assert.equal(v.get("x--pr3")?.kind, "chosen"); // next best
+  assert.equal((v.get("x--pr2") as { basis: string }).basis, "stalled");
+  assert.equal((v.get("x--pr1") as { winner: string }).winner, "x--pr3");
+});
+
+test("the Coordinator: a quiet winner hands over; the heir lands; the quiet PR then stands down for good", async () => {
+  const { a, X, Y } = await twoAttempts(); // Y ships
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush(); // Y becomes ATC's pick
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+  // Y's agent stopped: 31 s pass with no sign of life from it.
+  age(a, Y, 31_000);
+  const cx = await a.co.getClearance(X);
+  assert.equal(cx.clearance, "cleared", cx.message);
+  assert.match((await row(a, Y)).reason, /^This PR was the one to ship for t, but its agent showed no sign of life .* for 30 s, so PR1 gets the task/);
+  (a.co as unknown as { flush(): void }).flush(); // records the stall and the new pick
+  assert.equal(a.events("attempt.stalled").length, 1);
+  (a.co as unknown as { flush(): void }).flush();
+  assert.equal(a.events("attempt.stalled").length, 1); // said once
+  assert.equal((await a.co.getClearance(X)).clearance, "cleared"); // and it doesn't flip back now that X leads
+  const landed = await a.co.requestLand(X);
+  assert.equal(landed.landed, true, landed.reason);
+  assert.match(a.q<{ note: string }>("SELECT note FROM flight_logs WHERE fork = ?", X)[0]!.note, /^ATC-Chosen-Over: PR2 \(PR2 went quiet for 30 s\)$/m);
+  assert.match((await row(a, Y)).reason, /PR1 already landed this task/);
+});
+
+test("the Coordinator: a quiet winner that asks to land is back in, and lands", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush(); // set aside
+  assert.equal((await row(a, Y)).clearance, "stand_down");
+  const r = await a.co.requestLand(Y); // a sign of life
+  assert.equal(r.landed, true, r.reason);
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+});
+
+test("the Coordinator: an agent that polls its clearance while it holds or waits is alive; check time doesn't count", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  await a.co.getClearance(Y); // Y's agent polls (e.g. while told to HOLD): a sign of life
+  assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+/** A check result for `fork` at `sha` on `main`, through the Coordinator's real path (applySingle). */
+const checked = (a: ReturnType<typeof airport>, fork: string, sha: string, main: string) =>
+  a.co.applySingle(JSON.stringify({ repo: fork, forkSha: sha, baseHead: main, result: { ok: true, errors: [], output: "" }, mainConflict: false, timings: [] }));
+
+test("the Coordinator: the clock starts when a new head's checks finish, not when it was pushed", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  // Y pushes y2; its checks take longer than stallSeconds.
+  await a.push(Y, "y2");
+  a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, 'x1', 'y2', 'clean', '{}', 1) ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_b = 'y2'", X, Y);
+  a.q("UPDATE forks SET processed_sha = 'y2' WHERE name = ?", Y);
+  age(a, Y, 31_000);
+  await checked(a, Y, "y2", "main0"); // done now
+  assert.equal((await row(a, Y)).clearance, "cleared");
+  assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+test("the Coordinator: a re-check after another landing doesn't restart a stopped winner's clock", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  await checked(a, Y, "y1", "main0"); // first result for y1
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  // Another PR landed: main moved, and Y is re-checked on it (same head) a moment later.
+  a.heads.set("base-repo", "main1");
+  await a.co.onPush("base-repo", "main1", "reconcile");
+  await checked(a, X, "x1", "main1");
+  await checked(a, Y, "y1", "main1");
+  assert.equal((await row(a, X)).clearance, "cleared"); // Y still hands over
+  assert.equal((await row(a, Y)).clearance, "stand_down");
+});
+
+test("the Coordinator: get_signals polls keep an agent alive; history reads don't", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  await a.co.getSignals(Y, true); // someone reading its history
+  assert.equal((await row(a, X)).clearance, "cleared");
+  age(a, Y, 0);
+  a.q("DELETE FROM task_stalls");
+  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  await a.co.getSignals(Y); // its agent polling
+  assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+test("the Coordinator: the heir is told it has the task; losers are told to keep polling", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  assert.match((await row(a, X)).reason, /Keep polling get_clearance: if PR2's agent goes quiet for 30 s, the task can pass to this PR\./);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush();
+  const s = a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'handover'", X);
+  assert.equal(s.length, 1);
+  assert.match(s[0]!.message, /PR2 went quiet, so this PR now has the task \(t\)/);
+});
+
+test("polls cost nothing until some intent names a task", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(F);
+  await a.co.getClearance(F);
+  await a.co.getSignals(F);
+  assert.equal(a.q("SELECT 1 FROM fork_activity").length, 0);
+});
+
+test("a DO from before signs of life were recorded counts its PRs in flight as alive, once", () => {
+  const a = airport("base-repo", {}, (db) => {
+    db.exec("CREATE TABLE forks(name TEXT PRIMARY KEY, agent TEXT NOT NULL, pr INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, created_at INTEGER NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, processed_sha TEXT NOT NULL, diff_lines INTEGER NOT NULL DEFAULT 0, subscription_id TEXT, remote TEXT NOT NULL, land_requested_at INTEGER, landed_at INTEGER, check_status TEXT NOT NULL DEFAULT 'unknown', check_sha TEXT, check_base TEXT, check_detail TEXT)");
+    db.exec("INSERT INTO forks(name, agent, status, created_at, base_sha, head_sha, processed_sha, remote) VALUES ('old--pr1', 'a', 'active', 1, 'b', 'h', 'h', ''), ('old--pr2', 'b', 'landed', 1, 'b', 'h', 'h', '')");
+  });
+  assert.deepEqual(a.q<{ fork: string }>("SELECT fork FROM fork_activity").map((r) => r.fork), ["old--pr1"]);
+  assert.equal(a.meta("activity_seeded"), "1");
+});
+
+test("the reconcile alarm stays up while a task is contested, past the stall window", async () => {
+  const { a } = await twoAttempts();
+  await a.co.setStallSeconds(900);
+  a.q("UPDATE meta SET value = ? WHERE key = 'last_activity'", String(Date.now() - 11 * 60_000)); // idle 11 min
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 0);
+  a.q("UPDATE meta SET value = ? WHERE key = 'last_activity'", String(Date.now() - 17 * 60_000)); // past 15 min + 1
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 1);
+});
+
+test("the Coordinator: a person picking a set-aside PR gives it a fresh start", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush(); // Y set aside, X leads
+  assert.equal((await row(a, Y)).clearance, "stand_down");
+  assert.ok((await a.co.choose(Y, "sam")).ok);
+  assert.equal((await row(a, Y)).clearance, "cleared");
+  assert.equal(a.q("SELECT 1 FROM task_stalls WHERE fork = ?", Y).length, 0);
+});
+
+test("the Coordinator: a DO from before fork_activity: a recent push counts as a sign of life", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  a.q("DELETE FROM fork_activity"); // as if recorded before this table existed
+  a.q("UPDATE task_leaders SET at = at - 31000");
+  a.q("UPDATE forks SET created_at = created_at - 31000");
+  a.q("UPDATE intents SET created_at = created_at - 31000");
+  assert.equal((await row(a, X)).clearance, "stand_down"); // Y's head was seen just now (head_seen): alive
+});

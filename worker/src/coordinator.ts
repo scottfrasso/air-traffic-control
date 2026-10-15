@@ -8,7 +8,7 @@ import {
   takeLock, type PairCheckRow, type PairQueueRow,
 } from "./landing";
 import { buildSequence, clearanceMessage, prLabel, type Conflict, type SequenceEntry } from "./atc";
-import { attemptVerdicts, normalizeTask, standDowns, type Attempt, type AttemptVerdict, type TaskChoice } from "./attempts";
+import { attemptVerdicts, normalizeTask, STALL_MS, standDowns, type Attempt, type AttemptVerdict, type TaskChoice } from "./attempts";
 import { analyzePair, describeError } from "./conflicts";
 import { NoteWriter, takeBatch } from "./notes";
 import { clearanceHistory, flightLogNote, minimalFlightLog, type FlightSignal, type SequenceSnapshot } from "./flightlog";
@@ -42,6 +42,12 @@ export class Coordinator extends DurableObject<Env> {
     this.sql.exec(SCHEMA);
     for (const c of COLUMNS)
       if (!this.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${c.table}')`).toArray().some((r) => r.name === c.column)) this.sql.exec(c.ddl);
+    // A DO from before signs of life were recorded: count every PR in flight as alive now, once, so a live winner isn't
+    // set aside the moment this code deploys (its polls were never recorded; review of #48).
+    if (this.meta("activity_seeded") === null) {
+      this.sql.exec("INSERT OR IGNORE INTO fork_activity(fork, at) SELECT name, ? FROM forks WHERE status = 'active'", Date.now());
+      this.setMeta("activity_seeded", "1");
+    }
   }
 
   // ── meta ────────────────────────────────────────────────────────────────
@@ -248,6 +254,7 @@ export class Coordinator extends DurableObject<Env> {
     if (fork.head_sha === sha) return;
     this.sql.exec("UPDATE forks SET head_sha = ?, check_status = 'pending' WHERE name = ?", sha, repo);
     this.sql.exec("INSERT INTO head_seen(fork, sha, at) VALUES (?, ?, ?) ON CONFLICT(fork) DO UPDATE SET sha = excluded.sha, at = excluded.at", repo, sha, Date.now());
+    this.markActive(repo);
     this.log("push.received", { sha, source, commits: isPushed(event) ? event.payload.commits.map((c) => c.message) : undefined }, repo);
     // A new push is a fresh attempt: drop any go-around/blocked notes; the checks on this push decide.
     this.resolveSignals({ fork: repo, kind: "rebase_required" });
@@ -504,6 +511,7 @@ export class Coordinator extends DurableObject<Env> {
     );
     this.log("intent.declared", { description, files, symbols, conflicts: conflicts.length, task: key }, fork);
     if (key) this.setMeta("tasks_seen", "1");
+    this.markActive(fork);
     this.syncDerivedSignals();
     // Left a task that had already landed: the landing skipped re-checking this PR (it couldn't land then). It can now,
     // so check it on current main, which also tells it if it conflicts with what landed (review of #45).
@@ -523,6 +531,8 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
   async getSignals(fork: string, includeResolved = false): Promise<SignalRow[]> {
+    // Its agent polling for news is alive (a HOLD, a wait). A history read (all) isn't a poll (review of #48).
+    if (!includeResolved && this.fork(fork)?.status === "active") this.markActive(fork, true);
     return signalsFor(this.sql, fork, includeResolved);
   }
 
@@ -592,6 +602,9 @@ export class Coordinator extends DurableObject<Env> {
       "UPDATE forks SET check_status = ?, check_sha = ?, check_base = ?, check_detail = ?, check_main_conflict = ? WHERE name = ?",
       ok ? "green" : "red", sha, base, detail, !ok && onMain ? 1 : 0, fork,
     );
+    // First result for this head only: a re-check on a newer main pauses a quiet winner's clock (it isn't decided while
+    // it runs) but mustn't restart it, or a stopped winner in a busy repo would never hand over (review of #48).
+    this.sql.exec("INSERT INTO fork_checked(fork, at, sha) VALUES (?, ?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at, sha = excluded.sha WHERE fork_checked.sha IS NOT excluded.sha", fork, Date.now(), sha);
     // The checks ran after all: an earlier "ATC couldn't run the checks" no longer applies (pair ones are per pair).
     this.sql.exec("UPDATE signals SET resolved_at = ? WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", Date.now(), fork);
   }
@@ -802,11 +815,29 @@ export class Coordinator extends DurableObject<Env> {
       .toArray()
       .flatMap((r) => (tasks.get(r.name) ? [{ fork: r.name, task: tasks.get(r.name)!, landedAt: r.landed_at }] : []));
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    const leaders = this.sql.exec<{ task: string; fork: string; at: number }>("SELECT task, fork, at FROM task_leaders").toArray();
     const sentAround = new Map(
       this.sql.exec<{ fork: string; at: number }>("SELECT fork, max(created_at) AS at FROM signals WHERE kind = 'rebase_required' AND resolved_at IS NULL GROUP BY fork").toArray().map((r) => [r.fork, r.at]),
     );
     return attemptVerdicts(attempts, landed, {
-      leaders: new Map(this.sql.exec<{ task: string; fork: string }>("SELECT task, fork FROM task_leaders").toArray().map((r) => [r.task, r.fork])),
+      leaders: new Map(leaders.map((r) => [r.task, r.fork])),
+      leaderSince: new Map(leaders.map((r) => [r.task, r.at])),
+      // Signs of life. A DO from before fork_activity existed has none yet: fall back to when the head was seen, landing
+      // was asked for, or an intent declared, so a live leader isn't set aside the moment this code deploys.
+      lastActive: new Map(
+        this.sql
+          .exec<{ fork: string; at: number }>(
+            `SELECT fork, max(at) AS at FROM (
+               SELECT fork, at FROM fork_activity UNION ALL SELECT fork, at FROM head_seen
+               UNION ALL SELECT name AS fork, land_requested_at AS at FROM forks WHERE land_requested_at IS NOT NULL
+               UNION ALL SELECT fork, max(created_at) AS at FROM intents GROUP BY fork) GROUP BY fork`,
+          )
+          .toArray()
+          .map((r) => [r.fork, r.at]),
+      ),
+      checkedAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM fork_checked").toArray().map((r) => [r.fork, r.at])),
+      stalledAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM task_stalls").toArray().map((r) => [r.fork, r.at])),
+      stallMs: this.stallMs(),
       sentAround,
       now: Date.now(),
       baselineHead: this.meta("baseline_head") ?? "",
@@ -833,6 +864,23 @@ export class Coordinator extends DurableObject<Env> {
       const task = v.kind === "chosen" ? tasks.get(fork) : null;
       if (task)
         this.sql.exec("INSERT INTO task_leaders(task, fork, at) VALUES (?, ?, ?) ON CONFLICT(task) DO UPDATE SET fork = excluded.fork, at = excluded.at WHERE task_leaders.fork <> excluded.fork", task, fork, Date.now());
+      // Set aside as quiet: remember when, so it stays aside until its agent acts again (not just until its heir leads).
+      if (v.kind === "stand_down" && v.basis === "stalled") {
+        const active = this.sql.exec<{ at: number }>("SELECT at FROM fork_activity WHERE fork = ?", fork).toArray()[0]?.at ?? 0;
+        const prev = this.sql.exec<{ at: number }>("SELECT at FROM task_stalls WHERE fork = ?", fork).toArray()[0]?.at;
+        if (prev === undefined || prev <= active) {
+          // New (or again, after it came back and went quiet once more): record it and say so once.
+          this.sql.exec("INSERT INTO task_stalls(fork, at) VALUES (?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at", fork, Date.now());
+          this.log("attempt.stalled", { task: tasks.get(fork), heir: v.winner, quietMs: this.stallMs() }, fork);
+          // Tell the heir it has the task now: it may have been told to stand down a moment ago.
+          if (v.winner)
+            this.emitSignal({
+              fork: v.winner, kind: "handover", about_fork: fork, symbol: null,
+              message: this.relabel(`${fork} went quiet, so this PR now has the task (${tasks.get(fork)}). Land it when it's cleared.`),
+              data: { task: tasks.get(fork) ?? null }, dedupe_key: `handover:${v.winner}:${fork}:${Date.now()}`,
+            });
+        }
+      }
     }
     const open = this.sql.exec<{ id: number; fork: string; dedupe_key: string }>("SELECT id, fork, dedupe_key FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL").toArray();
     const keys = new Map<string, string>();
@@ -876,6 +924,9 @@ export class Coordinator extends DurableObject<Env> {
       "INSERT INTO task_choices(task, winner, by, at) VALUES (?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at",
       task, fork, who, Date.now(),
     );
+    // A person picking it gives it a fresh start: not set aside as quiet, and its clock starts now (review of #48).
+    this.sql.exec("DELETE FROM task_stalls WHERE fork = ?", fork);
+    this.sql.exec("INSERT INTO task_leaders(task, fork, at) VALUES (?, ?, ?) ON CONFLICT(task) DO UPDATE SET fork = excluded.fork, at = excluded.at", task, fork, Date.now());
     this.log("attempt.chosen", { task, by: who }, fork);
     this.touch();
     this.syncAttemptSignals();
@@ -885,6 +936,7 @@ export class Coordinator extends DurableObject<Env> {
   /** What ATC tells one PR: its place in the landing sequence and why. */
   async getClearance(fork: string): Promise<{ fork: string; pr: string; position: number | null; clearance: string; message: string }> {
     const row = this.fork(fork);
+    if (row?.status === "active") this.markActive(fork, true); // its agent polling: alive, even while it holds or waits
     if (!row) return { fork, pr: prLabel(fork), position: null, clearance: "unknown", message: `ATC: ${prLabel(fork)} is not in this airspace.` };
     if (row.status === "landed") return { fork, pr: prLabel(fork), position: null, clearance: "landed", message: `ATC: ${prLabel(fork)} has landed.` };
     const e = this.sequence().find((x) => x.fork === fork);
@@ -893,6 +945,29 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   // ── review gate (issue #16, ADR-0023) ───────────────────────────────────
+
+  /** The agent flying this PR did something: a push, land request, intent, or polled its own clearance or signals. */
+  private markActive(fork: string, poll = false) {
+    // Only matters once some intent named a task. A push, land request or intent is always recorded; a poll at most
+    // every few seconds, so an agent polling in a loop costs a write now and then, not one per call (review of #48).
+    if (!this.anyTasks()) return;
+    const now = Date.now();
+    const every = poll ? Math.min(30_000, this.stallMs() / 10) : 0;
+    this.sql.exec("INSERT INTO fork_activity(fork, at) VALUES (?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at WHERE fork_activity.at <= ?", fork, now, now - every);
+  }
+
+  /** How long the attempt that ships may be quiet before the next one gets its task (ADR-0026). */
+  private stallMs(): number {
+    const v = Number(this.meta("stall_ms"));
+    return Number.isFinite(v) && v > 0 ? v : STALL_MS;
+  }
+
+  async setStallSeconds(seconds: number): Promise<{ stallSeconds: number }> {
+    this.setMeta("stall_ms", String(Math.round(seconds * 1000)));
+    this.log("attempts.stall", { seconds });
+    this.touch();
+    return { stallSeconds: seconds };
+  }
 
   private reviewRequired() {
     return this.meta("review_required") === "1";
@@ -976,6 +1051,7 @@ export class Coordinator extends DurableObject<Env> {
       await this.onPush(fork, liveFork.hash, "reconcile");
       return { landed: false, fork, reason: "Picked up your latest push; checks are running. Retry in a few seconds.", retry: true };
     }
+    this.markActive(fork); // asking to land is a sign of life (a quiet winner hands over its task)
     if (row.land_requested_at === null) this.sql.exec("UPDATE forks SET land_requested_at = ? WHERE name = ?", Date.now(), fork);
     this.log("land.requested", { head: row.head_sha }, fork);
 
@@ -1281,7 +1357,10 @@ export class Coordinator extends DurableObject<Env> {
     // Notes are retried after the last landing too; once idle, any API call (ensure → scheduleReconcile) re-arms it.
     // Checks that ATC may still restart keep it running even when idle, or a hung run would wait for the next API call.
     const waiting = this.checksAwaitingRestart();
-    if ((this.activeForks().length > 0 || this.notesPending()) && (idle < RECONCILE_IDLE_MS || waiting)) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
+    // A contested task (someone stands down) must hand over on time even if nobody calls: stay up past the stall window.
+    const contested = this.anyTasks() && [...standDowns(this.attemptVerdicts()).values()].some((v) => !v.final);
+    const window = contested ? Math.max(RECONCILE_IDLE_MS, this.stallMs() + 60_000) : RECONCILE_IDLE_MS;
+    if ((this.activeForks().length > 0 || this.notesPending()) && (idle < window || waiting)) await this.ctx.storage.setAlarm(Date.now() + RECONCILE_MS);
     else this.log("reconcile.paused", { idleMs: idle });
   }
 
@@ -1326,6 +1405,7 @@ export class Coordinator extends DurableObject<Env> {
       baselineHead: head,
       approach: approachQueue(this.activeForks(), head ?? ""),
       reviewRequired: this.reviewRequired(),
+      stallSeconds: Math.round(this.stallMs() / 1000),
       awaitingReview: [...this.reviewWaits().keys()],
       sequence: this.sequence(),
     });

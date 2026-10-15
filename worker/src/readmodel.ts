@@ -49,7 +49,7 @@ export function flightLogs(sql: SqlStorage): FlightLogEntry[] {
     .map((r) => ({ fork: r.fork, pr: prLabel(r.fork), landedSha: r.landed_sha, landedAt: r.landed_at, note: r.note, noted: r.noted === 1 }));
 }
 
-export type Live = Pick<CoordinatorState, "baseline" | "baselineHead" | "approach" | "reviewRequired" | "awaitingReview"> & { sequence: SequenceEntry[] };
+export type Live = Pick<CoordinatorState, "baseline" | "baselineHead" | "approach" | "reviewRequired" | "awaitingReview" | "stallSeconds"> & { sequence: SequenceEntry[] };
 
 /** Everything a dashboard shows. `live` is what only the Coordinator computes (the ATC sequence, the approach order). */
 export function readModel(sql: SqlStorage, live: Live): CoordinatorState {
@@ -69,6 +69,7 @@ export function readModel(sql: SqlStorage, live: Live): CoordinatorState {
     overlaps: overlaps(sql),
     approach: live.approach,
     reviewRequired: live.reviewRequired,
+    stallSeconds: live.stallSeconds,
     awaitingReview: live.awaitingReview,
     sequence: live.sequence,
     signals: sql

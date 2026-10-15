@@ -45,6 +45,30 @@ if they didn't conflict, which ships the task twice.
   winner (one per head, winner and reason; resolved when it no longer holds), and `request_land` refuses it.
   It comes after the PR's own checks in the sequence and the gate: a red attempt hears that it fails typecheck first.
   An attempt that stands down is never "ahead" of a rival in HOLD or the gate (it won't land), as for REVIEW.
+- **A quiet winner hands over** (2026-10-15). The attempt that ships (ATC's pick or a person's) must show signs of
+  life: a push, a `request_land`, a `declare_intent`, or its agent polling its own `get_clearance` or `get_signals`
+  (table `fork_activity`). Polls count so that an agent told to HOLD, or waiting, is alive while it obeys; only an
+  agent that has really stopped goes quiet. If it shows none for `stallSeconds` (default 15 min, per baseline:
+  `POST /settings {"stallSeconds": n}`, 10 s to a day), ATC sets it aside and compares the rest again, so an agent
+  that stopped can't stall the others. The clock starts at the latest of: its last sign of life, when it became the
+  one to ship, and when its current head's checks first finished (`fork_checked`, once per head: check time is ATC's,
+  not the agent's; a re-check after another landing pauses the clock but doesn't restart it, or a stopped winner in a
+  busy repo would never hand over), and it only runs once its checks are in. A DO from before `fork_activity` counts
+  every PR in flight as alive at its first start with this code (once), and falls back to when the head was seen,
+  landing asked for, or an intent declared. A person picking a set-aside PR gives it a fresh start.
+  - Only the PR's own agent should poll its clearance and signals: any caller naming the fork counts as its agent
+    (identity isn't enforced, ADR-0005). A history read (`get_signals` with resolved ones) doesn't count. Polls are
+    recorded only once a baseline has seen a task, and at most every `min(30 s, stallSeconds / 10)`.
+  - Losers are told to keep polling ("…if PR2's agent goes quiet for 15 min, the task can pass to this PR"); the
+    heir gets a `handover` signal. The reconcile alarm stays up while a task is contested, past the stall window, so
+    the handover happens on time even if nobody calls. `stallSeconds` is in `/state`.
+  - It gets STAND DOWN with basis `stalled` ("…its agent showed no sign of life (a push, a land request, an intent or a
+    clearance check) for 15 min, so PR4 gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
+  - Table `task_stalls` remembers when: it stays aside until its agent acts again. Without it, the heir becoming
+    ATC's pick would restart the quiet one's clock and the two would swap back and forth.
+  - When it acts again (any push or land request), it competes like any attempt; if it is still the better one, it
+    ships. The heir's flight log says `ATC-Chosen-Over: PR3 (PR3 went quiet for 15 min)`.
+  - A winner in HOLD or REVIEW whose agent keeps polling isn't quiet; one whose agent stopped is, and hands over.
 - **After the winner lands**, the attempts that were in flight stand down **for good** ("PR2 already landed this
   task …"), shown even over GO AROUND, since rebasing changes nothing. The landing sends them neither a go-around nor
   "stay in line", and ATC doesn't re-check them then or later (other landings, pushes to main, the stuck-check
@@ -70,9 +94,8 @@ if they didn't conflict, which ships the task twice.
 - Best-of-N runs need nothing but a shared `task`: ATC picks and says why; nothing ships twice.
 - A green attempt can wait for its rival's checks (bounded: checks always end, ADR-0021).
 - Identity is not enforced for `choose`, as for reviews (ADR-0005): `by` is a label.
-- Nothing times out a winner that stalls: if the chosen PR's agent stops, or it waits in REVIEW, the others stand
-  down until it lands, is abandoned, or a person picks another. A PR that names a task only after it landed isn't
-  stopped either (`landedBy` tells it); both are left to the agents and people, not guessed by ATC.
+- A winner whose agent stopped hands over after `stallSeconds` (above), so the others wait at most that long. A PR
+  that names a task only after it landed isn't stopped (`landedBy` tells it); that is left to the agents.
 - A loser that keeps pushing makes the winner wait again for each push's checks (each wait is bounded). Not
   prevented: a later push may make it the better attempt, which is the point of comparing.
 - With no intent naming a task (the default), nothing about attempts is computed: one meta read (`tasks_seen`,
@@ -85,4 +108,5 @@ if they didn't conflict, which ships the task twice.
 - The verdicts are recomputed from state on every read; the stand-down signals are synced when state is flushed
   (and on a refused landing or a pick), so they can lag the clearance by the 120 ms flush delay.
 - `./demo/run.sh --attempts [--browser]` runs it end to end: two attempts, STAND DOWN, a pick (in a real browser with
-  `--browser`), the landing and the git note.
+  `--browser`), the landing and the git note; then a second task whose pick goes quiet (`stallSeconds` 20) and
+  hands over by itself.

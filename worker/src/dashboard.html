@@ -368,6 +368,7 @@
       case "signal.rebase_required": return [`${who} told to rebase`, "bad"];
       case "signal.stand_down": return [`${who} stands down (same task)`, ""];
       case "attempt.chosen": return [`${who} picked for ${d.task || "its task"}`, "good"];
+      case "attempt.stalled": return [`${who} went quiet; ${pr(d.heir) || "the next attempt"} gets ${d.task || "its task"}`, "bad"];
       default: return null;
     }
   }
