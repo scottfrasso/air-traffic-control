@@ -59,8 +59,12 @@ if they didn't conflict, which ships the task twice.
   - Only the PR's own agent should poll its clearance and signals: any caller naming the fork counts as its agent
     (identity isn't enforced, ADR-0005). A history read (`get_signals` with resolved ones) doesn't count. Polls are
     recorded only once a baseline has seen a task, and at most every `min(30 s, stallSeconds / 10)`.
-  - Losers are told to keep polling ("…if PR2's agent goes quiet for 15 min, the task can pass to this PR"); the
-    heir gets a `handover` signal. The reconcile alarm stays up while a task is contested, past the stall window, so
+  - Losers are told to keep polling their own clearance ("…if PR2's agent goes quiet for 15 min, the task can pass
+    to this PR"); the heir gets a `handover` signal, one per (heir, quiet PR), closed again if the quiet one comes
+    back and takes the task.
+  - Coming back takes any sign of life, a poll of its own clearance included (consistent with polls being life).
+  - The PR whose landing is running counts as alive for the whole land run. A check result touches the
+    Coordinator, so the alarm stays up until a winner whose clock it just started could hand over. The reconcile alarm stays up while a task is contested, past the stall window, so
     the handover happens on time even if nobody calls. `stallSeconds` is in `/state`.
   - It gets STAND DOWN with basis `stalled` ("…its agent showed no sign of life (a push, a land request, an intent or a
     clearance check) for 15 min, so PR4 gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
