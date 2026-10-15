@@ -38,7 +38,9 @@ cleared it on exit (#3); and pair (speculative-merge) results for old heads were
 - **A land run that throws is a retry** (2026-10-15). If minting the tokens or the checker call itself throws (a
   container restarting right after a deploy, a network error), `request_land` logs `land.failed` and answers `retry`,
   instead of a 500 with nothing in the event log. If the push did reach main, the next request reads the new main
-  and re-checks the PR, as for any outside move of main.
+  and re-checks the PR, as for any outside move of main, and the landing is recorded once (tested in the harness).
+  Until the agent asks again, that landing isn't recorded: other PRs are re-checked as after an outside push, so a
+  conflicting one sees a failed check rather than a go-around. The dashboard's ATC LOG shows `land.failed`.
 
 ## Consequences
 - Landing waits for pair checks: the scripted demo went from about 56 s to about 60–68 s.

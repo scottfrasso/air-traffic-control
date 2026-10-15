@@ -93,7 +93,7 @@ Nothing.
   conflicting planes blink and are linked, planes told to rebase go around into a holding stack, and landings roll out and park.
   Panels: LANDING SEQUENCE and a terse ATC LOG.
 - **Repo hygiene:** public GitHub repo `scottfrasso/air-traffic-control`, MIT license, TruffleHog PR secret scan (history scanned
-  clean before the first push), 183 tests (`pnpm test`), strict TypeScript in every package.
+  clean before the first push), 184 tests (`pnpm test`), strict TypeScript in every package.
 
 ## Stubbed, simplified, or heuristic (honest list)
 
@@ -127,7 +127,7 @@ passing; production always equal to `main` after a merge):
 #24 publish the submission · #25 public replay (#14) · #27, #29 the 60-second cut · #28 pair-check errors (#5) · #30, #31, #35 no PR stays pending,
 main never moves backwards (#2, #4) · #32 clearance wording (#6) · #33 queue consumer + DLQ (#7) · #34 checker lock (#8) ·
 #36 checks share work (#9) · #37 tests (#11) · #38 review gate (#16) · #39, #41 one-command deploy (#18) ·
-#40, #42, #43 tidy-up and the Coordinator split (#10) · #44 docs after submission · #45 competing attempts (#19) · #46 follow-ups, and a land run that throws is a retry.
+#40, #42, #43 tidy-up and the Coordinator split (#10) · #44 docs after submission · #45 competing attempts (#19) · #46 follow-ups, and a land run that throws is a retry · #47 its follow-ups.
 
 Open:
 - (#21 finals prep is closed on GitHub, closed 2026-10-14 before this run; reopen it if ATC is selected on 10-16.)
