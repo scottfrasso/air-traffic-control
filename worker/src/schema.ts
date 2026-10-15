@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS intents(
   created_at INTEGER NOT NULL,
   task TEXT);                        -- the task this PR is an attempt at (issue #19), normalized; NULL for none
 
+CREATE INDEX IF NOT EXISTS intents_by_fork ON intents(fork, id);
+
 -- A person's pick among competing attempts at one task (issue #19, ADR-0026); the latest per task counts.
 CREATE TABLE IF NOT EXISTS task_choices(task TEXT PRIMARY KEY, winner TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
 

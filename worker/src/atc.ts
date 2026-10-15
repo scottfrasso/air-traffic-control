@@ -17,6 +17,8 @@ export interface SequenceEntry {
   reason: string;
   /** Fork this one is waiting on, if any. */
   behind: string | null;
+  /** STAND DOWN for good: another attempt at the task already landed, so there is nothing left to pick (issue #19). */
+  final?: boolean;
 }
 
 export interface Conflict {
@@ -68,6 +70,7 @@ export function buildSequence(
     // Another attempt at this task already landed: nothing this PR does (a go-around included) changes that.
     if (attempt?.kind === "stand_down" && attempt.final) {
       entry("stand_down", attempt.reason, attempt.winner);
+      out[out.length - 1]!.final = true;
       continue;
     }
     if (goAround.has(f.name)) {
@@ -126,7 +129,9 @@ export function buildSequence(
       // Cite review only if the rival would otherwise have been ahead; if it lost on merit, say why (review of #38).
       const skippedForReview = beat && review.has(beat.other) && landingOrder(byName.get(beat.other)!, f, baselineHead) < 0;
       const why = skippedForReview ? `${prLabel(beat.other)} is waiting for review` : f.land_requested_at !== null ? "requested landing first" : "smaller diff";
-      entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : "Cleared to land. No conflicts.");
+      // A rival that stands down didn't lose on landing order: say what it lost on (this text goes into git notes; review of #45).
+      if (beat && attempts.get(beat.other)?.kind === "stand_down") entry("cleared", `Cleared to land. Chosen over ${prLabel(beat.other)} (same task).`);
+      else entry("cleared", beat ? `Cleared to land. Beats ${prLabel(beat.other)}${on(beat)}: ${why}.` : "Cleared to land. No conflicts.");
       continue;
     }
     // Its only conflicts are with PRs behind it (one ahead would have made it hold): they wait for it.

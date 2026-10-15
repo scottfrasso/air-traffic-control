@@ -48,17 +48,21 @@ test("compareAttempts: each ranking step decides on its own, in order", () => {
 });
 
 test("decided: checked at its head on current main with its pairs in (or errored for good)", () => {
-  assert.equal(decided(fork("a"), "main", new Set()), true);
-  assert.equal(decided(fork("a", { check_status: "red" }), "main", new Set()), true);
-  assert.equal(decided(fork("a", { check_status: "error" }), "main", new Set()), true);
-  assert.equal(decided(fork("a"), "main", new Set(["a"])), false); // pair checks outstanding
-  assert.equal(decided(fork("a", { check_base: "old" }), "main", new Set()), false); // main moved
-  assert.equal(decided(fork("a", { check_status: "pending" }), "main", new Set()), false);
-  assert.equal(decided(fork("a", { head_sha: "a2" }), "main", new Set()), false); // a newer push isn't checked
+  assert.equal(decided(fork("a"), { baselineHead: "main" }), true);
+  assert.equal(decided(fork("a", { check_status: "red" }), { baselineHead: "main" }), true);
+  // An error is decided only once ATC gave up on it: a passing checker error mustn't lose the comparison.
+  assert.equal(decided(fork("a", { check_status: "error" }), { baselineHead: "main" }), false);
+  assert.equal(decided(fork("a", { check_status: "error" }), { baselineHead: "main", gaveUp: new Set(["a"]) }), true);
+  // Even when its push was never indexed (the index step itself failed for good).
+  assert.equal(decided(fork("a", { check_status: "error", processed_sha: "old" }), { baselineHead: "main", gaveUp: new Set(["a"]) }), true);
+  assert.equal(decided(fork("a"), { baselineHead: "main", pairsPending: new Set(["a"]) }), false); // pair checks outstanding
+  assert.equal(decided(fork("a", { check_base: "old" }), { baselineHead: "main" }), false); // main moved
+  assert.equal(decided(fork("a", { check_status: "pending" }), { baselineHead: "main" }), false);
+  assert.equal(decided(fork("a", { head_sha: "a2" }), { baselineHead: "main" }), false); // a newer push isn't checked
 });
 
 test("verdicts: the best green attempt ships, the others stand down with why", () => {
-  const v = attemptVerdicts([attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")], [], "main");
+  const v = attemptVerdicts([attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")], [], { baselineHead: "main" });
   assert.deepEqual(v.get("x--pr2"), { kind: "chosen", over: [{ fork: "x--pr1", reason: "smaller blast radius (0 vs 1 breaking changes to exported symbols)" }] });
   const down = v.get("x--pr1");
   assert.equal(down?.kind, "stand_down");
@@ -66,62 +70,75 @@ test("verdicts: the best green attempt ships, the others stand down with why", (
 });
 
 test("verdicts: while one attempt is still being checked, the green one waits for it", () => {
-  const v = attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { check_status: "pending" })], [], "main");
+  const v = attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { check_status: "pending" })], [], { baselineHead: "main" });
   assert.equal(v.get("x--pr1")?.kind, "wait");
   assert.equal(v.has("x--pr2"), false); // it shows as checking anyway
   // An attempt with nothing pushed yet doesn't count: an agent that never pushes can't hold up the other.
-  assert.equal(attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { head_sha: "base" })], [], "main").size, 0);
+  assert.equal(attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { head_sha: "base" })], [], { baselineHead: "main" }).size, 0);
   // One sent around isn't re-checked until it pushes: don't wait for it, and it isn't green.
-  const sent = attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { check_base: "old" })], [], "main", new Set(), [], new Set(["x--pr2"]));
+  const sent = attemptVerdicts([attempt("x--pr1"), attempt("x--pr2", {}, { check_base: "old" })], [], { baselineHead: "main", goAround: new Set(["x--pr2"]) });
   assert.equal(sent.get("x--pr1")?.kind, "chosen");
   assert.match((sent.get("x--pr2") as { reason: string }).reason, /green on current main and yours isn't/);
   // Even if its row still says green (from before it was sent around).
-  const stale = attemptVerdicts([attempt("x--pr1", {}, { created_at: 9 }), attempt("x--pr2", {}, { created_at: 1 })], [], "main", new Set(), [], new Set(["x--pr2"]));
+  const stale = attemptVerdicts([attempt("x--pr1", {}, { created_at: 9 }), attempt("x--pr2", {}, { created_at: 1 })], [], { baselineHead: "main", goAround: new Set(["x--pr2"]) });
   assert.equal(stale.get("x--pr1")?.kind, "chosen");
 });
 
 test("verdicts: no green attempt, no pick (each just has to fix itself); different tasks don't compete", () => {
-  assert.equal(attemptVerdicts([attempt("a", {}, { check_status: "red" }), attempt("b", {}, { check_status: "red" })], [], "main").size, 0);
-  assert.equal(attemptVerdicts([attempt("a"), attempt("b", { task: "other" })], [], "main").size, 0);
+  assert.equal(attemptVerdicts([attempt("a", {}, { check_status: "red" }), attempt("b", {}, { check_status: "red" })], [], { baselineHead: "main" }).size, 0);
+  assert.equal(attemptVerdicts([attempt("a"), attempt("b", { task: "other" })], [], { baselineHead: "main" }).size, 0);
 });
 
 test("verdicts: once an attempt landed, the rest stand down for good", () => {
-  const v = attemptVerdicts([attempt("x--pr2", {}, { check_status: "red" })], [{ fork: "x--pr1", task: "t" }], "main");
+  const v = attemptVerdicts([attempt("x--pr2", {}, { check_status: "red" })], [{ fork: "x--pr1", task: "t", landedAt: 5 }], { baselineHead: "main" });
   assert.deepEqual(v.get("x--pr2"), {
     kind: "stand_down", winner: "x--pr1", final: true,
     reason: "PR1 already landed this task (t). Abandon this PR, or if it adds something, declare an intent with a new task and push.",
   });
 });
 
+test("verdicts: a landing before this PR opened doesn't count (a task key reused for a follow-up)", () => {
+  const v = attemptVerdicts([attempt("x--pr3", {}, { created_at: 10 })], [{ fork: "x--pr1", task: "t", landedAt: 5 }], { baselineHead: "main" });
+  assert.equal(v.size, 0);
+});
+
+test("verdicts: errored attempts: wait while ATC retries, decide once it gave up (even unindexed)", () => {
+  const group = [attempt("x--pr1", { breaking: 3 }), attempt("x--pr2", {}, { check_status: "error", processed_sha: "old" })];
+  assert.equal(attemptVerdicts(group, [], { baselineHead: "main" }).get("x--pr1")?.kind, "wait");
+  const gave = attemptVerdicts(group, [], { baselineHead: "main", gaveUp: new Set(["x--pr2"]) });
+  assert.equal(gave.get("x--pr1")?.kind, "chosen");
+  assert.match((gave.get("x--pr2") as { reason: string }).reason, /green on current main and yours isn't/);
+});
+
 test("verdicts: a person's pick overrides the ranking, and says so", () => {
   const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")];
-  const v = attemptVerdicts(group, [], "main", new Set(), [{ task: "t", winner: "x--pr1", by: "sam", at: 1 }]);
+  const v = attemptVerdicts(group, [], { baselineHead: "main", choices: [{ task: "t", winner: "x--pr1", by: "sam", at: 1 }] });
   assert.equal(v.get("x--pr1")?.kind, "chosen");
   const down = v.get("x--pr2");
   assert.match(down?.kind === "stand_down" ? down.reason : "", /picked by sam over ATC's ranking \(which preferred PR2: smaller blast radius/);
   // Picking ATC's own choice keeps ATC's reason.
-  const same = attemptVerdicts(group, [], "main", new Set(), [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }]);
+  const same = attemptVerdicts(group, [], { baselineHead: "main", choices: [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }] });
   assert.match(same.get("x--pr1")?.kind === "stand_down" ? (same.get("x--pr1") as { reason: string }).reason : "", /smaller blast radius .*; confirmed by sam/);
   // A pick for a PR that's no longer in flight is ignored.
-  assert.equal(attemptVerdicts(group, [], "main", new Set(), [{ task: "t", winner: "gone", by: "sam", at: 1 }]).get("x--pr2")?.kind, "chosen");
+  assert.equal(attemptVerdicts(group, [], { baselineHead: "main", choices: [{ task: "t", winner: "gone", by: "sam", at: 1 }] }).get("x--pr2")?.kind, "chosen");
 });
 
 test("sequence: STAND DOWN, and a PR that stands down doesn't hold up its rival", () => {
   // x requested landing first, so on conflicts alone y would HOLD behind it.
   const forks = [fork("x", { land_requested_at: 1 }), fork("y")];
   const conflicts = new Map([["x", [{ other: "y", symbol: null }]], ["y", [{ other: "x", symbol: null }]]]);
-  const v = attemptVerdicts([attempt("x", { breaking: 2 }), attempt("y")], [], "main");
+  const v = attemptVerdicts([attempt("x", { breaking: 2 }), attempt("y")], [], { baselineHead: "main" });
   const seq = buildSequence(forks, conflicts, "main", new Map(), new Set(), new Set(), new Map(), v);
   assert.deepEqual(seq.map((e) => [e.fork, e.clearance]), [["x", "stand_down"], ["y", "cleared"]]);
   assert.equal(seq[0]!.behind, "y");
   assert.match(clearanceMessage(seq[0]!), /^ATC: X, stand down\. Same task \(t\) as Y, which ships/);
   // Waiting for the other attempt reads as STANDBY.
-  const wait = attemptVerdicts([attempt("x"), attempt("y", {}, { check_status: "pending" })], [], "main");
+  const wait = attemptVerdicts([attempt("x"), attempt("y", {}, { check_status: "pending" })], [], { baselineHead: "main" });
   const s2 = buildSequence([fork("x"), fork("y", { check_status: "pending" })], new Map(), "main", new Map(), new Set(), new Set(), new Map(), wait);
   assert.deepEqual(s2.map((e) => e.clearance), ["checking", "checking"]);
   assert.match(s2[0]!.reason, /Waiting for Y, another attempt at the same task/);
   // Final: shown even over a go-around (rebasing won't change that the task already shipped).
-  const fin = attemptVerdicts([attempt("y")], [{ fork: "x", task: "t" }], "main");
+  const fin = attemptVerdicts([attempt("y")], [{ fork: "x", task: "t", landedAt: 5 }], { baselineHead: "main" });
   assert.equal(buildSequence([fork("y")], new Map(), "main", new Map([["y", "Conflicts with X (landed)."]]), new Set(), new Set(), new Map(), fin)[0]!.clearance, "stand_down");
 });
 
@@ -223,4 +240,71 @@ test("the Coordinator: choose refuses a PR with no task, or one alone on its tas
 test("an old Durable Object gets the intents.task column", () => {
   const a = airport("base-repo", {}, (db) => db.exec("CREATE TABLE intents(id INTEGER PRIMARY KEY AUTOINCREMENT, fork TEXT NOT NULL, description TEXT NOT NULL, files TEXT NOT NULL, symbols TEXT NOT NULL, created_at INTEGER NOT NULL)"));
   assert.ok(a.q<{ name: string }>("SELECT name FROM pragma_table_info('intents')").some((r) => r.name === "task"));
+});
+
+/** Two attempts at task "t", both pushed, indexed, green on main0 and paired clean. Y has the smaller blast radius. */
+async function twoAttempts(conflict = false) {
+  const a = airport();
+  const [X, Y] = ["base-repo--pr1", "base-repo--pr2"];
+  await a.co.ensure("base-repo");
+  a.addFork(X);
+  a.addFork(Y);
+  await a.co.declareIntent(X, "x", [], [], "t");
+  await a.co.declareIntent(Y, "y", [], [], "t");
+  await a.push(X, "x1");
+  await a.push(Y, "y1");
+  a.q("INSERT INTO symbol_changes(fork, path, name, kind, change) VALUES (?, 'src/a.ts', 'f', 'function', 'signature_changed')", X);
+  a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, 'x1', 'y1', ?, '{}', 1)", X, Y, conflict ? "textual_conflict" : "clean");
+  for (const [f, sha] of [[X, "x1"], [Y, "y1"]]) a.q("UPDATE forks SET processed_sha = ?, check_status = 'green', check_sha = ?, check_base = 'main0' WHERE name = ?", sha, sha, f);
+  if (conflict)
+    for (const [me, other] of [[X, Y], [Y, X]])
+      a.q("INSERT INTO signals(fork, kind, about_fork, symbol, message, data, dedupe_key, created_at) VALUES (?, 'merge_conflict', ?, NULL, 'conflict', '{}', ?, 1)", me, other, `merge:${me}:${other}`);
+  return { a, X, Y };
+}
+
+test("the Coordinator: re-declaring without a task keeps it; an empty task leaves it", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.declareIntent(Y, "y, revised plan", ["src/b.ts"], []); // no task given
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+  await a.co.declareIntent(Y, "not this task after all", [], [], "");
+  assert.equal((await a.co.getClearance(X)).clearance, "cleared"); // X is alone on the task now
+});
+
+test("the Coordinator: if the winner is abandoned, the other attempt is an ordinary PR again", async () => {
+  const { a, X, Y } = await twoAttempts();
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+  await a.co.abandonFork(Y);
+  assert.equal((await a.co.getClearance(X)).clearance, "cleared");
+});
+
+test("the Coordinator: a conflicting loser isn't sent around or re-checked when the winner lands; it stands down", async () => {
+  const { a, X, Y } = await twoAttempts(true);
+  // X requested landing first, so it's ahead in landing order; standing down, it mustn't make Y hold.
+  a.q("UPDATE forks SET land_requested_at = 1 WHERE name = ?", X);
+  const cy = await a.co.getClearance(Y);
+  assert.equal(cy.clearance, "cleared");
+  assert.match(cy.message, /Chosen over PR1 \(same task\)/);
+  const before = a.pipelines.length;
+  assert.equal((await a.co.requestLand(Y)).landed, true);
+  assert.equal(a.q("SELECT 1 FROM signals WHERE fork = ? AND kind = 'rebase_required'", X).length, 0);
+  assert.equal(a.q("SELECT 1 FROM signals WHERE fork = ? AND kind = 'landed'", X).length, 0); // nor told to "stay in line"
+  assert.equal(a.pipelines.slice(before).filter((p) => p.params.fork === X).length, 0); // no re-check of a PR that can't land
+  const s = a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'stand_down' AND resolved_at IS NULL", X);
+  assert.equal(s.length, 1);
+  assert.match(s[0]!.message, /PR2 already landed this task/);
+});
+
+test("no task named anywhere: no verdicts, and the sequence is what it was", async () => {
+  const a = airport();
+  const [X, Y] = ["base-repo--pr1", "base-repo--pr2"];
+  await a.co.ensure("base-repo");
+  a.addFork(X);
+  a.addFork(Y);
+  await a.co.declareIntent(X, "x", ["src/a.ts"], []);
+  await a.co.declareIntent(Y, "y", ["src/a.ts"], []);
+  await a.push(X, "x1");
+  await a.push(Y, "y1");
+  a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, 'x1', 'y1', 'clean', '{}', 1)", X, Y);
+  for (const [f, sha] of [[X, "x1"], [Y, "y1"]]) a.q("UPDATE forks SET processed_sha = ?, check_status = 'green', check_sha = ?, check_base = 'main0' WHERE name = ?", sha, sha, f);
+  assert.deepEqual([(await a.co.getClearance(X)).clearance, (await a.co.getClearance(Y)).clearance], ["cleared", "follow"]);
 });

@@ -98,7 +98,11 @@ export class Coordinator extends DurableObject<Env> {
 
   private flush() {
     if (!this.meta("baseline")) return;
-    this.syncAttemptSignals();
+    try {
+      this.syncAttemptSignals();
+    } catch (err) {
+      console.error("stand-down signals failed", err); // never at the cost of the snapshot and the live push
+    }
     const model = this.readModel();
     const full = JSON.stringify(model);
     recordSnapshot(this.sql, model); // for replay, only when the airspace actually changed
@@ -479,12 +483,16 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /** Record what an agent plans to touch; return in-flight work it collides with. */
-  /** `task`: the task this PR is an attempt at (issue #19). PRs whose latest intents name the same task compete. */
+  /**
+   * `task`: the task this PR is an attempt at (issue #19); PRs whose latest intents name the same task compete.
+   * Left out (undefined), the PR keeps the task it had: re-declaring a plan mustn't silently leave the task (review of
+   * #45). An empty string or null clears it.
+   */
   async declareIntent(fork: string, description: string, files: string[], symbols: string[], task?: string | null) {
     const row = this.fork(fork);
     if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
     const conflicts = intentConflicts(this.snapshot(), fork, files, symbols);
-    const key = normalizeTask(task);
+    const key = task === undefined ? (this.tasks().get(fork) ?? null) : normalizeTask(task);
     this.sql.exec(
       "INSERT INTO intents(fork, description, files, symbols, created_at, task) VALUES (?, ?, ?, ?, ?, ?)",
       fork, description, JSON.stringify(files), JSON.stringify(symbols), Date.now(), key,
@@ -716,7 +724,8 @@ export class Coordinator extends DurableObject<Env> {
     const gaveUp = new Set(forks.filter((f) => !checkRetriesLeft(f, runs.get(f.name))).map((f) => f.name));
     const pairsPending = forksWaitingOnPairs(this.outstandingPairs());
     const conflicts = this.conflictMap();
-    return buildSequence(forks, conflicts, this.meta("baseline_head") ?? "", this.goAroundMap(), pairsPending, gaveUp, this.reviewWaits(), this.attemptVerdicts(pairsPending, conflicts));
+    const goAround = this.goAroundMap();
+    return buildSequence(forks, conflicts, this.meta("baseline_head") ?? "", goAround, pairsPending, gaveUp, this.reviewWaits(), this.attemptVerdicts({ pairsPending, conflicts, goAround, gaveUp }));
   }
 
   // ── competing attempts at one task (issue #19, ADR-0026) ───────────────
@@ -728,9 +737,13 @@ export class Coordinator extends DurableObject<Env> {
     );
   }
 
+  /** Any intent names a task? If not (the usual case), nothing about attempts needs computing. */
+  private anyTasks(): boolean {
+    return this.sql.exec("SELECT 1 FROM intents WHERE task IS NOT NULL LIMIT 1").toArray().length > 0;
+  }
+
   /** Active PRs that name a task, with what compareAttempts needs. */
-  private attempts(conflicts = this.conflictMap()): Attempt[] {
-    const tasks = this.tasks();
+  private attempts(conflicts = this.conflictMap(), tasks = this.tasks()): Attempt[] {
     const forks = this.activeForks().filter((f) => tasks.get(f.name));
     const count = (q: string, fork: string) => this.sql.exec<{ n: number }>(q, fork).one().n;
     return forks.map((f) => {
@@ -745,20 +758,32 @@ export class Coordinator extends DurableObject<Env> {
     });
   }
 
-  private attemptVerdicts(pairsPending = forksWaitingOnPairs(this.outstandingPairs()), conflicts = this.conflictMap()): Map<string, AttemptVerdict> {
+  /** Pass what the caller already computed; anything left out is read here (only when some intent names a task). */
+  private attemptVerdicts(
+    known: { pairsPending?: Set<string>; conflicts?: Map<string, Conflict[]>; goAround?: Map<string, string>; gaveUp?: Set<string> } = {},
+  ): Map<string, AttemptVerdict> {
+    if (!this.anyTasks()) return new Map();
     const tasks = this.tasks();
-    const attempts = this.attempts(conflicts);
+    const attempts = this.attempts(known.conflicts ?? this.conflictMap(), tasks);
     if (!attempts.length) return new Map();
     const landed = this.sql
-      .exec<{ name: string }>("SELECT name FROM forks WHERE status = 'landed' ORDER BY landed_at")
+      .exec<{ name: string; landed_at: number }>("SELECT name, landed_at FROM forks WHERE status = 'landed' ORDER BY landed_at")
       .toArray()
-      .flatMap((r) => (tasks.get(r.name) ? [{ fork: r.name, task: tasks.get(r.name)! }] : []));
-    const choices = this.sql.exec<TaskChoice>("SELECT * FROM task_choices").toArray();
-    return attemptVerdicts(attempts, landed, this.meta("baseline_head") ?? "", pairsPending, choices, new Set(this.goAroundMap().keys()));
+      .flatMap((r) => (tasks.get(r.name) ? [{ fork: r.name, task: tasks.get(r.name)!, landedAt: r.landed_at }] : []));
+    const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
+    return attemptVerdicts(attempts, landed, {
+      baselineHead: this.meta("baseline_head") ?? "",
+      pairsPending: known.pairsPending ?? forksWaitingOnPairs(this.outstandingPairs()),
+      choices: this.sql.exec<TaskChoice>("SELECT * FROM task_choices").toArray(),
+      goAround: new Set((known.goAround ?? this.goAroundMap()).keys()),
+      gaveUp: known.gaveUp ?? new Set(attempts.filter((a) => !checkRetriesLeft(a.fork, runs.get(a.fork.name))).map((a) => a.fork.name)),
+    });
   }
 
   /** Tell each attempt that stands down, once per (head, winner, reason); resolve the notes that no longer hold. */
   private syncAttemptSignals() {
+    const open0 = this.sql.exec("SELECT 1 FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL LIMIT 1").toArray().length > 0;
+    if (!open0 && !this.anyTasks()) return;
     const down = standDowns(this.attemptVerdicts());
     const open = this.sql.exec<{ id: number; fork: string; dedupe_key: string }>("SELECT id, fork, dedupe_key FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL").toArray();
     const keys = new Map<string, string>();
@@ -907,7 +932,7 @@ export class Coordinator extends DurableObject<Env> {
 
     const waits = this.reviewWaits();
     const pairsPending = forksWaitingOnPairs(this.outstandingPairs());
-    const attempts = this.attemptVerdicts(pairsPending);
+    const attempts = this.attemptVerdicts({ pairsPending });
     const gate = landGate({
       me, baselineHead, goAround: this.goAroundMap().get(fork), waitingOnPairs: pairsPending.has(fork), attempt: attempts.get(fork),
       // A rival waiting for review, or standing down (issue #19), can't land, so it isn't ahead.
@@ -984,9 +1009,13 @@ export class Coordinator extends DurableObject<Env> {
     if (winner.subscription_id) await deletePushSubscription(this.env, winner.subscription_id).catch(() => undefined);
 
     this.resolveSignals({ fork: winner.name });
+    // Other attempts at the winner's task now stand down for good (issue #19): telling them to go around (rebase, fix,
+    // push) or re-checking them would be wasted work, since they can't land (review of #45). They get a stand_down.
+    const finals = new Set([...standDowns(this.attemptVerdicts())].filter(([, v]) => v.final && v.winner === winner.name).map(([f]) => f));
+    for (const f of finals) this.resolveSignals({ fork: f, about_fork: winner.name });
     const split = afterLanding(
       winner.name,
-      this.activeForks(),
+      this.activeForks().filter((f) => !finals.has(f.name)),
       this.sql
         .exec<OpenConflict>("SELECT fork, about_fork, symbol, message FROM signals WHERE about_fork = ? AND kind IN ('semantic_conflict', 'merge_conflict') AND resolved_at IS NULL ORDER BY id", winner.name)
         .toArray(),
@@ -1014,7 +1043,8 @@ export class Coordinator extends DurableObject<Env> {
       data: { newHead }, dedupe_key: `landed:${winner.name}:${newHead}`,
     });
     this.syncDerivedSignals();
-    await this.recheckAll(new Set(goAround));
+    this.syncAttemptSignals();
+    await this.recheckAll(new Set([...goAround, ...finals]));
     return {
       landed: true,
       fork: winner.name,

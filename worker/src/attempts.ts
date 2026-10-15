@@ -42,15 +42,29 @@ export function normalizeTask(raw: unknown): string | null {
   return t || null;
 }
 
+/** What the verdicts need besides the attempts. */
+export type VerdictContext = {
+  baselineHead: string;
+  /** PRs with a pair check against another PR's current head still outstanding. */
+  pairsPending?: Set<string>;
+  /** People's picks, latest per task. */
+  choices?: TaskChoice[];
+  /** PRs sent around (rebase_required): not green, and not re-checked until they push. */
+  goAround?: Set<string>;
+  /** PRs whose checks ATC stopped restarting (CHECK_MAX_RESTARTS): only a new push retries them. */
+  gaveUp?: Set<string>;
+};
+
 /**
- * Checked on current main, with every pair check in: green, red or (for good) errored. Until then the comparison
- * waits for it, so an attempt that's merely slower to check doesn't lose. A PR sent around (`goAround`) is decided
- * too: ATC doesn't re-check it until it pushes, so waiting for it could take forever.
+ * Checked on current main, with every pair check in: green, red, or errored with no retries left. Until then the
+ * comparison waits for it, so an attempt that's merely slower to check (or hit a passing checker error) doesn't lose.
+ * A PR sent around is decided too: ATC doesn't re-check it until it pushes, so waiting for it could take forever.
  */
-export function decided(f: ForkRow, baselineHead: string, pairsPending: Set<string>, goAround: Set<string> = new Set()): boolean {
+export function decided(f: ForkRow, { baselineHead, pairsPending = new Set(), goAround = new Set(), gaveUp = new Set() }: VerdictContext): boolean {
   if (goAround.has(f.name)) return true;
+  // Errored for good at its head, even if its push was never indexed (review of #45): nothing more is coming.
+  if (f.check_status === "error" && f.check_sha === f.head_sha) return gaveUp.has(f.name);
   if (f.check_sha !== f.head_sha || f.processed_sha !== f.head_sha) return false;
-  if (f.check_status === "error") return true;
   if (f.check_status !== "green" && f.check_status !== "red") return false;
   return f.check_base === baselineHead && !pairsPending.has(f.name);
 }
@@ -80,14 +94,15 @@ export function compareAttempts(a: Attempt, b: Attempt): { winner: Attempt; lose
     return { winner, loser, step: s.name, reason: s.says(winner, loser) };
   }
   const [winner, loser] = a.fork.name < b.fork.name ? [a, b] : [b, a];
-  return { winner, loser, step: "name", reason: "same size; it was opened first" };
+  return { winner, loser, step: "name", reason: "otherwise equal; ATC broke the tie by name" };
 }
 
-const isGreenNow = (f: ForkRow, head: string, pairsPending: Set<string>, goAround = new Set<string>()) => isGreen(f, head) && !pairsPending.has(f.name) && !goAround.has(f.name);
+const isGreenNow = (f: ForkRow, { baselineHead, pairsPending = new Set(), goAround = new Set() }: VerdictContext) =>
+  isGreen(f, baselineHead) && !pairsPending.has(f.name) && !goAround.has(f.name);
 
 /**
  * ATC's verdict for every attempt that has one. Per task:
- *  - an attempt at it already landed: the others stand down (final);
+ *  - another attempt at it landed while this one was in flight: this one stands down (final);
  *  - a person picked one (and it's still in flight): that one ships, the rest stand down;
  *  - otherwise, while any attempt is still being checked, the decided green ones wait for it;
  *  - once all are decided, the best (compareAttempts) ships if it is green; the rest stand down.
@@ -95,30 +110,30 @@ const isGreenNow = (f: ForkRow, head: string, pairsPending: Set<string>, goAroun
  */
 export function attemptVerdicts(
   attempts: Attempt[],
-  /** Landed PRs and the task their latest intent named. */
-  landed: Array<{ fork: string; task: string }>,
-  baselineHead: string,
-  pairsPending: Set<string> = new Set(),
-  choices: TaskChoice[] = [],
-  /** PRs sent around (rebase_required): not green, and not re-checked until they push. */
-  goAround: Set<string> = new Set(),
+  /** Landed PRs, the task their latest intent named, and when they landed. */
+  landed: Array<{ fork: string; task: string; landedAt: number }>,
+  ctx: VerdictContext,
 ): Map<string, AttemptVerdict> {
   const out = new Map<string, AttemptVerdict>();
   const byTask = new Map<string, Attempt[]>();
-  for (const a of attempts) if (a.fork.status === "active" && a.fork.head_sha !== a.fork.base_sha) byTask.set(a.task, [...(byTask.get(a.task) ?? []), a]);
-
-  for (const [task, members] of byTask) {
-    const group = members.map((a) => ({ ...a, green: isGreenNow(a.fork, baselineHead, pairsPending, goAround) }));
-    const done = landed.find((l) => l.task === task);
+  for (const a of attempts) {
+    if (a.fork.status !== "active" || a.fork.head_sha === a.fork.base_sha) continue;
+    // Only a landing while this PR was in flight competes with it: a task key reused later (a follow-up on the same
+    // ticket) must not be blocked by last week's landing (review of #45).
+    const done = landed.filter((l) => l.task === a.task && l.landedAt >= a.fork.created_at).sort((x, y) => x.landedAt - y.landedAt)[0];
     if (done) {
-      for (const a of group)
-        out.set(a.fork.name, { kind: "stand_down", winner: done.fork, final: true, reason: `${prLabel(done.fork)} already landed this task (${task}). Abandon this PR, or if it adds something, declare an intent with a new task and push.` });
+      out.set(a.fork.name, { kind: "stand_down", winner: done.fork, final: true, reason: `${prLabel(done.fork)} already landed this task (${a.task}). Abandon this PR, or if it adds something, declare an intent with a new task and push.` });
       continue;
     }
-    if (group.length < 2) continue;
+    byTask.set(a.task, [...(byTask.get(a.task) ?? []), a]);
+  }
+
+  for (const [task, members] of byTask) {
+    if (members.length < 2) continue;
+    const group = members.map((a) => ({ ...a, green: isGreenNow(a.fork, ctx) }));
     const ranked = [...group].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1));
     const best = ranked[0]!;
-    const choice = choices.filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
+    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
     if (choice) {
       const winner = group.find((a) => a.fork.name === choice.winner)!;
       const atc = (l: Attempt) => {
@@ -131,16 +146,16 @@ export function attemptVerdicts(
       out.set(winner.fork.name, { kind: "chosen", over });
       continue;
     }
-    const waiting = group.filter((a) => !decided(a.fork, baselineHead, pairsPending, goAround));
+    const waiting = group.filter((a) => !decided(a.fork, ctx));
     if (waiting.length) {
       for (const a of group)
-        if (!waiting.includes(a) && isGreenNow(a.fork, baselineHead, pairsPending)) {
+        if (!waiting.includes(a) && a.green) {
           const on = waiting.map((w) => w.fork.name);
           out.set(a.fork.name, { kind: "wait", on, reason: `Waiting for ${on.map(prLabel).join(", ")}, another attempt at the same task (${task}), to finish its checks; then ATC picks one.` });
         }
       continue;
     }
-    if (!isGreenNow(best.fork, baselineHead, pairsPending, goAround)) continue; // none is green: each just has to fix itself
+    if (!best.green) continue; // none is green: each just has to fix itself
     const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, reason: compareAttempts(best, l).reason }));
     for (const o of over)
       out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });

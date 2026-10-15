@@ -40,8 +40,9 @@ const routes: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     async (stub, request) => {
       const b = await body<{ fork?: string; description?: string; files?: string[]; symbols?: string[]; task?: unknown }>(request);
       if (!b.fork || !b.description) throw new HttpError(400, "fork and description are required");
-      if (b.task !== undefined && b.task !== null && typeof b.task !== "string") throw new HttpError(400, "task must be a string");
-      return json(await stub.declareIntent(b.fork, b.description, b.files ?? [], b.symbols ?? [], (b.task as string | null | undefined) ?? null));
+      // Left out: the PR keeps its task; null or "" clears it (issue #19).
+      if (b.task !== undefined && b.task !== null && (typeof b.task !== "string" || b.task.length > 100)) throw new HttpError(400, "task must be a string of at most 100 characters");
+      return json(await stub.declareIntent(b.fork, b.description, b.files ?? [], b.symbols ?? [], b.task as string | null | undefined));
     },
   ],
   [

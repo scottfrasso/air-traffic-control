@@ -46,10 +46,10 @@ function createServer(env: Env) {
         description: z.string().describe("One line: what you are about to do"),
         files: z.array(z.string()).default([]).describe("Repo-relative paths you expect to modify"),
         symbols: z.array(z.string()).default([]).describe("Exported symbols you expect to change or depend on"),
-        task: z.string().max(100).optional().describe("The task you're working on (e.g. a ticket id). Other PRs on the same task compete with yours"),
+        task: z.string().max(100).optional().describe("The task you're working on (e.g. a ticket id). Other PRs on the same task compete with yours. Left out, your PR keeps its task; \"\" clears it"),
       }),
     },
-    async ({ fork, description, files, symbols, task }) => text(await (await coordinatorFor(env, baselineOf(fork))).declareIntent(fork, description, files, symbols, task ?? null)),
+    async ({ fork, description, files, symbols, task }) => text(await (await coordinatorFor(env, baselineOf(fork))).declareIntent(fork, description, files, symbols, task)),
   );
 
   server.registerTool(

@@ -376,8 +376,8 @@
     const seq = state.sequence || [];
     const rows = seq.map((e) => `<li><span class="pos">#${e.position}</span><span class="pr">${esc(e.pr)}</span>
       <span class="clr c-${e.clearance}">${WORD[e.clearance] || e.clearance.toUpperCase()}</span><span class="why">${esc(e.reason)}</span>${
-        (state.awaitingReview || []).includes(e.fork) && e.clearance !== "go_around" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}${
-        e.clearance === "stand_down" && !/already landed/.test(e.reason) && key && !replaying ? `<button type="button" class="pick" data-pick="${esc(e.fork)}" title="Ship this attempt instead of ${esc(pr(e.behind || ""))}">PICK</button>` : ""}</li>`).join("");
+        (state.awaitingReview || []).includes(e.fork) && e.clearance !== "go_around" && e.clearance !== "stand_down" && key && !replaying ? `<button type="button" class="approve" data-approve="${esc(e.fork)}" data-sha="${esc((state.forks.find((f) => f.name === e.fork) || {}).head_sha || "")}" title="Approve this PR's latest push">APPROVE</button>` : ""}${
+        e.clearance === "stand_down" && !e.final && key && !replaying ? `<button type="button" class="pick" data-pick="${esc(e.fork)}" title="Ship this attempt instead of ${esc(pr(e.behind || ""))}">PICK</button>` : ""}</li>`).join("");
     const landed = state.forks.filter((f) => f.status === "landed").sort((a, b) => a.landed_at - b.landed_at);
     const logged = new Set((state.flightLogs || []).map((l) => l.fork));
     const names = landed.map((f) => logged.has(f.name) ? `<button type="button" data-flight="${esc(f.name)}" title="Show flight log">${esc(pr(f.name))}</button>` : `<b>${esc(pr(f.name))}</b>`);
