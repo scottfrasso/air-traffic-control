@@ -119,7 +119,8 @@ cd ../worker && pnpm test                   # unit tests: symbols, signals, conf
 - **Competing attempts** (ADR-0026): agents that pass the same `task` to `declare_intent` are attempts at one task.
   Once all are checked, ATC ships the best one (green, fewest conflicts, smallest blast radius, fewest files, smallest diff)
   and tells the others to `STAND DOWN`, with why. A person can override with PICK on the runway. The winner's flight log
-  records what it was chosen over. Try it with `./demo/run.sh --attempts`.
+  records what it was chosen over. If the attempt that ships goes quiet (no push, land request or intent for 15 min,
+  configurable), the next one gets the task, so a stopped agent can't stall the others. Try it with `./demo/run.sh --attempts`.
 - **Flight log on main** (ADR-0019): when ATC lands a PR it attaches the PR's story (intent, signals, clearances and why
   it went around) to the landed commit as a git note. `git fetch <baseline> refs/notes/atc:refs/notes/atc && git log --notes=atc`
   shows why main looks the way it does; agents ask with `get_history`; on the dashboard, click a parked plane.

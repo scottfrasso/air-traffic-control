@@ -460,3 +460,85 @@ test("the Coordinator: leaving a task ends a person's pick; coming back doesn't 
   assert.equal((await a.co.getClearance(X)).clearance, "stand_down"); // ATC's ranking again
   assert.equal((await a.co.getClearance(Y)).clearance, "cleared");
 });
+
+// ── a quiet winner hands its task over (an agent that stopped mustn't stall the others) ──
+
+test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's pick, hands the task to the next", () => {
+  const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")]; // pr2 is better
+  const ctx = { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1000]]), lastActive: new Map([["x--pr2", 500]]), stallMs: 60_000 };
+  assert.equal(attemptVerdicts(group, [], { ...ctx, now: 1000 + 59_000 }).get("x--pr2")?.kind, "chosen"); // not yet
+  const v = attemptVerdicts(group, [], { ...ctx, now: 1000 + 60_000 });
+  assert.deepEqual(v.get("x--pr1"), { kind: "chosen", over: [{ fork: "x--pr2", reason: "PR2 went quiet for 60 s" }] });
+  const down = v.get("x--pr2") as { kind: string; basis: string; winner: string; reason: string };
+  assert.deepEqual([down.kind, down.basis, down.winner], ["stand_down", "stalled", "x--pr1"]);
+  assert.match(down.reason, /hasn't pushed, asked to land or declared an intent for 60 s, so PR1 gets the task\. Push or ask to land to compete again\./);
+  // Activity after it became the pick keeps it: the clock runs from the later of the two.
+  assert.equal(attemptVerdicts(group, [], { ...ctx, lastActive: new Map([["x--pr2", 30_000]]), now: 1000 + 60_000 }).get("x--pr2")?.kind, "chosen");
+});
+
+test("verdicts: the clock starts when an attempt becomes the one to ship, not at its last action", () => {
+  // pr1 has been quiet for an hour as a loser (it was told to stand down). It just became the pick: not stalled.
+  const group = [attempt("x--pr1"), attempt("x--pr2", { breaking: 1 })];
+  const v = attemptVerdicts(group, [], { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), lastActive: new Map([["x--pr1", 0]]), stallMs: 60_000, now: 3_600_000 });
+  assert.equal(v.get("x--pr1")?.kind, "chosen");
+});
+
+test("verdicts: set aside, it stays aside until its agent acts again; a person's pick doesn't protect a quiet PR", () => {
+  const group = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2")];
+  // pr1 now leads (the heir), so pr2's own clock would restart; the stall memory keeps it aside.
+  const base = { baselineHead: "main", leaders: new Map([["t", "x--pr1"]]), leaderSince: new Map([["t", 70_000]]), stallMs: 60_000, now: 80_000 };
+  const aside = attemptVerdicts(group, [], { ...base, stalledAt: new Map([["x--pr2", 70_000]]), lastActive: new Map([["x--pr2", 500]]) });
+  assert.equal(aside.get("x--pr1")?.kind, "chosen");
+  // Its agent pushes (or asks to land): it competes again, and being better, it ships.
+  const back = attemptVerdicts(group, [], { ...base, stalledAt: new Map([["x--pr2", 70_000]]), lastActive: new Map([["x--pr2", 75_000]]) });
+  assert.equal(back.get("x--pr2")?.kind, "chosen");
+  // A pick of a quiet PR hands over too.
+  const picked = attemptVerdicts(group, [], { ...base, choices: [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }], leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), lastActive: new Map([["x--pr2", 1]]) });
+  assert.equal(picked.get("x--pr1")?.kind, "chosen");
+});
+
+test("verdicts: still being checked isn't quiet (checks are ATC's job), and three attempts hand over in rank order", () => {
+  const pending = [attempt("x--pr1", { breaking: 1 }), attempt("x--pr2", {}, { check_status: "pending" })];
+  const p = attemptVerdicts(pending, [], { baselineHead: "main", choices: [{ task: "t", winner: "x--pr2", by: "sam", at: 1 }], leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), stallMs: 60_000, now: 999_999 });
+  assert.equal(p.get("x--pr2")?.kind, "chosen");
+  const three = [attempt("x--pr1", { breaking: 2 }), attempt("x--pr2"), attempt("x--pr3", { breaking: 1 })];
+  const v = attemptVerdicts(three, [], { baselineHead: "main", leaders: new Map([["t", "x--pr2"]]), leaderSince: new Map([["t", 1]]), stallMs: 60_000, now: 999_999 });
+  assert.equal(v.get("x--pr3")?.kind, "chosen"); // next best
+  assert.equal((v.get("x--pr2") as { basis: string }).basis, "stalled");
+  assert.equal((v.get("x--pr1") as { winner: string }).winner, "x--pr3");
+});
+
+test("the Coordinator: a quiet winner hands over; the heir lands; the quiet PR then stands down for good", async () => {
+  const { a, X, Y } = await twoAttempts(); // Y ships
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush(); // Y becomes ATC's pick
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+  // Y's agent stopped: 31 s pass with no push, land request or intent from it.
+  a.q("UPDATE task_leaders SET at = at - 31000");
+  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  const cx = await a.co.getClearance(X);
+  assert.equal(cx.clearance, "cleared", cx.message);
+  assert.match((await a.co.getClearance(Y)).message, /stand down\. This PR was the one to ship for t, but it hasn't pushed, asked to land or declared an intent for 30 s, so PR1 gets the task/);
+  (a.co as unknown as { flush(): void }).flush(); // records the stall and the new pick
+  assert.equal(a.events("attempt.stalled").length, 1);
+  (a.co as unknown as { flush(): void }).flush();
+  assert.equal(a.events("attempt.stalled").length, 1); // said once
+  assert.equal((await a.co.getClearance(X)).clearance, "cleared"); // and it doesn't flip back now that X leads
+  const landed = await a.co.requestLand(X);
+  assert.equal(landed.landed, true, landed.reason);
+  assert.match(a.q<{ note: string }>("SELECT note FROM flight_logs WHERE fork = ?", X)[0]!.note, /^ATC-Chosen-Over: PR2 \(PR2 went quiet for 30 s\)$/m);
+  assert.match((await a.co.getClearance(Y)).message, /PR1 already landed this task/);
+});
+
+test("the Coordinator: a quiet winner that asks to land is back in, and lands", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  a.q("UPDATE task_leaders SET at = at - 31000");
+  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  (a.co as unknown as { flush(): void }).flush(); // set aside
+  assert.equal((await a.co.getClearance(Y)).clearance, "stand_down");
+  const r = await a.co.requestLand(Y); // a sign of life
+  assert.equal(r.landed, true, r.reason);
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down");
+});

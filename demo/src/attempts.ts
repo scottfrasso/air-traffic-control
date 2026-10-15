@@ -5,6 +5,8 @@
  *   3. Once both are checked, ATC picks Y (smaller blast radius) and tells X to STAND DOWN, with why. X can't land.
  *   4. A person picks X instead (POST /choose), then picks Y back: the sequence follows the pick.
  *   5. Y lands; its flight log on main says what it was chosen over and why. X stands down for good.
+ *   6. A second task: ATC picks one attempt, whose agent then goes quiet. After `stallSeconds` the other gets the task
+ *      and lands; the quiet one stands down for good. Nobody had to press anything.
  *
  *   ./demo/run.sh --attempts [--browser]
  * --browser: step 4 clicks PICK on the live dashboard in a real (headless) Chromium instead of calling the API.
@@ -133,6 +135,71 @@ export function shippingFor(goods: Cents): Cents {
   say("system", line || "(no ATC-Chosen-Over line)");
   check(note.ok && new RegExp(`^ATC-Chosen-Over: PR${x.pr} \\(smaller blast radius .*; confirmed by attempts-demo\\)$`).test(line), `PR${y.pr}'s git note records the attempt it was chosen over, and why`);
   await mesh.abandon(x.fork); // what the losing agent does next
+
+  step(6, "A second task: ATC's pick goes quiet, and the other attempt gets the task by itself");
+  const QUIET_S = 20;
+  await mesh.call("POST", "/settings", { stallSeconds: QUIET_S });
+  say("system", `stallSeconds = ${QUIET_S}: the attempt that ships must push, ask to land or declare something within ${QUIET_S} s`);
+  const q = await mesh.createFork("q");
+  const w = await mesh.createFork("w");
+  for (const [c, files] of [[q, ["src/gift.ts"]], [w, ["src/wrap.ts", "src/wrap-price.ts"]]] as const)
+    await mesh.call("POST", "/intents", { fork: c.fork, description: "Gift wrapping at checkout", files, symbols: [], task: "gift-wrap" });
+  const rq = Repo.clone(q.remote, q.token, join(work, "q"), { name: "agent-q", email: "q@agentmesh.dev" });
+  writeFileSync(join(rq.dir, "src/gift.ts"), `import type { Cents } from "./money";
+
+/** Gift wrapping: a flat $3. */
+export const giftWrap = (): Cents => 300;
+`);
+  rq.commitAll("Gift wrapping");
+  rq.push(q.remote);
+  const rw = Repo.clone(w.remote, w.token, join(work, "w"), { name: "agent-w", email: "w@agentmesh.dev" });
+  writeFileSync(join(rw.dir, "src/wrap-price.ts"), `import type { Cents } from "./money";
+
+export const WRAP_PRICE: Cents = 300;
+`);
+  writeFileSync(join(rw.dir, "src/wrap.ts"), `import type { Cents } from "./money";
+import { WRAP_PRICE } from "./wrap-price";
+
+/** Gift wrapping at checkout. */
+export const wrapCost = (): Cents => WRAP_PRICE;
+`);
+  rw.commitAll("Gift wrapping (two modules)");
+  rw.push(w.remote);
+  say("system", `PR${q.pr} (one file) and PR${w.pr} (two files) pushed, both on task gift-wrap`);
+  const firstPick = await waitFor("ATC's pick for gift-wrap", async () => {
+    const e = await entry(w.fork);
+    return e?.clearance === "stand_down" ? e : null;
+  }, 300_000, 2000);
+  say("system", `ATC ${firstPick.pr} STAND_DOWN: ${firstPick.reason}`);
+  check(/1 vs 2 exported symbols changed|fewer files touched \(1 vs 2\)/.test(firstPick.reason), `PR${q.pr} is ATC's pick (the smaller change); PR${w.pr} stands down`);
+  say("A", `agent Q stops here: it never asks to land`);
+  const t0 = Date.now();
+  const handed = await waitFor(`PR${w.pr} to get the task once PR${q.pr} goes quiet`, async () => {
+    const e = await entry(w.fork);
+    return e?.clearance === "cleared" ? e : null;
+  }, 180_000, 2000);
+  const quiet = (await entry(q.fork))!;
+  say("system", `ATC ${quiet.pr} ${quiet.clearance.toUpperCase()}: ${quiet.reason}`);
+  check(quiet.clearance === "stand_down" && /hasn't pushed, asked to land or declared an intent for 20 s/.test(quiet.reason), `after ${Math.round((Date.now() - t0) / 1000)} s, PR${q.pr} is set aside as quiet and PR${w.pr} is ${handed.clearance.toUpperCase()}`);
+  let wl: LandResponse;
+  for (;;) {
+    wl = await mesh.call<LandResponse>("POST", "/land", { fork: w.fork });
+    if (!wl.retry) break;
+    await sleep(3000);
+  }
+  check(wl.landed, `PR${w.pr} landed: ${wl.landed ? `main is now ${wl.baselineHead?.slice(0, 7)}` : wl.reason}`);
+  const qFinal = await waitFor(`PR${q.pr} standing down for good`, async () => {
+    const e = await entry(q.fork);
+    return e && /already landed this task/.test(e.reason) ? e : null;
+  }, 60_000, 1500);
+  check(qFinal.clearance === "stand_down", `PR${q.pr} stands down for good: ${qFinal.reason}`);
+  const st2 = await waitFor("PR's flight log in git", async () => {
+    const s = await mesh.state();
+    return s.flightLogs?.some((l) => l.fork === w.fork && l.noted) ? s : null;
+  }, 60_000, 1000);
+  const wLog = st2.flightLogs!.find((l) => l.fork === w.fork)!;
+  check(new RegExp(`^ATC-Chosen-Over: PR${q.pr} \\(PR${q.pr} went quiet for 20 s\\)$`, "m").test(wLog.note), `PR${w.pr}'s flight log: ATC-Chosen-Over: PR${q.pr} (PR${q.pr} went quiet for 20 s)`);
+  await mesh.abandon(q.fork);
 } catch (err) {
   failed = true;
   say("fail", (err as Error).message);

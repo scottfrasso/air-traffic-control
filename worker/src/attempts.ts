@@ -49,6 +49,16 @@ export type TaskChoice = { task: string; winner: string; by: string; at: number 
  */
 export const LEADER_WAIT_MS = CHECK_STUCK_MS;
 
+/**
+ * The attempt that ships (ATC's pick or a person's) must show signs of life: a push, a land request or a new intent.
+ * Quiet this long while it's the one to ship, and the next-best attempt gets the task, so an agent that stopped
+ * can't stall the others (issue #19). Per baseline: POST /settings {"stallSeconds": n}.
+ */
+export const STALL_MS = 15 * 60_000;
+
+/** "15 min" or "20 s". */
+export const duration = (ms: number) => (ms >= 120_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`);
+
 /** Task keys are compared trimmed and case-insensitive; null for none. */
 export function normalizeTask(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -72,6 +82,14 @@ export type VerdictContext = {
   /** fork → when it was sent around (its open rebase_required signal). */
   sentAround?: Map<string, number>;
   now?: number;
+  /** task → since when its leader (in `leaders`) has been ATC's pick. */
+  leaderSince?: Map<string, number>;
+  /** fork → its agent's last push, land request or intent (default: when the PR opened). */
+  lastActive?: Map<string, number>;
+  /** How long the attempt to ship may be quiet before the next one gets the task (STALL_MS). */
+  stallMs?: number;
+  /** fork → when ATC set it aside as quiet (table `task_stalls`); it stays aside until its agent acts again. */
+  stalledAt?: Map<string, number>;
 };
 
 /**
@@ -150,47 +168,98 @@ export function attemptVerdicts(
   for (const [task, members] of byTask) {
     if (members.length < 2) continue;
     const group = members.map((a) => ({ ...a, green: isGreenNow(a.fork, ctx) }));
-    const ranked = [...group].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1));
-    const best = ranked[0]!;
-    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
-    if (choice) {
-      const winner = group.find((a) => a.fork.name === choice.winner)!;
-      const atc = (l: Attempt) => {
-        if (winner !== best) return `picked by ${choice.by} over ATC's ranking (which preferred ${prLabel(best.fork.name)}: ${compareAttempts(best, winner).reason})`;
-        return `${compareAttempts(winner, l).reason}; confirmed by ${choice.by}`;
-      };
-      const over = group.filter((a) => a !== winner).map((l) => ({ fork: l.fork.name, reason: atc(l) }));
-      for (const o of over)
-        out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, basis: "pick", reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.` });
-      out.set(winner.fork.name, { kind: "chosen", over });
-      continue;
+    // The attempt that would ship, if its agent has gone quiet, is set aside and the rest compared again (and again).
+    const stalled: Attempt[] = [];
+    let pool: Attempt[] = group;
+    for (;;) {
+      const r = decideTask(task, pool, ctx);
+      if (r.winner && isStalled(task, r.winner, ctx)) {
+        stalled.push(r.winner);
+        pool = pool.filter((a) => a !== r.winner);
+        if (pool.length > 1) continue;
+        // One left: it ships (if it can pass the gate), over the quiet ones.
+        const sole = pool[0]!;
+        out.set(sole.fork.name, { kind: "chosen", over: stalled.map((q) => ({ fork: q.fork.name, reason: quietReason(q, ctx) })) });
+        break;
+      }
+      for (const [fork, v] of r.verdicts) out.set(fork, v);
+      if (stalled.length && r.winner) {
+        const w = out.get(r.winner.fork.name);
+        if (w?.kind === "chosen") w.over.push(...stalled.map((q) => ({ fork: q.fork.name, reason: quietReason(q, ctx) })));
+      }
+      break;
     }
-    // ATC's pick, sent around by another PR's landing: the task stays its own while it fixes that, up to LEADER_WAIT_MS.
-    const sentAt = (a: Attempt) => ctx.sentAround?.get(a.fork.name);
-    const held = (a: Attempt) =>
-      ctx.leaders?.get(task) === a.fork.name && (ctx.goAround ?? new Set()).has(a.fork.name) && (ctx.now ?? Date.now()) - (sentAt(a) ?? 0) < LEADER_WAIT_MS;
-    const waiting = group.filter((a) => held(a) || !decided(a.fork, ctx));
-    if (waiting.length) {
-      for (const a of group)
-        if (!waiting.includes(a) && a.green) {
-          const on = waiting.map((w) => w.fork.name);
-          const leader = waiting.find(held);
-          out.set(a.fork.name, {
-            kind: "wait", on,
-            reason: leader
-              ? `Waiting for ${prLabel(leader.fork.name)}, ATC's pick for this task (${task}): another landing sent it around, and it gets ${Math.round(LEADER_WAIT_MS / 60_000)} min to fix that before ATC picks again.`
-              : `Waiting for ${on.map(prLabel).join(", ")}, another attempt at the same task (${task}), to finish its checks; then ATC picks one.`,
-          });
-        }
-      continue;
-    }
-    if (!best.green) continue; // none is green: each just has to fix itself
-    const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, ...compareAttempts(best, l) }));
-    for (const o of over)
-      out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, basis: o.step, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });
-    out.set(best.fork.name, { kind: "chosen", over: over.map((o) => ({ fork: o.fork, reason: o.reason })) });
+    // Who the quiet ones hand over to: the one that ships now, else the best of the rest (still being checked, or red).
+    const heir = pool.find((a) => out.get(a.fork.name)?.kind === "chosen") ?? [...pool].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1))[0];
+    for (const q of stalled)
+      out.set(q.fork.name, {
+        kind: "stand_down", winner: heir?.fork.name ?? "", final: false, basis: "stalled",
+        reason: `This PR was the one to ship for ${task}, but it hasn't pushed, asked to land or declared an intent for ${duration(ctx.stallMs ?? STALL_MS)}, so ${heir ? prLabel(heir.fork.name) : "another attempt"} gets the task. Push or ask to land to compete again.`,
+      });
   }
   return out;
+}
+
+/** Quiet this long while it was the one to ship: set aside. Only once it's decided (checks are ATC's job, not the agent's). */
+function isStalled(task: string, a: Attempt, ctx: VerdictContext): boolean {
+  const lastActive = ctx.lastActive?.get(a.fork.name) ?? a.fork.created_at;
+  // Already set aside, and quiet since: stays aside. (Its heir is ATC's pick now, which would restart its clock below.)
+  const at = ctx.stalledAt?.get(a.fork.name);
+  if (at !== undefined && lastActive < at) return true;
+  if (!decided(a.fork, ctx)) return false;
+  const now = ctx.now ?? Date.now();
+  // The clock starts when it became the one to ship: a loser has no reason to act until then.
+  const since = ctx.leaders?.get(task) === a.fork.name ? (ctx.leaderSince?.get(task) ?? now) : now;
+  const last = Math.max(lastActive, since);
+  return now - last >= (ctx.stallMs ?? STALL_MS);
+}
+
+const quietReason = (q: Attempt, ctx: VerdictContext) => `${prLabel(q.fork.name)} went quiet for ${duration(ctx.stallMs ?? STALL_MS)}`;
+
+/** One task's verdicts among `group` (2+ attempts), and the attempt that ships, if one does now. */
+function decideTask(task: string, group: Attempt[], ctx: VerdictContext): { verdicts: Map<string, AttemptVerdict>; winner?: Attempt } {
+  const out = new Map<string, AttemptVerdict>();
+  if (group.length < 2) return { verdicts: out };
+  const ranked = [...group].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1));
+  const best = ranked[0]!;
+  const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
+  if (choice) {
+    const winner = group.find((a) => a.fork.name === choice.winner)!;
+    const atc = (l: Attempt) => {
+      if (winner !== best) return `picked by ${choice.by} over ATC's ranking (which preferred ${prLabel(best.fork.name)}: ${compareAttempts(best, winner).reason})`;
+      return `${compareAttempts(winner, l).reason}; confirmed by ${choice.by}`;
+    };
+    const over = group.filter((a) => a !== winner).map((l) => ({ fork: l.fork.name, reason: atc(l) }));
+    for (const o of over)
+      out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, basis: "pick", reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.` });
+    out.set(winner.fork.name, { kind: "chosen", over });
+    return { verdicts: out, winner };
+  }
+  // ATC's pick, sent around by another PR's landing: the task stays its own while it fixes that, up to LEADER_WAIT_MS.
+  const sentAt = (a: Attempt) => ctx.sentAround?.get(a.fork.name);
+  const held = (a: Attempt) =>
+    ctx.leaders?.get(task) === a.fork.name && (ctx.goAround ?? new Set()).has(a.fork.name) && (ctx.now ?? Date.now()) - (sentAt(a) ?? 0) < LEADER_WAIT_MS;
+  const waiting = group.filter((a) => held(a) || !decided(a.fork, ctx));
+  if (waiting.length) {
+    for (const a of group)
+      if (!waiting.includes(a) && a.green) {
+        const on = waiting.map((w) => w.fork.name);
+        const leader = waiting.find(held);
+        out.set(a.fork.name, {
+          kind: "wait", on,
+          reason: leader
+            ? `Waiting for ${prLabel(leader.fork.name)}, ATC's pick for this task (${task}): another landing sent it around, and it gets ${Math.round(LEADER_WAIT_MS / 60_000)} min to fix that before ATC picks again.`
+            : `Waiting for ${on.map(prLabel).join(", ")}, another attempt at the same task (${task}), to finish its checks; then ATC picks one.`,
+        });
+      }
+    return { verdicts: out };
+  }
+  if (!best.green) return { verdicts: out }; // none is green: each just has to fix itself
+  const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, ...compareAttempts(best, l) }));
+  for (const o of over)
+    out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, basis: o.step, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });
+  out.set(best.fork.name, { kind: "chosen", over: over.map((o) => ({ fork: o.fork, reason: o.reason })) });
+  return { verdicts: out, winner: best };
 }
 
 /** The stand-down verdicts only (fork → verdict), for the sequence and the landing gate. */

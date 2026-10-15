@@ -48,6 +48,12 @@ CREATE INDEX IF NOT EXISTS intents_by_fork ON intents(fork, id);
 -- A person's pick among competing attempts at one task (issue #19, ADR-0026); the latest per task counts.
 CREATE TABLE IF NOT EXISTS task_choices(task TEXT PRIMARY KEY, winner TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
 
+-- Each PR's agent's last sign of life: a push, a land request or an intent (issue #19: a quiet winner hands over).
+CREATE TABLE IF NOT EXISTS fork_activity(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
+
+-- Attempts ATC set aside because they went quiet while they were the one to ship; aside until their agent acts again.
+CREATE TABLE IF NOT EXISTS task_stalls(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
+
 -- ATC's own latest pick per task, so an attempt sent around by another landing keeps the task a while (issue #19).
 CREATE TABLE IF NOT EXISTS task_leaders(task TEXT PRIMARY KEY, fork TEXT NOT NULL, at INTEGER NOT NULL);
 

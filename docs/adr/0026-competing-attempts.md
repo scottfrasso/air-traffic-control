@@ -45,6 +45,19 @@ if they didn't conflict, which ships the task twice.
   winner (one per head, winner and reason; resolved when it no longer holds), and `request_land` refuses it.
   It comes after the PR's own checks in the sequence and the gate: a red attempt hears that it fails typecheck first.
   An attempt that stands down is never "ahead" of a rival in HOLD or the gate (it won't land), as for REVIEW.
+- **A quiet winner hands over** (2026-10-15). The attempt that ships (ATC's pick or a person's) must show signs of
+  life: a push, a `request_land` or a `declare_intent` (table `fork_activity`; reads like `get_clearance` don't count).
+  If it shows none for `stallSeconds` (default 15 min, per baseline: `POST /settings {"stallSeconds": n}`, 10 s to a
+  day), counted from when it became the one to ship, ATC sets it aside and compares the rest again, so an agent that
+  stopped can't stall the others. Only once its checks are in (they're ATC's job, not the agent's).
+  - It gets STAND DOWN with basis `stalled` ("…hasn't pushed, asked to land or declared an intent for 15 min, so PR4
+    gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
+  - Table `task_stalls` remembers when: it stays aside until its agent acts again. Without it, the heir becoming
+    ATC's pick would restart the quiet one's clock and the two would swap back and forth.
+  - When it acts again (any push or land request), it competes like any attempt; if it is still the better one, it
+    ships. The heir's flight log says `ATC-Chosen-Over: PR3 (PR3 went quiet for 15 min)`.
+  - A winner waiting in REVIEW whose agent keeps polling `request_land` (as the demo's does) isn't quiet; one whose
+    agent stopped is, and hands over like any other.
 - **After the winner lands**, the attempts that were in flight stand down **for good** ("PR2 already landed this
   task …"), shown even over GO AROUND, since rebasing changes nothing. The landing sends them neither a go-around nor
   "stay in line", and ATC doesn't re-check them then or later (other landings, pushes to main, the stuck-check
@@ -70,9 +83,8 @@ if they didn't conflict, which ships the task twice.
 - Best-of-N runs need nothing but a shared `task`: ATC picks and says why; nothing ships twice.
 - A green attempt can wait for its rival's checks (bounded: checks always end, ADR-0021).
 - Identity is not enforced for `choose`, as for reviews (ADR-0005): `by` is a label.
-- Nothing times out a winner that stalls: if the chosen PR's agent stops, or it waits in REVIEW, the others stand
-  down until it lands, is abandoned, or a person picks another. A PR that names a task only after it landed isn't
-  stopped either (`landedBy` tells it); both are left to the agents and people, not guessed by ATC.
+- A winner whose agent stopped hands over after `stallSeconds` (above), so the others wait at most that long. A PR
+  that names a task only after it landed isn't stopped (`landedBy` tells it); that is left to the agents.
 - A loser that keeps pushing makes the winner wait again for each push's checks (each wait is bounded). Not
   prevented: a later push may make it the better attempt, which is the point of comparing.
 - With no intent naming a task (the default), nothing about attempts is computed: one meta read (`tasks_seen`,
@@ -85,4 +97,5 @@ if they didn't conflict, which ships the task twice.
 - The verdicts are recomputed from state on every read; the stand-down signals are synced when state is flushed
   (and on a refused landing or a pick), so they can lag the clearance by the 120 ms flush delay.
 - `./demo/run.sh --attempts [--browser]` runs it end to end: two attempts, STAND DOWN, a pick (in a real browser with
-  `--browser`), the landing and the git note.
+  `--browser`), the landing and the git note; then a second task whose pick goes quiet (`stallSeconds` 20) and
+  hands over by itself.
