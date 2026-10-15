@@ -395,8 +395,9 @@ export class Coordinator extends DurableObject<Env> {
     // while a Workflow is being created must not be overwritten by a decision made on the old state.
     const restarts: Array<{ name: string; sha: string; kind: "push" | "recheck"; attempt: number }> = [];
     const goAround = this.goAroundMap(); // sent around on purpose and not re-checked (onLanded): a new push decides
+    const finals = this.finalLosers(); // can't land: nothing to check until they push or leave the task
     for (const f of this.activeForks()) {
-      if (goAround.has(f.name)) continue;
+      if (goAround.has(f.name) || finals.has(f.name)) continue;
       const s = stuckCheck(f, runs.get(f.name), head, now);
       if (!s) continue;
       if ("giveUp" in s) {
@@ -492,7 +493,7 @@ export class Coordinator extends DurableObject<Env> {
     const row = this.fork(fork);
     if (!row || row.status !== "active") throw new Error(`unknown or inactive fork ${fork}`);
     const conflicts = intentConflicts(this.snapshot(), fork, files, symbols);
-    const key = task === undefined ? (this.tasks().get(fork) ?? null) : normalizeTask(task);
+    const key = task === undefined ? (this.anyTasks() ? (this.tasks().get(fork) ?? null) : null) : normalizeTask(task);
     const before = this.attemptVerdicts().get(fork);
     this.sql.exec(
       "INSERT INTO intents(fork, description, files, symbols, created_at, task) VALUES (?, ?, ?, ?, ?, ?)",
@@ -602,7 +603,8 @@ export class Coordinator extends DurableObject<Env> {
 
   /** Main moved: re-verify every waiting PR against the new main (no rebase needed unless it no longer fits). */
   private async recheckAll(except: Set<string>) {
-    const due = forksToRecheck(this.activeForks(), this.meta("baseline_head") ?? "", except);
+    // Final losers can't land (issue #19): re-checking them on every main move is wasted work (review of #45).
+    const due = forksToRecheck(this.activeForks(), this.meta("baseline_head") ?? "", new Set([...except, ...this.finalLosers()]));
     // Mark them all before the first await; then start each only if nothing changed meanwhile (a result or a push).
     for (const f of due) this.sql.exec("UPDATE forks SET check_status = 'pending' WHERE name = ?", f.name);
     for (const { name, head_sha } of due) {
@@ -763,8 +765,15 @@ export class Coordinator extends DurableObject<Env> {
     return forks.map((f) => {
       const task = tasks.get(f.name)!;
       const others = new Set((conflicts.get(f.name) ?? []).map((c) => c.other).filter((o) => tasks.get(o) !== task && this.fork(o)?.status === "active"));
+      // When it started naming this task: the oldest intent in its latest unbroken run of intents naming it.
+      const run = this.sql.exec<{ task: string | null; created_at: number }>("SELECT task, created_at FROM intents WHERE fork = ? ORDER BY id DESC", f.name).toArray();
+      let since = f.created_at;
+      for (const i of run) {
+        if (i.task !== task) break;
+        since = i.created_at;
+      }
       return {
-        fork: f, task, conflicts: others.size,
+        fork: f, task, conflicts: others.size, since,
         breaking: count("SELECT count(*) AS n FROM symbol_changes WHERE fork = ? AND change IN ('signature_changed', 'removed')", f.name),
         symbols: count("SELECT count(*) AS n FROM symbol_changes WHERE fork = ?", f.name),
         files: count("SELECT count(*) AS n FROM touched WHERE fork = ?", f.name),
@@ -800,7 +809,12 @@ export class Coordinator extends DurableObject<Env> {
     });
   }
 
-  /** Tell each attempt that stands down, once per (head, winner, reason); resolve the notes that no longer hold. */
+  /** PRs that stand down for good (another attempt at their task landed): they can't land, so ATC doesn't check them. */
+  private finalLosers(): Set<string> {
+    return new Set([...standDowns(this.attemptVerdicts())].filter(([, v]) => v.final).map(([f]) => f));
+  }
+
+  /** Tell each attempt that stands down, once per (head, winner, basis); resolve the notes that no longer hold. */
   private syncAttemptSignals() {
     if (!this.anyTasks()) return; // stand_down signals exist only once some intent named a task
     const verdicts = this.attemptVerdicts();
@@ -814,7 +828,7 @@ export class Coordinator extends DurableObject<Env> {
     }
     const open = this.sql.exec<{ id: number; fork: string; dedupe_key: string }>("SELECT id, fork, dedupe_key FROM signals WHERE kind = 'stand_down' AND resolved_at IS NULL").toArray();
     const keys = new Map<string, string>();
-    for (const [fork, v] of down) keys.set(fork, `stand_down:${fork}:${this.fork(fork)?.head_sha ?? ""}:${v.winner}:${v.final ? "final" : v.reason.slice(0, 60)}`);
+    for (const [fork, v] of down) keys.set(fork, `stand_down:${fork}:${this.fork(fork)?.head_sha ?? ""}:${v.winner}:${v.basis}`);
     // A note stays open while its task is still contested and nothing replaced it: when the winner pushes again, the
     // loser is briefly undecided (waiting, or its pair checks are out), and re-opening the note each time is just noise.
     const contested = new Set(this.attempts().filter((x) => x.fork.head_sha !== x.fork.base_sha).map((x) => x.task).filter((t, i, all) => all.indexOf(t) !== i));
@@ -840,16 +854,19 @@ export class Coordinator extends DurableObject<Env> {
     const task = this.tasks().get(fork);
     if (!task) return refuse(409, `${prLabel(fork)} hasn't named a task (declare_intent with a task)`);
     const verdict = this.attemptVerdicts().get(fork);
-    if (verdict?.kind === "stand_down" && verdict.final) return refuse(409, verdict.reason);
+    if (verdict?.kind === "stand_down" && verdict.final) return refuse(409, this.relabel(verdict.reason));
     // Only attempts with pushed changes count, as in attemptVerdicts: a pick against one with nothing pushed would do nothing.
-    if (this.attempts().filter((a) => a.task === task && a.fork.head_sha !== a.fork.base_sha).length < 2 || row.head_sha === row.base_sha)
+    // Final losers from an earlier landing don't compete either (review of #45).
+    const verdicts = this.attemptVerdicts();
+    const live = (a: Attempt) => a.task === task && a.fork.head_sha !== a.fork.base_sha && !(verdicts.get(a.fork.name)?.kind === "stand_down" && (verdicts.get(a.fork.name) as { final: boolean }).final);
+    if (this.attempts().filter(live).length < 2 || row.head_sha === row.base_sha)
       return refuse(409, `${prLabel(fork)} has no other attempt at ${task} with pushed changes: nothing to choose`);
     // A landing in flight passed the gate with the old pick; changing it now would mislead the log (as for review).
     if (this.landingInProgress()) return refuse(409, "a landing is in progress; pick again in a few seconds");
     const who = by.trim().slice(0, 60) || "a person";
     this.sql.exec(
-      "INSERT INTO task_choices(task, winner, by, at, sha) VALUES (?, ?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at, sha = excluded.sha",
-      task, fork, who, Date.now(), row.head_sha,
+      "INSERT INTO task_choices(task, winner, by, at) VALUES (?, ?, ?, ?) ON CONFLICT(task) DO UPDATE SET winner = excluded.winner, by = excluded.by, at = excluded.at",
+      task, fork, who, Date.now(),
     );
     this.log("attempt.chosen", { task, by: who }, fork);
     this.touch();
@@ -1049,7 +1066,7 @@ export class Coordinator extends DurableObject<Env> {
     this.resolveSignals({ fork: winner.name });
     // Other attempts at the winner's task now stand down for good (issue #19): telling them to go around (rebase, fix,
     // push) or re-checking them would be wasted work, since they can't land (review of #45). They get a stand_down.
-    const finals = new Set([...standDowns(this.attemptVerdicts())].filter(([, v]) => v.final && v.winner === winner.name).map(([f]) => f));
+    const finals = this.finalLosers(); // every final loser, whoever won its task: none of them is told to stay in line
     for (const f of finals) this.resolveSignals({ fork: f, about_fork: winner.name });
     const split = afterLanding(
       winner.name,
@@ -1212,6 +1229,7 @@ export class Coordinator extends DurableObject<Env> {
     );
     await this.requeuePairs();
     await this.restartStuckChecks();
+    this.syncAttemptSignals(); // time alone can change a verdict (a sent-around pick's wait ends); one meta read if no tasks
     this.prune();
     if (this.notesPending()) this.ctx.waitUntil(this.writeNotes());
     return found;
@@ -1256,9 +1274,10 @@ export class Coordinator extends DurableObject<Env> {
   private checksAwaitingRestart(): boolean {
     const runs = new Map(this.sql.exec<CheckRun>("SELECT * FROM check_runs").toArray().map((r) => [r.fork, r]));
     const goAround = this.goAroundMap();
+    const finals = this.finalLosers();
     // Pending at any restart count: after the last restart, the alarm must still be up for the final give-up (review of #31).
     return this.activeForks().some(
-      (f) => !goAround.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || (f.check_status === "error" && checkRetriesLeft(f, runs.get(f.name)))),
+      (f) => !goAround.has(f.name) && !finals.has(f.name) && f.head_sha !== f.base_sha && (f.check_status === "pending" || (f.check_status === "error" && checkRetriesLeft(f, runs.get(f.name)))),
     );
   }
 

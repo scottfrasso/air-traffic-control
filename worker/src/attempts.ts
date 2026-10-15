@@ -21,19 +21,27 @@ export type Attempt = {
   conflicts: number;
   /** Set by attemptVerdicts: green on current main, pairs in, not sent around. */
   green?: boolean;
+  /** When this PR started naming this task (its first intent in the current run naming it); default: when it opened. */
+  since?: number;
 };
 
 /** What ATC says to one attempt. */
 export type AttemptVerdict =
-  /** It doesn't ship: `winner` does. `final`: the winner already landed, so nothing this PR does changes that. */
-  | { kind: "stand_down"; winner: string; reason: string; final: boolean }
+  /**
+   * It doesn't ship: `winner` does. `final`: the winner already landed, so nothing this PR does changes that.
+   * `basis`: what decided it ("final", "pick", or the compareAttempts step), stable while the counts in `reason` move.
+   */
+  | { kind: "stand_down"; winner: string; reason: string; final: boolean; basis: string }
   /** It's ahead, but another attempt is still being checked: wait for it, so the comparison is fair. */
   | { kind: "wait"; reason: string; on: string[] }
   /** It ships. `over`: the attempts it beat and why (for its flight log). */
   | { kind: "chosen"; over: Array<{ fork: string; reason: string }> };
 
-/** A person's pick for a task (table `task_choices`), for the winner's head at the time: a new push ends it. */
-export type TaskChoice = { task: string; winner: string; by: string; at: number; sha: string | null };
+/**
+ * A person's pick for a task (table `task_choices`). It holds across the picked PR's pushes (a go-around ATC asked for
+ * mustn't undo it) until someone picks again, or the picked PR is abandoned or leaves the task.
+ */
+export type TaskChoice = { task: string; winner: string; by: string; at: number };
 
 /**
  * ATC's pick for a task that an unrelated landing sent around keeps the task this long while it fixes the go-around,
@@ -131,9 +139,9 @@ export function attemptVerdicts(
     if (a.fork.status !== "active" || a.fork.head_sha === a.fork.base_sha) continue;
     // Only a landing while this PR was in flight competes with it: a task key reused later (a follow-up on the same
     // ticket) must not be blocked by last week's landing (review of #45).
-    const done = landed.filter((l) => l.task === a.task && l.landedAt >= a.fork.created_at).sort((x, y) => x.landedAt - y.landedAt)[0];
+    const done = landed.filter((l) => l.task === a.task && l.landedAt >= (a.since ?? a.fork.created_at)).sort((x, y) => x.landedAt - y.landedAt)[0];
     if (done) {
-      out.set(a.fork.name, { kind: "stand_down", winner: done.fork, final: true, reason: `${prLabel(done.fork)} already landed this task (${a.task}). Abandon this PR, or if it adds something, declare an intent with a new task and push.` });
+      out.set(a.fork.name, { kind: "stand_down", winner: done.fork, final: true, basis: "final", reason: `${prLabel(done.fork)} already landed this task (${a.task}). Abandon this PR, or if it adds something, declare an intent with a new task and push.` });
       continue;
     }
     byTask.set(a.task, [...(byTask.get(a.task) ?? []), a]);
@@ -144,8 +152,7 @@ export function attemptVerdicts(
     const group = members.map((a) => ({ ...a, green: isGreenNow(a.fork, ctx) }));
     const ranked = [...group].sort((x, y) => (compareAttempts(x, y).winner === x ? -1 : 1));
     const best = ranked[0]!;
-    // A pick is for the head the person saw: once the picked PR pushes again, ATC ranks again (review of #45).
-    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner && (c.sha === null || a.fork.head_sha === c.sha))).sort((x, y) => y.at - x.at)[0];
+    const choice = (ctx.choices ?? []).filter((c) => c.task === task && group.some((a) => a.fork.name === c.winner)).sort((x, y) => y.at - x.at)[0];
     if (choice) {
       const winner = group.find((a) => a.fork.name === choice.winner)!;
       const atc = (l: Attempt) => {
@@ -154,7 +161,7 @@ export function attemptVerdicts(
       };
       const over = group.filter((a) => a !== winner).map((l) => ({ fork: l.fork.name, reason: atc(l) }));
       for (const o of over)
-        out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.` });
+        out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, basis: "pick", reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.` });
       out.set(winner.fork.name, { kind: "chosen", over });
       continue;
     }
@@ -178,10 +185,10 @@ export function attemptVerdicts(
       continue;
     }
     if (!best.green) continue; // none is green: each just has to fix itself
-    const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, reason: compareAttempts(best, l).reason }));
+    const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, ...compareAttempts(best, l) }));
     for (const o of over)
-      out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });
-    out.set(best.fork.name, { kind: "chosen", over });
+      out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, basis: o.step, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });
+    out.set(best.fork.name, { kind: "chosen", over: over.map((o) => ({ fork: o.fork, reason: o.reason })) });
   }
   return out;
 }

@@ -46,16 +46,19 @@ if they didn't conflict, which ships the task twice.
   An attempt that stands down is never "ahead" of a rival in HOLD or the gate (it won't land), as for REVIEW.
 - **After the winner lands**, the attempts that were in flight stand down **for good** ("PR2 already landed this
   task …"), shown even over GO AROUND, since rebasing changes nothing. The landing sends them neither a go-around nor
-  "stay in line", and doesn't re-check them; they get a `stand_down` signal. Only a landing after the PR was opened
-  counts, so a task key reused later (a follow-up on the same ticket) isn't blocked by an old landing.
+  "stay in line", and ATC doesn't re-check them then or later (other landings, pushes to main, the stuck-check
+  restarts); they get a `stand_down` signal. Only a landing after the PR started naming the task counts (its oldest
+  intent in its latest unbroken run of intents naming it), so a task key reused later, by a new PR or an old one, for
+  a follow-up on the same ticket isn't blocked by an old landing.
   The winner's CLEARED reason says "Chosen over PR1 (same task)" when the loser conflicts with it; a PR outside the
   task is never credited with beating a loser, and FOLLOW doesn't list losers as waiting for it.
   If a final loser declares a new task, ATC re-checks it on current main right away (the landing had skipped it). To keep a loser's work (it adds something), the agent declares an
   intent with a new task and pushes; then it is an ordinary PR again.
 - **A person can override:** `POST /choose {fork, by}` or the dashboard's PICK button on a STAND DOWN row (with a
-  key, never on the public replay). Table `task_choices(task, winner, by, at, sha)` keeps the latest pick per task, for the
-  head the person saw: once the picked PR pushes again, ATC ranks again. The chosen PR still passes every other check.
-  A pick needs another attempt with pushed changes. Refused (409) for a PR with no task, the only attempt, a task that has
+  key, never on the public replay). Table `task_choices(task, winner, by, at)` keeps the latest pick per task. It holds across
+  the picked PR's pushes (a go-around fix ATC asked for mustn't undo it) until someone picks again, or the picked PR
+  is abandoned or leaves the task: a person's pick is a person's to change. The chosen PR still passes every other
+  check. A pick needs another live attempt with pushed changes (final losers of an earlier landing don't count). Refused (409) for a PR with no task, the only attempt, a task that has
   already landed, or during a landing. When the pick differs from ATC's ranking the reason says so ("picked by … over
   ATC's ranking (which preferred PR2: …)"); when it agrees, ATC's reason is kept with "confirmed by …".
 - **Flight log:** the winner's note gets `ATC-Chosen-Over: PR1 (<reason>)` (up to three). `stand_down` is a story
@@ -71,7 +74,9 @@ if they didn't conflict, which ships the task twice.
   set by `declare_intent`). Once a baseline has seen a task, each read groups its intents by fork (indexed); fine at
   demo scale, worth a cache for very long-lived baselines.
 - A loser's `stand_down` note stays open while its task is contested and nothing replaced it, so a winner's new push
-  doesn't resolve and re-open it.
+  doesn't resolve and re-open it. Its key is (loser head, winner, basis: final, pick or the ranking step), not the
+  counts in the reason, which update the note in place.
+- The reconcile alarm re-syncs the notes too, since time alone can change a verdict (a sent-around pick's wait ends).
 - The verdicts are recomputed from state on every read; the stand-down signals are synced when state is flushed
   (and on a refused landing or a pick), so they can lag the clearance by the 120 ms flush delay.
 - `./demo/run.sh --attempts [--browser]` runs it end to end: two attempts, STAND DOWN, a pick (in a real browser with
