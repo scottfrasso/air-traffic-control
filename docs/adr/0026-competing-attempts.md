@@ -51,9 +51,17 @@ if they didn't conflict, which ships the task twice.
   agent that has really stopped goes quiet. If it shows none for `stallSeconds` (default 15 min, per baseline:
   `POST /settings {"stallSeconds": n}`, 10 s to a day), ATC sets it aside and compares the rest again, so an agent
   that stopped can't stall the others. The clock starts at the latest of: its last sign of life, when it became the
-  one to ship, and when its current head's checks last finished (`fork_checked`; check time is ATC's, not the
-  agent's), and it only runs once its checks are in. A DO from before `fork_activity` falls back to when the head
-  was seen, landing asked for, or an intent declared. A person picking a set-aside PR gives it a fresh start.
+  one to ship, and when its current head's checks first finished (`fork_checked`, once per head: check time is ATC's,
+  not the agent's; a re-check after another landing pauses the clock but doesn't restart it, or a stopped winner in a
+  busy repo would never hand over), and it only runs once its checks are in. A DO from before `fork_activity` counts
+  every PR in flight as alive at its first start with this code (once), and falls back to when the head was seen,
+  landing asked for, or an intent declared. A person picking a set-aside PR gives it a fresh start.
+  - Only the PR's own agent should poll its clearance and signals: any caller naming the fork counts as its agent
+    (identity isn't enforced, ADR-0005). A history read (`get_signals` with resolved ones) doesn't count. Polls are
+    recorded only once a baseline has seen a task, and at most every `min(30 s, stallSeconds / 10)`.
+  - Losers are told to keep polling ("…if PR2's agent goes quiet for 15 min, the task can pass to this PR"); the
+    heir gets a `handover` signal. The reconcile alarm stays up while a task is contested, past the stall window, so
+    the handover happens on time even if nobody calls. `stallSeconds` is in `/state`.
   - It gets STAND DOWN with basis `stalled` ("…its agent showed no sign of life (a push, a land request, an intent or a
     clearance check) for 15 min, so PR4 gets the task. Push or ask to land to compete again."), and the event `attempt.stalled` (once per stall).
   - Table `task_stalls` remembers when: it stays aside until its agent acts again. Without it, the heir becoming

@@ -48,11 +48,13 @@ CREATE INDEX IF NOT EXISTS intents_by_fork ON intents(fork, id);
 -- A person's pick among competing attempts at one task (issue #19, ADR-0026); the latest per task counts.
 CREATE TABLE IF NOT EXISTS task_choices(task TEXT PRIMARY KEY, winner TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
 
--- Each PR's agent's last sign of life: a push, a land request or an intent (issue #19: a quiet winner hands over).
+-- Each PR's agent's last sign of life: a push, a land request, an intent, or polling its own clearance or signals
+-- (issue #19: a quiet winner hands over).
 CREATE TABLE IF NOT EXISTS fork_activity(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
 
--- When each PR's current head last got a check result: a quiet winner's clock doesn't count ATC's own check time.
-CREATE TABLE IF NOT EXISTS fork_checked(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
+-- When each PR's current head first got a check result: a quiet winner's clock doesn't count ATC's own check time.
+-- Once per head: re-checks after other landings mustn't keep restarting a stopped winner's clock.
+CREATE TABLE IF NOT EXISTS fork_checked(fork TEXT PRIMARY KEY, at INTEGER NOT NULL, sha TEXT);
 
 -- Attempts ATC set aside because they went quiet while they were the one to ship; aside until their agent acts again.
 CREATE TABLE IF NOT EXISTS task_stalls(fork TEXT PRIMARY KEY, at INTEGER NOT NULL);
@@ -114,4 +116,5 @@ CREATE TABLE IF NOT EXISTS event_log(
 export const COLUMNS: Array<{ table: string; column: string; ddl: string }> = [
   { table: "forks", column: "check_main_conflict", ddl: "ALTER TABLE forks ADD COLUMN check_main_conflict INTEGER NOT NULL DEFAULT 0" },
   { table: "intents", column: "task", ddl: "ALTER TABLE intents ADD COLUMN task TEXT" },
+  { table: "fork_checked", column: "sha", ddl: "ALTER TABLE fork_checked ADD COLUMN sha TEXT" },
 ];

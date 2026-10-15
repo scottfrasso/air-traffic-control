@@ -216,6 +216,10 @@ function isStalled(task: string, a: Attempt, ctx: VerdictContext): boolean {
   return now - last >= (ctx.stallMs ?? STALL_MS);
 }
 
+/** Tells a loser not to quit: the task comes to it if the winner's agent stops (review of #48). */
+const standBy = (w: Attempt, ctx: VerdictContext) =>
+  ` Keep polling get_clearance: if ${prLabel(w.fork.name)}'s agent goes quiet for ${duration(ctx.stallMs ?? STALL_MS)}, the task can pass to this PR.`;
+
 const quietReason = (q: Attempt, ctx: VerdictContext) => `${prLabel(q.fork.name)} went quiet for ${duration(ctx.stallMs ?? STALL_MS)}`;
 
 /** One task's verdicts among `group` (2+ attempts), and the attempt that ships, if one does now. */
@@ -233,7 +237,7 @@ function decideTask(task: string, group: Attempt[], ctx: VerdictContext): { verd
     };
     const over = group.filter((a) => a !== winner).map((l) => ({ fork: l.fork.name, reason: atc(l) }));
     for (const o of over)
-      out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, basis: "pick", reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.` });
+      out.set(o.fork, { kind: "stand_down", winner: winner.fork.name, final: false, basis: "pick", reason: `Same task (${task}) as ${prLabel(winner.fork.name)}, which ships: ${o.reason}.${standBy(winner, ctx)}` });
     out.set(winner.fork.name, { kind: "chosen", over });
     return { verdicts: out, winner };
   }
@@ -259,7 +263,7 @@ function decideTask(task: string, group: Attempt[], ctx: VerdictContext): { verd
   if (!best.green) return { verdicts: out }; // none is green: each just has to fix itself
   const over = ranked.slice(1).map((l) => ({ fork: l.fork.name, ...compareAttempts(best, l) }));
   for (const o of over)
-    out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, basis: o.step, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.` });
+    out.set(o.fork, { kind: "stand_down", winner: best.fork.name, final: false, basis: o.step, reason: `Same task (${task}) as ${prLabel(best.fork.name)}, which ships: ${o.reason}.${standBy(best, ctx)}` });
   out.set(best.fork.name, { kind: "chosen", over: over.map((o) => ({ fork: o.fork, reason: o.reason })) });
   return { verdicts: out, winner: best };
 }

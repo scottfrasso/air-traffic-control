@@ -560,10 +560,95 @@ test("the Coordinator: an agent that polls its clearance while it holds or waits
   age(a, Y, 31_000);
   await a.co.getClearance(Y); // Y's agent polls (e.g. while told to HOLD): a sign of life
   assert.equal((await row(a, X)).clearance, "stand_down");
-  // Checks that ran longer than stallSeconds: the clock starts when they finished, not at the push.
+});
+
+/** A check result for `fork` at `sha` on `main`, through the Coordinator's real path (applySingle). */
+const checked = (a: ReturnType<typeof airport>, fork: string, sha: string, main: string) =>
+  a.co.applySingle(JSON.stringify({ repo: fork, forkSha: sha, baseHead: main, result: { ok: true, errors: [], output: "" }, mainConflict: false, timings: [] }));
+
+test("the Coordinator: the clock starts when a new head's checks finish, not when it was pushed", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  // Y pushes y2; its checks take longer than stallSeconds.
+  await a.push(Y, "y2");
+  a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, 'x1', 'y2', 'clean', '{}', 1) ON CONFLICT(fork_a, fork_b) DO UPDATE SET sha_b = 'y2'", X, Y);
+  a.q("UPDATE forks SET processed_sha = 'y2' WHERE name = ?", Y);
   age(a, Y, 31_000);
-  a.q("INSERT OR REPLACE INTO fork_checked(fork, at) VALUES (?, ?)", Y, Date.now());
+  await checked(a, Y, "y2", "main0"); // done now
+  assert.equal((await row(a, Y)).clearance, "cleared");
   assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+test("the Coordinator: a re-check after another landing doesn't restart a stopped winner's clock", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  await checked(a, Y, "y1", "main0"); // first result for y1
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  // Another PR landed: main moved, and Y is re-checked on it (same head) a moment later.
+  a.heads.set("base-repo", "main1");
+  await a.co.onPush("base-repo", "main1", "reconcile");
+  await checked(a, X, "x1", "main1");
+  await checked(a, Y, "y1", "main1");
+  assert.equal((await row(a, X)).clearance, "cleared"); // Y still hands over
+  assert.equal((await row(a, Y)).clearance, "stand_down");
+});
+
+test("the Coordinator: get_signals polls keep an agent alive; history reads don't", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  await a.co.getSignals(Y, true); // someone reading its history
+  assert.equal((await row(a, X)).clearance, "cleared");
+  age(a, Y, 0);
+  a.q("DELETE FROM task_stalls");
+  a.q("UPDATE fork_activity SET at = at - 31000 WHERE fork = ?", Y);
+  await a.co.getSignals(Y); // its agent polling
+  assert.equal((await row(a, X)).clearance, "stand_down");
+});
+
+test("the Coordinator: the heir is told it has the task; losers are told to keep polling", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  assert.match((await row(a, X)).reason, /Keep polling get_clearance: if PR2's agent goes quiet for 30 s, the task can pass to this PR\./);
+  (a.co as unknown as { flush(): void }).flush();
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush();
+  const s = a.q<{ message: string }>("SELECT message FROM signals WHERE fork = ? AND kind = 'handover'", X);
+  assert.equal(s.length, 1);
+  assert.match(s[0]!.message, /PR2 went quiet, so this PR now has the task \(t\)/);
+});
+
+test("polls cost nothing until some intent names a task", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(F);
+  await a.co.getClearance(F);
+  await a.co.getSignals(F);
+  assert.equal(a.q("SELECT 1 FROM fork_activity").length, 0);
+});
+
+test("a DO from before signs of life were recorded counts its PRs in flight as alive, once", () => {
+  const a = airport("base-repo", {}, (db) => {
+    db.exec("CREATE TABLE forks(name TEXT PRIMARY KEY, agent TEXT NOT NULL, pr INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, created_at INTEGER NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, processed_sha TEXT NOT NULL, diff_lines INTEGER NOT NULL DEFAULT 0, subscription_id TEXT, remote TEXT NOT NULL, land_requested_at INTEGER, landed_at INTEGER, check_status TEXT NOT NULL DEFAULT 'unknown', check_sha TEXT, check_base TEXT, check_detail TEXT)");
+    db.exec("INSERT INTO forks(name, agent, status, created_at, base_sha, head_sha, processed_sha, remote) VALUES ('old--pr1', 'a', 'active', 1, 'b', 'h', 'h', ''), ('old--pr2', 'b', 'landed', 1, 'b', 'h', 'h', '')");
+  });
+  assert.deepEqual(a.q<{ fork: string }>("SELECT fork FROM fork_activity").map((r) => r.fork), ["old--pr1"]);
+  assert.equal(a.meta("activity_seeded"), "1");
+});
+
+test("the reconcile alarm stays up while a task is contested, past the stall window", async () => {
+  const { a } = await twoAttempts();
+  await a.co.setStallSeconds(900);
+  a.q("UPDATE meta SET value = ? WHERE key = 'last_activity'", String(Date.now() - 11 * 60_000)); // idle 11 min
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 0);
+  a.q("UPDATE meta SET value = ? WHERE key = 'last_activity'", String(Date.now() - 17 * 60_000)); // past 15 min + 1
+  await a.co.alarm();
+  assert.equal(a.events("reconcile.paused").length, 1);
 });
 
 test("the Coordinator: a person picking a set-aside PR gives it a fresh start", async () => {

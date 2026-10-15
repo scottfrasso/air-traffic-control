@@ -63,6 +63,8 @@ export interface CoordinatorState {
   approach: string[];
   /** Review gate on (issue #16): PRs need an approval at their head before they're cleared. */
   reviewRequired: boolean;
+  /** Competing attempts (issue #19): how long the attempt that ships may be quiet before the next one gets its task. */
+  stallSeconds: number;
   /** PRs not approved at their current head (gate on), whatever their clearance: the dashboard offers APPROVE. */
   awaitingReview: string[];
   /** ATC landing sequence with one clearance + reason per PR. */
