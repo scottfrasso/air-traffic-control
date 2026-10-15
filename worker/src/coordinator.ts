@@ -514,8 +514,9 @@ export class Coordinator extends DurableObject<Env> {
     // Who else is on this task: the agent learns it competes before it writes any code.
     const rivals = key ? this.attempts().filter((a) => a.task === key && a.fork.name !== fork).map((a) => a.fork.name) : [];
     // PRs that already landed this task: a late duplicate learns it before writing code (review of #45).
+    const tasks = key ? this.tasks() : new Map<string, string | null>();
     const landedBy = key
-      ? this.sql.exec<{ name: string }>("SELECT name FROM forks WHERE status = 'landed' ORDER BY landed_at").toArray().map((r) => r.name).filter((n) => this.tasks().get(n) === key)
+      ? this.sql.exec<{ name: string }>("SELECT name FROM forks WHERE status = 'landed' ORDER BY landed_at").toArray().map((r) => r.name).filter((n) => tasks.get(n) === key)
       : [];
     return { fork, recorded: true, overlaps: conflicts, ...(key ? { task: key, sameTask: rivals, landedBy } : {}) };
   }

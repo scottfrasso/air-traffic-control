@@ -364,6 +364,7 @@
       case "check.pair": return d.status === "semantic_conflict" ? [`${pr(d.a)} x ${pr(d.b)}: conflict${d.symbol ? ` on ${d.symbol}` : ""}`, "bad"] : null;
       case "land.merged": return [`${who} landed`, "good"];
       case "land.denied": return [`${who} landing denied`, "bad"];
+      case "land.failed": return [`${who} landing failed, retrying`, "bad"];
       case "signal.rebase_required": return [`${who} told to rebase`, "bad"];
       case "signal.stand_down": return [`${who} stands down (same task)`, ""];
       case "attempt.chosen": return [`${who} picked for ${d.task || "its task"}`, "good"];

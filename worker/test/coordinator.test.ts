@@ -437,3 +437,29 @@ test("request_land: a land run that throws (container restarting) is a retry, lo
     input.mode === "land" ? (a.heads.set("base-repo", "landed-a1"), { mode: "land", landed: true, landedSha: "landed-a1", forkHead: "a1", merged: true }) : { mode: "notes", written: [] };
   assert.equal((await a.co.requestLand(F)).landed, true); // and the retry lands
 });
+
+test("request_land: if the land run pushed main and then threw, the next requests re-check and record the landing once (ADR-0018)", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(F);
+  await a.push(F, "a1");
+  a.q("UPDATE forks SET processed_sha = 'a1', check_status = 'green', check_sha = 'a1', check_base = 'main0'");
+  const land = a.checker;
+  a.checker = async () => {
+    a.heads.set("base-repo", "landed-a1"); // the push reached main...
+    throw new Error("connection reset"); // ...but the answer was lost
+  };
+  assert.equal((await a.co.requestLand(F)).retry, true);
+  a.checker = land;
+  // Next request: ATC reads the new main as an outside move and re-checks the PR on it.
+  const r2 = await a.co.requestLand(F);
+  assert.equal(r2.retry, true);
+  assert.equal(a.meta("baseline_head"), "landed-a1");
+  assert.ok(a.pipelines.some((p) => p.params.fork === F && p.params.kind === "recheck"));
+  a.q("UPDATE forks SET check_status = 'green', check_base = 'landed-a1'"); // the re-check: it's already in main, so it fits
+  const r3 = await a.co.requestLand(F);
+  assert.equal(r3.landed, true, r3.reason);
+  assert.equal(a.events("land.merged").length, 1);
+  assert.equal(a.q("SELECT 1 FROM flight_logs WHERE fork = ?", F).length, 1);
+});

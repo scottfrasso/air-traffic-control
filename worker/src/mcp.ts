@@ -40,7 +40,8 @@ function createServer(env: Env) {
         "Tell other agents what you plan to touch before you start. Returns any in-flight work (other forks' changes and intents) that overlaps. " +
         "Overlaps are context, not commands: decide yourself whether to proceed, coordinate, or wait. " +
         "If you were given a task id (a ticket, or the prompt's id), pass it as `task`: PRs naming the same task are competing attempts, " +
-        "and once all are checked ATC picks one to ship and tells the others to stand down, with why.",
+        "and once all are checked ATC picks one to ship and tells the others to stand down, with why. The answer lists `sameTask` (other PRs on it) and " +
+        "`landedBy` (PRs that already landed it: if that isn't empty, the task has shipped; stop, or name a new task for what yours adds).",
       inputSchema: z.object({
         fork: z.string().describe("Your fork name, from start_work"),
         description: z.string().describe("One line: what you are about to do"),
