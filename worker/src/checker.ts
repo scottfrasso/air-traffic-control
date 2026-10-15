@@ -100,7 +100,23 @@ export class Checker extends DurableObject<Env> {
     const out = await proc.output();
     const stdout = decoder.decode(out.stdout);
     const line = stdout.split("\n").find((l) => l.startsWith("@@RESULT "));
-    if (!line) throw new Error(`checker produced no result (exit ${out.exitCode}): ${decoder.decode(out.stderr).slice(0, 500)}`);
+    if (!line) {
+      // The END of stderr says where it stopped (check.ts writes its steps and lock waits there). After the hard
+      // timeout (exit 124), also list what is still running in the container: the hung process is in it.
+      const stderr = decoder.decode(out.stderr).trim();
+      let ps = "";
+      if (out.exitCode === 124) {
+        try {
+          const p = await (await c.exec(["ps", "-eo", "pid,ppid,stat,etimes,args", "--sort=start_time"], { env: { PATH: "/usr/local/bin:/usr/bin:/bin" } })).output();
+          ps = decoder.decode(p.stdout).split("\n").filter((l) => !/\bps -eo\b/.test(l)).slice(-15).join(" | ").slice(0, 1200);
+        } catch (err) {
+          ps = `ps failed: ${(err as Error).message}`;
+        }
+      }
+      const detail = `checker produced no result (exit ${out.exitCode}): ${stderr.slice(-900)}${ps ? ` || ps: ${ps}` : ""}`;
+      console.error(detail);
+      throw new Error(detail);
+    }
     return line.slice("@@RESULT ".length);
   }
 }

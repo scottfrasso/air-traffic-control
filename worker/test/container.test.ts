@@ -238,3 +238,42 @@ test("notes: flight logs are written to refs/notes/atc, and a retry doesn't dupl
     s.cleanup();
   }
 });
+
+test("a run waiting on the git lock says on stderr who holds it (so a hard timeout shows why)", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    await s.check({ mode: "single", repo: s.c, baseline: s.base }); // warm: the cache repo exists
+    // A live process holds the lock for 4 s, then exits (a dead owner's lock is broken).
+    const holder = execFile("sleep", ["4"]);
+    const lock = join(s.cache, "git.lock");
+    mkdirSync(lock);
+    writeFileSync(join(lock, "pid"), String(holder.pid));
+    const { stdout, stderr } = await run(process.execPath, ["--experimental-strip-types", "--no-warnings", CHECK], {
+      env: { CHECK_INPUT: JSON.stringify({ mode: "single", repo: s.a, baseline: s.base }), ATC_CACHE: s.cache, ATC_WORK: join(s.root, "work"), PATH: `${dirname(process.execPath)}:${TSC_BIN}:${GIT_DIR}:/usr/bin:/bin`, HOME: s.root },
+    });
+    assert.match(stderr, new RegExp(`waiting \\d+s for /git\\.lock held by pid ${holder.pid} \\(\\d+s old, alive\\)`));
+    assert.match(stderr, /step fetch baseline/);
+    assert.equal(JSON.parse(stdout.split("\n").find((l) => l.startsWith("@@RESULT "))!.slice(9)).result.ok, true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a tsc that hangs is killed and reported, and its outcome isn't cached", { timeout: 60_000 }, async () => {
+  const s = airspace();
+  try {
+    const bin = join(s.root, "hang-bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "tsc"), "#!/bin/sh\nsleep 30\n", { mode: 0o755 });
+    const { stdout } = await run(process.execPath, ["--experimental-strip-types", "--no-warnings", CHECK], {
+      env: { CHECK_INPUT: JSON.stringify({ mode: "single", repo: s.c, baseline: s.base }), ATC_CACHE: s.cache, ATC_WORK: join(s.root, "work"), ATC_TSC_TIMEOUT_MS: "1500", PATH: `${bin}:${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: s.root },
+    });
+    const r = JSON.parse(stdout.split("\n").find((l) => l.startsWith("@@RESULT "))!.slice(9));
+    assert.equal(r.result.ok, false);
+    assert.match(r.result.output, /tsc did not finish within 1\.5 s and was killed/);
+    // Not cached: with a working tsc, the same tree passes.
+    assert.equal((await s.check({ mode: "single", repo: s.c, baseline: s.base })).result.ok, true);
+  } finally {
+    s.cleanup();
+  }
+});

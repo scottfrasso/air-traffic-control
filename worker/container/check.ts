@@ -22,6 +22,11 @@ type Input =
   | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
 
 const startedAt = Date.now(); // before the startup git lock, so "total" includes every wait (review of #36)
+/**
+ * Progress on stderr, so a run killed by the hard timeout still says where it was: the Checker DO puts the end of
+ * stderr in its error (the hang hunt of 2026-10-15). stdout carries only the result line.
+ */
+const progress = (msg: string) => { try { process.stderr.write(`@@ ${Date.now() - startedAt}ms ${msg}\n`); } catch { /* closed */ } };
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
 // Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
 // fork and baseline commit, so each check fetches only deltas; typecheck results keyed by git TREE hash;
@@ -93,6 +98,8 @@ function withLock<T>(lock: string, fn: () => T): T {
   const depth = held.get(lock) ?? 0;
   if (depth > 0) { held.set(lock, depth + 1); try { return fn(); } finally { held.set(lock, depth); } }
   const mine = `${lock}.${process.pid}`;
+  const waitStart = Date.now();
+  let reported = 0;
   for (;;) {
     rmSync(mine, { recursive: true, force: true });
     mkdirSync(mine);
@@ -106,6 +113,12 @@ function withLock<T>(lock: string, fn: () => T): T {
       rmSync(mine, { recursive: true, force: true }); // don't leave it behind if the hard timeout kills us while waiting
       const owner = lockOwner(lock);
       if (owner) breakIfStale(lock, owner);
+      // Waiting long for a lock is the first suspect in a hung run: say who holds it (then every 30 s).
+      const waited = Date.now() - waitStart;
+      if (waited > 2_000 && waited - reported >= (reported ? 30_000 : 0)) {
+        reported = waited;
+        progress(`waiting ${Math.round(waited / 1000)}s for ${lock.replace(CACHE, "")} held by pid ${owner?.pid ?? "?"} (${owner ? `${Math.round(owner.age / 1000)}s old, ${alive(owner.pid) ? "alive" : "dead"}` : "gone"})`);
+      }
       sleep(20);
     }
   }
@@ -136,7 +149,7 @@ withGitLock(() => {
 });
 let dir = repoDir; // git commands run here; typechecks run in throwaway worktrees
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
-const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
+const timed = <T,>(step: string, fn: () => T): T => { progress(`step ${step}`); const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
 function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
   // The subcommand: the first argument that isn't an option. Every `-c` value here contains "=", so it's skipped;
@@ -185,7 +198,7 @@ function buildMainInfo(baseSha: string, file: string): string | null {
   try {
     git(["worktree", "add", "-q", "--detach", wt, baseSha]);
     timed("build main incremental state", () => {
-      try { execFileSync("tsc", ["--noEmit", "-p", ".", "--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo"], { cwd: wt, stdio: "ignore" }); } catch { /* main may not typecheck; state is still useful */ }
+      try { execFileSync("tsc", ["--noEmit", "-p", ".", "--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo"], { cwd: wt, stdio: "ignore", timeout: TSC_TIMEOUT_MS, killSignal: "SIGKILL" }); } catch { /* main may not typecheck; state is still useful */ }
     });
     if (existsSync(join(wt, ".atc.tsbuildinfo"))) writeAtomic(file, readFileSync(join(wt, ".atc.tsbuildinfo")));
   } finally {
@@ -254,12 +267,18 @@ function runTypecheck(sha: string, label: string, buildInfo: string | null, cach
     let ok = true;
     let exit: number | null = 0;
     try {
-      output = execFileSync("tsc", args, { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      // Bounded below the hard timeout: a hung tsc fails this check with a reason (and isn't cached), instead of
+      // silently using up the whole run.
+      output = execFileSync("tsc", args, { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: TSC_TIMEOUT_MS, killSignal: "SIGKILL" });
     } catch (err) {
       const e = err as { stdout?: string; stderr?: string; status?: number | null };
       output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
       ok = false;
       exit = e.status ?? null; // null: killed by a signal (timeout)
+      if (exit === null) {
+        progress(`tsc killed after ${Math.round((Date.now() - started) / 1000)}s (${label})`);
+        output = `tsc did not finish within ${TSC_TIMEOUT_MS / 1000} s and was killed. ${output}`.trim();
+      }
     }
     const errors: TsError[] = [];
     for (const line of output.split("\n")) {
@@ -287,6 +306,9 @@ function runTypecheck(sha: string, label: string, buildInfo: string | null, cach
 /** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
 const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"];
 const NOTE_TIMEOUT_MS = 30_000;
+/** One tsc run; well below the checker's hard timeout (240 s), so the run can still report. */
+const TSC_TIMEOUT_MS = Number(process.env.ATC_TSC_TIMEOUT_MS) || 150_000; // env: tests only
+const PUSH_TIMEOUT_MS = 60_000;
 const FETCH_TIMEOUT_MS = 60_000;
 
 /**
@@ -369,7 +391,7 @@ function run(): unknown {
   if ("conflicts" in onto) return { mode: "land", landed: false, mainConflict: true, reason: `merge conflict with main in ${onto.conflicts.join(", ")}`, forkHead, baseHead };
   const check = typecheck(onto.sha, "land", mainBuildInfo(baseHead));
   if (!check.ok) return { mode: "land", landed: false, mainConflict: true, reason: "PR merged onto current main fails typecheck", forkHead, baseHead, typecheck: check };
-  const push = git(["push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
+  const push = timed("push main", () => git([...LOW_SPEED, "push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
   if (!push.ok) return { mode: "land", landed: false, retry: true, reason: `push to main failed (${push.out.slice(0, 120)}); retry`, forkHead, baseHead };
   return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
 }

@@ -1,7 +1,7 @@
 # Speculative-merge checker for agentmesh (ADR-0010).
 FROM node:24-trixie-slim
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends ca-certificates git \
+  && apt-get install --yes --no-install-recommends ca-certificates git procps \
   && rm -rf /var/lib/apt/lists/*
 RUN npm install -g typescript@7.0.2 && tsc --version
 RUN git config --system user.email atc@agentmesh.dev \
