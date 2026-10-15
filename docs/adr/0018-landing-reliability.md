@@ -35,6 +35,11 @@ cleared it on exit (#3); and pair (speculative-merge) results for old heads were
     Its own push pipeline queues those pairs; if it's still unindexed after `PAIR_RETRY_MS` (`head_seen` table),
     its pairs are queued directly, so a stuck PR delays its partners by at most that long.
 
+- **A land run that throws is a retry** (2026-10-15). If minting the tokens or the checker call itself throws (a
+  container restarting right after a deploy, a network error), `request_land` logs `land.failed` and answers `retry`,
+  instead of a 500 with nothing in the event log. If the push did reach main, the next request reads the new main
+  and re-checks the PR, as for any outside move of main.
+
 ## Consequences
 - Landing waits for pair checks: the scripted demo went from about 56 s to about 60–68 s.
 - With many agents pushing often, every push briefly puts its partners back in CHECKING. Watch for starvation in the final.

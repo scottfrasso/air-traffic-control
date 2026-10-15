@@ -417,3 +417,23 @@ test("pruning drops old resolved signals of landed PRs only; abandoned and activ
   await a.co.reconcile();
   assert.deepEqual(a.q<{ fork: string }>("SELECT fork FROM signals ORDER BY fork").map((r) => r.fork), ["gone1", "live1"]);
 });
+
+test("request_land: a land run that throws (container restarting) is a retry, logged, not a 500", async () => {
+  const a = airport();
+  const F = "base-repo--pr1";
+  await a.co.ensure("base-repo");
+  a.addFork(F);
+  await a.push(F, "a1");
+  a.q("UPDATE forks SET processed_sha = 'a1', check_status = 'green', check_sha = 'a1', check_base = 'main0'");
+  a.checker = async () => {
+    throw new Error("Container is not running");
+  };
+  const r = await a.co.requestLand(F);
+  assert.deepEqual([r.landed, r.retry], [false, true]);
+  assert.match(r.reason ?? "", /couldn't run the landing \(Container is not running\)/);
+  assert.equal(a.events("land.failed").length, 1);
+  assert.equal(a.meta("landing"), ""); // the lock is released
+  a.checker = async (input: { mode: string; fork?: { expectedHead?: string } }) =>
+    input.mode === "land" ? (a.heads.set("base-repo", "landed-a1"), { mode: "land", landed: true, landedSha: "landed-a1", forkHead: "a1", merged: true }) : { mode: "notes", written: [] };
+  assert.equal((await a.co.requestLand(F)).landed, true); // and the retry lands
+});

@@ -366,7 +366,7 @@ test("the Coordinator: leaving a landed task re-checks the PR on current main", 
   assert.equal(a.fork(X)!.check_status, "pending");
 });
 
-test("the Coordinator: a pick needs another attempt with pushed changes, and records the head", async () => {
+test("the Coordinator: a pick needs another attempt with pushed changes", async () => {
   const a = airport();
   const [X, Y] = ["base-repo--pr1", "base-repo--pr2"];
   await a.co.ensure("base-repo");
@@ -440,4 +440,23 @@ test("the Coordinator: ATC's pick keeps the task when an unrelated landing sends
   const cx = await a.co.getClearance(X);
   assert.equal(cx.clearance, "checking");
   assert.match(cx.message, /PR2, ATC's pick for this task \(t\): another landing sent it around/);
+});
+
+test("the Coordinator: a late duplicate hears which PRs already landed its task", async () => {
+  const { a, Y } = await twoAttempts();
+  assert.equal((await a.co.requestLand(Y)).landed, true);
+  const N = "base-repo--pr3";
+  a.addFork(N);
+  const r = await a.co.declareIntent(N, "n", [], [], "t");
+  assert.deepEqual(r.landedBy, [Y]);
+});
+
+test("the Coordinator: leaving a task ends a person's pick; coming back doesn't revive it", async () => {
+  const { a, X, Y } = await twoAttempts();
+  assert.ok((await a.co.choose(X, "sam")).ok); // over ATC's ranking (Y is better)
+  await a.co.declareIntent(X, "elsewhere", [], [], "other");
+  await a.co.declareIntent(X, "back", [], [], "t");
+  assert.equal(a.q("SELECT 1 FROM task_choices").length, 0);
+  assert.equal((await a.co.getClearance(X)).clearance, "stand_down"); // ATC's ranking again
+  assert.equal((await a.co.getClearance(Y)).clearance, "cleared");
 });
