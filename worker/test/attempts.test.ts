@@ -472,7 +472,7 @@ function age(a: ReturnType<typeof airport>, fork: string, ms: number) {
   a.q("UPDATE task_leaders SET at = at - ?", ms);
   for (const t of ["fork_activity", "head_seen", "fork_checked"]) a.q(`UPDATE ${t} SET at = at - ? WHERE fork = ?`, ms, fork);
   a.q("UPDATE intents SET created_at = created_at - ? WHERE fork = ?", ms, fork);
-  a.q("UPDATE forks SET created_at = created_at - ? WHERE name = ?", ms, fork);
+  a.q("UPDATE forks SET created_at = created_at - ?, land_requested_at = land_requested_at - ? WHERE name = ?", ms, ms, fork);
 }
 
 test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's pick, hands the task to the next", () => {
@@ -483,7 +483,7 @@ test("verdicts: the attempt that ships, quiet for stallMs since it became ATC's 
   assert.deepEqual(v.get("x--pr1"), { kind: "chosen", over: [{ fork: "x--pr2", reason: "PR2 went quiet for 60 s" }] });
   const down = v.get("x--pr2") as { kind: string; basis: string; winner: string; reason: string };
   assert.deepEqual([down.kind, down.basis, down.winner], ["stand_down", "stalled", "x--pr1"]);
-  assert.match(down.reason, /its agent showed no sign of life \(a push, a land request, an intent or a clearance check\) for 60 s, so PR1 gets the task\. Push or ask to land to compete again\./);
+  assert.match(down.reason, /its agent showed no sign of life \(a push, a land request, an intent, or polling its own clearance or signals\) for 60 s, so PR1 gets the task\. Push, ask to land, or poll your own get_clearance to compete again\./);
   // Activity after it became the pick keeps it: the clock runs from the later of the two.
   assert.equal(attemptVerdicts(group, [], { ...ctx, lastActive: new Map([["x--pr2", 30_000]]), now: 1000 + 60_000 }).get("x--pr2")?.kind, "chosen");
 });
@@ -612,7 +612,7 @@ test("the Coordinator: get_signals polls keep an agent alive; history reads don'
 test("the Coordinator: the heir is told it has the task; losers are told to keep polling", async () => {
   const { a, X, Y } = await twoAttempts();
   await a.co.setStallSeconds(30);
-  assert.match((await row(a, X)).reason, /Keep polling get_clearance: if PR2's agent goes quiet for 30 s, the task can pass to this PR\./);
+  assert.match((await row(a, X)).reason, /Keep polling your own get_clearance: if PR2's agent goes quiet for 30 s, the task can pass to this PR\./);
   (a.co as unknown as { flush(): void }).flush();
   age(a, Y, 31_000);
   (a.co as unknown as { flush(): void }).flush();
@@ -672,4 +672,68 @@ test("the Coordinator: a DO from before fork_activity: a recent push counts as a
   a.q("UPDATE forks SET created_at = created_at - 31000");
   a.q("UPDATE intents SET created_at = created_at - 31000");
   assert.equal((await row(a, X)).clearance, "stand_down"); // Y's head was seen just now (head_seen): alive
+});
+
+test("the Coordinator: a quiet PR that comes back by polling takes the task back, and the heir's handover note closes", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  for (let i = 0; i < 3; i++) {
+    age(a, Y, 31_000);
+    (a.co as unknown as { flush(): void }).flush(); // Y set aside, X told it has the task
+    assert.equal((await row(a, X)).clearance, "cleared");
+    await new Promise((r) => setTimeout(r, 3)); // a later moment for each cycle
+    await a.co.getClearance(Y); // Y's agent wakes and polls: back, and better
+    (a.co as unknown as { flush(): void }).flush();
+    assert.equal((await row(a, Y)).clearance, "cleared");
+  }
+  const open = a.q<{ kind: string }>("SELECT kind FROM signals WHERE fork = ? AND resolved_at IS NULL ORDER BY id", X).map((r) => r.kind);
+  assert.deepEqual(open.filter((k) => k === "handover"), []); // no pile-up: X doesn't have the task now
+  assert.equal(a.q("SELECT 1 FROM signals WHERE fork = ? AND kind = 'handover'", X).length, 1); // one note, re-opened each time
+  assert.equal(open.filter((k) => k === "stand_down").length, 1);
+});
+
+test("the Coordinator: the PR whose landing is running isn't set aside, however long the land run takes", async () => {
+  const { a, X, Y } = await twoAttempts();
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  a.checker = async (input: { mode: string; fork?: { expectedHead?: string } }) => {
+    if (input.mode !== "land") return { mode: "notes", written: [] };
+    age(a, Y, 31_000); // the land run takes longer than stallSeconds
+    assert.equal((await row(a, X)).clearance, "stand_down"); // read mid-landing: Y is still the one to ship
+    (a.co as unknown as { flush(): void }).flush();
+    a.heads.set("base-repo", "landed-y1");
+    return { mode: "land", landed: true, landedSha: "landed-y1", forkHead: "y1", merged: true };
+  };
+  assert.equal((await a.co.requestLand(Y)).landed, true);
+  assert.equal(a.events("attempt.stalled").length, 0);
+  assert.equal(a.q("SELECT 1 FROM signals WHERE kind = 'handover'").length, 0);
+});
+
+test("the Coordinator: three attempts; the pick stops, then its heir stops too; the third gets the task", async () => {
+  const { a, X, Y } = await twoAttempts();
+  const Z = "base-repo--pr3";
+  a.addFork(Z);
+  await a.co.declareIntent(Z, "z", [], [], "t");
+  await a.push(Z, "z1");
+  a.q("INSERT INTO symbol_changes(fork, path, name, kind, change) VALUES (?, 'src/a.ts', 'f', 'function', 'removed'), (?, 'src/b.ts', 'g', 'function', 'removed')", Z, Z); // Z worst
+  for (const [p, q] of [[X, "x1"], [Y, "y1"]]) a.q("INSERT INTO pair_checks(fork_a, fork_b, sha_a, sha_b, status, detail, checked_at) VALUES (?, ?, ?, 'z1', 'clean', '{}', 1)", p, Z, q);
+  a.q("UPDATE forks SET processed_sha = 'z1', check_status = 'green', check_sha = 'z1', check_base = 'main0' WHERE name = ?", Z);
+  await a.co.setStallSeconds(30);
+  (a.co as unknown as { flush(): void }).flush();
+  assert.equal((await row(a, Y)).clearance, "cleared");
+  age(a, Y, 31_000);
+  (a.co as unknown as { flush(): void }).flush();
+  assert.equal((await row(a, X)).clearance, "cleared"); // next best
+  age(a, X, 31_000);
+  (a.co as unknown as { flush(): void }).flush();
+  assert.equal((await row(a, Z)).clearance, "cleared");
+  assert.deepEqual([(await row(a, X)).clearance, (await row(a, Y)).clearance], ["stand_down", "stand_down"]);
+});
+
+test("a check result keeps the reconcile alarm up: it can start a quiet winner's clock", async () => {
+  const { a, Y } = await twoAttempts();
+  a.q("UPDATE meta SET value = '0' WHERE key = 'last_activity'");
+  await checked(a, Y, "y1", "main0");
+  assert.ok(Date.now() - Number(a.meta("last_activity")) < 5_000, "last_activity was just touched");
 });

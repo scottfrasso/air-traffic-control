@@ -196,7 +196,7 @@ export function attemptVerdicts(
     for (const q of stalled)
       out.set(q.fork.name, {
         kind: "stand_down", winner: heir?.fork.name ?? "", final: false, basis: "stalled",
-        reason: `This PR was the one to ship for ${task}, but its agent showed no sign of life (a push, a land request, an intent or a clearance check) for ${duration(ctx.stallMs ?? STALL_MS)}, so ${heir ? prLabel(heir.fork.name) : "another attempt"} gets the task. Push or ask to land to compete again.`,
+        reason: `This PR was the one to ship for ${task}, but its agent showed no sign of life (a push, a land request, an intent, or polling its own clearance or signals) for ${duration(ctx.stallMs ?? STALL_MS)}, so ${heir ? prLabel(heir.fork.name) : "another attempt"} gets the task. Push, ask to land, or poll your own get_clearance to compete again.`,
       });
   }
   return out;
@@ -218,7 +218,7 @@ function isStalled(task: string, a: Attempt, ctx: VerdictContext): boolean {
 
 /** Tells a loser not to quit: the task comes to it if the winner's agent stops (review of #48). */
 const standBy = (w: Attempt, ctx: VerdictContext) =>
-  ` Keep polling get_clearance: if ${prLabel(w.fork.name)}'s agent goes quiet for ${duration(ctx.stallMs ?? STALL_MS)}, the task can pass to this PR.`;
+  ` Keep polling your own get_clearance: if ${prLabel(w.fork.name)}'s agent goes quiet for ${duration(ctx.stallMs ?? STALL_MS)}, the task can pass to this PR.`;
 
 const quietReason = (q: Attempt, ctx: VerdictContext) => `${prLabel(q.fork.name)} went quiet for ${duration(ctx.stallMs ?? STALL_MS)}`;
 

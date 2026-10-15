@@ -532,7 +532,7 @@ export class Coordinator extends DurableObject<Env> {
   /** Signals addressed to `fork`. Open ones by default; `includeResolved` for history. */
   async getSignals(fork: string, includeResolved = false): Promise<SignalRow[]> {
     // Its agent polling for news is alive (a HOLD, a wait). A history read (all) isn't a poll (review of #48).
-    if (!includeResolved && this.fork(fork)?.status === "active") this.markActive(fork, true);
+    if (!includeResolved && this.anyTasks() && this.fork(fork)?.status === "active") this.markActive(fork, true);
     return signalsFor(this.sql, fork, includeResolved);
   }
 
@@ -605,6 +605,7 @@ export class Coordinator extends DurableObject<Env> {
     // First result for this head only: a re-check on a newer main pauses a quiet winner's clock (it isn't decided while
     // it runs) but mustn't restart it, or a stopped winner in a busy repo would never hand over (review of #48).
     this.sql.exec("INSERT INTO fork_checked(fork, at, sha) VALUES (?, ?, ?) ON CONFLICT(fork) DO UPDATE SET at = excluded.at, sha = excluded.sha WHERE fork_checked.sha IS NOT excluded.sha", fork, Date.now(), sha);
+    this.touch(); // a result can start a quiet winner's clock: keep the alarm up until it could hand over (review of #48)
     // The checks ran after all: an earlier "ATC couldn't run the checks" no longer applies (pair ones are per pair).
     this.sql.exec("UPDATE signals SET resolved_at = ? WHERE fork = ? AND kind = 'check_failed' AND about_fork IS NULL AND resolved_at IS NULL", Date.now(), fork);
   }
@@ -833,7 +834,9 @@ export class Coordinator extends DurableObject<Env> {
                UNION ALL SELECT fork, max(created_at) AS at FROM intents GROUP BY fork) GROUP BY fork`,
           )
           .toArray()
-          .map((r) => [r.fork, r.at]),
+          .map((r) => [r.fork, r.at] as [string, number])
+          // The PR whose landing is running is alive, however long the land run takes (review of #48).
+          .concat(this.landingInProgress() && parseLock(this.meta("landing"))?.fork ? [[parseLock(this.meta("landing"))!.fork!, Date.now()]] : []),
       ),
       checkedAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM fork_checked").toArray().map((r) => [r.fork, r.at])),
       stalledAt: new Map(this.sql.exec<{ fork: string; at: number }>("SELECT fork, at FROM task_stalls").toArray().map((r) => [r.fork, r.at])),
@@ -860,6 +863,9 @@ export class Coordinator extends DurableObject<Env> {
     const down = standDowns(verdicts);
     // Remember ATC's pick per task, so a go-around from another landing doesn't hand the task over (attemptVerdicts).
     const tasks = this.tasks();
+    // "You have the task now" holds only while it does: if the quiet one came back and took it, close the note (review of #48).
+    for (const h of this.sql.exec<{ id: number; fork: string }>("SELECT id, fork FROM signals WHERE kind = 'handover' AND resolved_at IS NULL").toArray())
+      if (verdicts.get(h.fork)?.kind !== "chosen") this.sql.exec("UPDATE signals SET resolved_at = ? WHERE id = ?", Date.now(), h.id);
     for (const [fork, v] of verdicts) {
       const task = v.kind === "chosen" ? tasks.get(fork) : null;
       if (task)
@@ -877,7 +883,7 @@ export class Coordinator extends DurableObject<Env> {
             this.emitSignal({
               fork: v.winner, kind: "handover", about_fork: fork, symbol: null,
               message: this.relabel(`${fork} went quiet, so this PR now has the task (${tasks.get(fork)}). Land it when it's cleared.`),
-              data: { task: tasks.get(fork) ?? null }, dedupe_key: `handover:${v.winner}:${fork}:${Date.now()}`,
+              data: { task: tasks.get(fork) ?? null }, dedupe_key: `handover:${v.winner}:${fork}`,
             });
         }
       }
