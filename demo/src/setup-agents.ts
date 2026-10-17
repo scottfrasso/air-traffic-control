@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { OUTPUT, SYSTEM } from "../../worker/src/review/agents/prompts.ts";
 import type { Role } from "../../worker/src/review/agents/client.ts";
-import { ROOT } from "./lib/env.ts";
+import { readDotenv, ROOT } from "./lib/env.ts";
 
 const ROLES: Role[] = ["classifier", "correctness", "security", "tests", "verifier"];
 const BASE = "https://api.anthropic.com";
@@ -44,16 +44,7 @@ export const ENVIRONMENT = {
 };
 
 const envFile = () => process.env.ATC_ENV_FILE ?? resolve(ROOT, ".env");
-function dotenv(): Record<string, string> {
-  try {
-    return Object.fromEntries(
-      readFileSync(envFile(), "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && l.includes("="))
-        .map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim().replace(/^["']|["']$/g, "")]),
-    );
-  } catch {
-    return {};
-  }
-}
+const dotenv = () => readDotenv(envFile());
 
 async function call<T>(key: string, method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {

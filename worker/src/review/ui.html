@@ -385,7 +385,7 @@ function stations(view) {
     text: reviewLamp === "idle" ? "Each finding is re-checked" : reviewLamp === "off" ? "Stopped by CI" : reviewLamp === "run" ? "Re-checking findings" : verifyErr ? "Some findings couldn't be checked" : dropped ? `${plural(dropped, "false alarm")} dropped` : "Every finding confirmed" });
 
   const need = v.requiredApprovals, got = v.approvals;
-  const nonAuthor = v.blockers.some((b) => /someone other than the author/.test(b));
+  const nonAuthor = v.needsNonAuthor;
   const reviewOver = v.checks === "done" || v.checks === "stale" || v.checks === "partial";
   out.push({ key: "approvals", name: "Approvals", lamp: pr.state === "merged" ? "go" : !reviewOver || v.checks === "partial" ? "idle" : need === 0 ? "go" : got >= need && !nonAuthor ? "go" : "hold",
     text: pr.state === "merged" ? "Approved" : !reviewOver ? "Set by the risk" : v.checks === "partial" ? "Set by a full run" : need === 0 ? "None needed" : `${got} of ${need}${nonAuthor ? ", one not the author" : ""}` });
@@ -406,10 +406,9 @@ function nextStep(pr, v) {
   if (v.checks === "not_run") return { tone: "hold", text: "Checks haven't run on this commit." };
   if (v.ci === "fail") return { tone: "stop", text: "CI failed, so the review agents didn't run. Fix it and run the checks again." };
   if (v.checks === "partial") return { tone: "hold", text: "Only some checks ran. Run all of them before merging." };
-  const findings = v.blockers.find((b) => /important finding/.test(b));
-  if (findings) return { tone: "stop", text: `${findings[0].toUpperCase()}${findings.slice(1)}. The agent fixes them and runs the checks again, or a person answers them.` };
-  if (v.approvals < v.requiredApprovals || v.blockers.some((b) => /author/.test(b))) {
-    const other = v.blockers.some((b) => /author/.test(b)) ? ", one of them from someone other than the author" : "";
+  if (v.openImportant) return { tone: "stop", text: `${plural(v.openImportant, "open important finding")}. The agent fixes them and runs the checks again, or a person answers them.` };
+  if (v.approvals < v.requiredApprovals || v.needsNonAuthor) {
+    const other = v.needsNonAuthor ? ", one of them from someone other than the author" : "";
     return { tone: "hold", text: `Waiting for people: ${plural(v.requiredApprovals, "approval")} needed${other}. ${v.approvals ? `${v.approvals} so far.` : "None yet."}` };
   }
   return { tone: "hold", text: v.blockers.join("; ") };
@@ -438,7 +437,7 @@ function miniLamps(s) {
     !ran ? "idle" : ciRed ? "off" : triage && triage.status === "errored" ? "hold" : v.tier ? "go" : running ? "run" : "off",
     !ran ? "idle" : ciRed ? "off" : v.review === "pending" ? (running ? "run" : "idle") : v.review === "clean" ? "go" : v.review === "findings" ? "stop" : v.review === "incomplete" ? "hold" : "off",
     !ran ? "idle" : ciRed ? "off" : v.security === "pending" ? (running ? "run" : "idle") : v.security === "clear" ? "go" : v.security === "blocking" ? "stop" : "off",
-    s.pr.state === "merged" ? "go" : !ran || running ? "idle" : v.approvals >= v.requiredApprovals && !v.blockers.some((b) => /author/.test(b)) ? "go" : "hold",
+    s.pr.state === "merged" ? "go" : !ran || running ? "idle" : v.approvals >= v.requiredApprovals && !v.needsNonAuthor ? "go" : "hold",
     s.pr.state === "merged" ? "go" : v.mergeable ? "go" : ran && !running ? "stop" : "idle",
   ];
   const names = ["CI", "Risk triage", "Agent review", "Security", "Approvals", "Merge"];
@@ -448,7 +447,7 @@ function miniLamps(s) {
 // ── dashboard ─────────────────────────────────────────────────────────
 
 const BUCKETS = [
-  { key: "you", name: "Needs you", test: (s) => s.pr.state === "ready" && s.verdict.checks === "done" && (s.verdict.mergeable || (s.verdict.ci !== "fail" && s.findings.important === 0 && s.verdict.approvals < s.verdict.requiredApprovals) || s.verdict.blockers.some((b) => /author/.test(b) && s.findings.important === 0)) },
+  { key: "you", name: "Needs you", test: (s) => s.pr.state === "ready" && s.verdict.checks === "done" && (s.verdict.mergeable || (s.verdict.ci !== "fail" && s.verdict.openImportant === 0 && (s.verdict.approvals < s.verdict.requiredApprovals || s.verdict.needsNonAuthor))) },
   { key: "agent", name: "Agent's turn", test: (s) => ["draft", "ready"].includes(s.pr.state) && s.verdict.checks !== "running" && !BUCKETS[0].test(s) },
   { key: "running", name: "Running", test: (s) => ["draft", "ready"].includes(s.pr.state) && s.verdict.checks === "running" },
   { key: "done", name: "Merged and closed", test: (s) => ["merged", "closed"].includes(s.pr.state) },
@@ -514,8 +513,10 @@ async function settings() {
       h("section", { class: "panel" },
         h("h2", {}, "Personal API tokens"),
         h("p", { class: "muted small" }, "For git, the API, and coding agents over MCP at /mcp. An agent using your token acts as you, but can't approve."),
-        tokens.map((t) => h("div", { class: "list-line" }, h("span", {}, t.label), h("span", { class: "spacer" }), h("span", { class: "muted small" }, ago(t.created_at)), h("button", { class: "quiet danger", onclick: async () => { await api("DELETE", `/api/tokens/${t.id}`); route(); } }, "Revoke"))),
-        h("div", { class: "row", style: "margin-top: 14px" }, label, h("button", { onclick: async () => { const t = await api("POST", `/api/tokens`, { label: label.value.trim() || "token" }); made.replaceChildren(h("p", { class: "small", style: "margin-top: 12px" }, "Copy it now. It won't be shown again."), h("pre", {}, t.token)); } }, "Create token")),
+        tokens.map((t) => h("div", { class: "list-line" }, h("span", {}, t.label), h("span", { class: "spacer" }), h("span", { class: "muted small" }, ago(t.created_at)), h("button", { class: "quiet danger", disabled: me.via !== "access", onclick: async () => { await api("DELETE", `/api/tokens/${t.id}`); route(); } }, "Revoke"))),
+        me.via === "access"
+          ? h("div", { class: "row", style: "margin-top: 14px" }, label, h("button", { onclick: async () => { const t = await api("POST", `/api/tokens`, { label: label.value.trim() || "token" }); made.replaceChildren(h("p", { class: "small", style: "margin-top: 12px" }, "Copy it now. It won't be shown again. It works for 90 days."), h("pre", {}, t.token)); } }, "Create token"))
+          : h("p", { class: "note", style: "margin-top: 14px" }, "Creating and revoking tokens needs an Access sign-in, so a token can't make more of itself."),
         made)),
   );
 }
@@ -538,7 +539,8 @@ async function repoPage(repo) {
         h("h2", {}, "Pull requests"),
         prs.length ? prs.map((p) => h("div", { class: "list-line" }, h("span", { class: `tag ${p.state}` }, p.state), link(`/repos/${enc(repo)}/prs/${p.id}`, `#${p.id} ${p.title}`))) : h("p", { class: "muted" }, "None yet."),
         h("h2", { style: "margin-top: 24px" }, "Push a branch"),
-        h("button", { onclick: async () => { const c = await api("POST", `/api/repos/${enc(repo)}/git-credentials`); creds.replaceChildren(h("p", { class: "muted small", style: "margin-top: 10px" }, `A push token, valid for ${Math.round(c.expiresInSeconds / 3600)} hours:`), h("pre", {}, `${c.commands.clone}\n${c.commands.push}`)); } }, "Get git credentials"),
+        h("button", { onclick: async () => { const c = await api("POST", `/api/repos/${enc(repo)}/git-credentials`); creds.replaceChildren(h("p", { class: "muted small", style: "margin-top: 10px" }, `A push token, valid for ${Math.round(c.expiresInSeconds / 3600)} hours:`), h("pre", {}, `${c.commands.env}\ngit clone ${c.remote}\ngit push ${c.remote} HEAD:<branch>`)); } }, "Get git credentials"),
+        h("p", { class: "note", style: "margin-top: 10px" }, "Push to a branch and open a PR. main only moves through a merge: a direct push to it is put back."),
         creds),
       h("section", { class: "panel" },
         h("h2", {}, "Open a draft pull request"),

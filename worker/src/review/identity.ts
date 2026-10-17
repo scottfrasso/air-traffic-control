@@ -32,10 +32,17 @@ const b64urlJson = (s: string) => JSON.parse(new TextDecoder().decode(b64urlByte
 type Jwk = JsonWebKey & { kid?: string };
 const certCache = new Map<string, { at: number; keys: Jwk[] }>();
 const CERT_TTL_MS = 10 * 60_000;
+/** A JWT naming an unknown key forces a re-fetch (keys rotate), but at most this often (security review, 10-17). */
+const FORCED_REFRESH_MS = 60_000;
+
+/** Tests sign with fresh keys every few milliseconds: they start from an empty cache. */
+export function forgetAccessKeys(): void {
+  certCache.clear();
+}
 
 async function accessKeys(teamDomain: string, fetchImpl: typeof fetch, fresh = false): Promise<Jwk[]> {
   const hit = certCache.get(teamDomain);
-  if (!fresh && hit && hit.at > Date.now() - CERT_TTL_MS) return hit.keys;
+  if (hit && hit.at > Date.now() - (fresh ? FORCED_REFRESH_MS : CERT_TTL_MS)) return hit.keys;
   const res = await fetchImpl(`https://${teamDomain}/cdn-cgi/access/certs`);
   if (!res.ok) throw new Error(`Access certs: HTTP ${res.status}`);
   const keys = ((await res.json()) as { keys?: Jwk[] }).keys ?? [];

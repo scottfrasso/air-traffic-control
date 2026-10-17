@@ -1,17 +1,32 @@
 import { DurableObject } from "cloudflare:workers";
 import { repoRef } from "../artifacts";
 import type { Via } from "./identity";
-import { computeVerdict } from "./policy";
+import { computeVerdict, LINE_SLACK, WEIGHT } from "./policy";
+import { agentsFor } from "./workflow";
+import { runTimeoutSeconds } from "../checker";
 import { ConfigError, parseCiConfig } from "./repoconfig";
 import { REPO_MIGRATIONS, REPO_SCHEMA } from "./schema";
-import { CHECK_NAMES, REVIEWERS, type Approval, type CheckName, type CheckRow, type Classification, type Finding, type Intent, type Pr, type PrState, type RawFinding, type ResolutionKind, type Reviewer, type StepStatus, type Verdict } from "./types";
+import { CHECK_NAMES, REVIEWERS, type Approval, type CheckName, type CheckRow, type Classification, type Finding, type Intent, type Pr, type PrState, type RawFinding, type Resolved, type ResolutionKind, type Reviewer, type StepStatus, type Verdict } from "./types";
 
 /** What a RepoStore needs from the Worker's bindings (the generated Env has more). */
 export interface StoreEnv {
   ARTIFACTS: Env["ARTIFACTS"];
   REVIEW_RUN: Workflow<ReviewRunParams>;
   CHECKER: Env["CHECKER"];
+  ANTHROPIC_API_KEY?: string;
+  AGENT_IDS?: string;
+  AGENT_ENVIRONMENT_ID?: string;
+  /** Runs a repo may start in 24 hours (cost cap against push-and-check loops). Default 100. */
+  REVIEW_MAX_RUNS_PER_DAY?: string;
 }
+
+/** The branch only merges may move (other targets aren't protected yet). */
+const PROTECTED_BRANCH = "main";
+const PROTECTED_KEY = "protected:main";
+const MAX_TITLE = 200;
+const MAX_INTENT = 2000;
+/** A title is one line (it reaches the agents' prompts) and short. */
+const oneLine = (s: string, max: number) => s.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 
 export interface ReviewRunParams {
   repo: string;
@@ -33,6 +48,8 @@ export type RunRow = {
   ci_config: string | null;
   instance: string;
   scope: string | null;
+  delta: string | null;
+  sessions: string | null;
   started_at: number;
   finished_at: number | null;
 };
@@ -135,9 +152,13 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const [head, base] = await Promise.all([this.headOf(input.source), this.headOf(target)]);
     if (!head) throw new Error(`branch ${input.source} not found in ${this.repo}`);
     if (!base) throw new Error(`branch ${target} not found in ${this.repo}`);
+    const intent = Object.fromEntries(Object.keys(EMPTY_INTENT).map((k) => {
+      const v = (input.intent as Record<string, unknown> | undefined)?.[k];
+      return [k, typeof v === "string" ? v.slice(0, MAX_INTENT) : ""];
+    }));
     this.sql.exec(
       "INSERT INTO prs(title, author, source, target, state, head, base, intent, created_at) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)",
-      input.title, input.author, input.source, target, head, base, JSON.stringify({ ...EMPTY_INTENT, ...(input.intent ?? {}) }), Date.now(),
+      oneLine(input.title, MAX_TITLE) || "untitled", input.author, input.source, target, head, base, JSON.stringify(intent), Date.now(),
     );
     const id = this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id;
     this.log("pr.opened", id, { by: input.author, source: input.source, target, head });
@@ -223,6 +244,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
   /** A push to any branch of this repo (from the queue). Open PRs on that branch move to the new head. */
   async onPush(ref: string, eventSha: string): Promise<void> {
     const branch = ref.replace(/^refs\/heads\//, "");
+    if (branch === PROTECTED_BRANCH) return this.guardProtected(eventSha);
     const prs = this.sql.exec<PrRow>("SELECT * FROM prs WHERE source = ? AND state IN ('draft', 'ready')", branch).toArray();
     if (!prs.length) return;
     // Events can arrive late, twice or out of order: the branch's live head decides, not the event (review of PR #50).
@@ -241,6 +263,30 @@ export class RepoStore extends DurableObject<StoreEnv> {
   }
 
   /**
+   * main moves only by a merge. Artifacts can't refuse a push to a branch, so a push to main that didn't come from a
+   * merge is put back to the last merged commit, right after it lands (security review, 10-17: any token holder could
+   * otherwise push past review). The first push of main, when the repo is created, sets the starting point.
+   */
+  private async guardProtected(eventSha: string): Promise<void> {
+    const live = await this.headOf(PROTECTED_BRANCH);
+    if (!live) return;
+    const known = this.meta(PROTECTED_KEY);
+    if (!known) {
+      this.setMeta(PROTECTED_KEY, live);
+      this.log("branch.protected", null, { branch: PROTECTED_BRANCH, sha: live });
+      return;
+    }
+    if (live === known || this.meta("merging")) return; // a merge in progress records its own push when it lands
+    const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);
+    const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "restore", repo: ref, branch: PROTECTED_BRANCH, sha: known, current: live })) as { error?: string; restored?: boolean; reason?: string };
+    this.log(res.restored ? "branch.restored" : "branch.restore_failed", null, { branch: PROTECTED_BRANCH, from: live, to: known, eventSha, ...(res.restored ? {} : { reason: (res.error ?? res.reason ?? "").slice(0, 300) }) });
+  }
+
+  private setMeta(key: string, value: string) {
+    this.sql.exec("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value);
+  }
+
+  /**
    * Run the checks (the gauntlet, or only some of it) on the PR's head: what an agent calls when its work is done.
    * A draft becomes ready. Asking again for a head that's being checked, or that a clean run already covered, returns
    * that run at no cost; a run that ended with a failure can be run again (flaky CI). Starting a new run cancels one
@@ -251,25 +297,29 @@ export class RepoStore extends DurableObject<StoreEnv> {
     let p = this.mustPr(id);
     if (!OPEN_STATES.includes(p.state)) throw new Error(`PR${id} is ${p.state}`);
     for (const c of opts.only ?? []) if (!CHECK_NAMES.includes(c)) throw new Error(`unknown check ${c}: use ${CHECK_NAMES.join(", ")}`);
-    const names = (sha: string) => (opts.sha!.length >= 7 ? sha.startsWith(opts.sha!) : sha === opts.sha);
-    if (opts.sha && !names(p.head)) {
+    const matchesSha = (sha: string) => (opts.sha!.length >= 7 ? sha.startsWith(opts.sha!) : sha === opts.sha);
+    if (opts.sha && !matchesSha(p.head)) {
       // The push event may not have arrived yet (it comes through a queue): ask the branch itself (review of 10-17).
       const live = await this.headOf(p.source);
       p = this.mustPr(id);
-      if (live && live !== p.head && names(live)) {
+      if (live && live !== p.head && matchesSha(live)) {
         this.sql.exec("UPDATE prs SET head = ? WHERE id = ?", live, id);
         this.log("pr.pushed", id, { sha: live });
         p = this.mustPr(id);
       }
-      if (!names(p.head)) throw new Error(`PR${id} is at ${p.head}, not ${opts.sha}: push first, or name the head`);
+      if (!matchesSha(p.head)) throw new Error(`PR${id} is at ${p.head}, not ${opts.sha}: push first, or name the head`);
     }
     const only = opts.only?.length ? CHECK_NAMES.filter((c) => opts.only!.includes(c)) : null;
     const scope = only ? JSON.stringify(only) : null;
     const cur = p.current_run ? this.runRow(p.current_run) : null;
     if (cur && cur.sha === p.head) {
-      if (cur.status === "running" && cur.scope === scope) return { run: cur.id };
+      // A single check asked for while the full checks run on this head joins them, rather than cancelling paid work.
+      if (cur.status === "running" && (cur.scope === scope || cur.scope === null)) return { run: cur.id };
       if (cur.status === "done" && this.cleanRun(cur.id) && (cur.scope === scope || (cur.scope === null && this.covers(cur.id, only)))) return { run: cur.id };
     }
+    const cap = Number(this.env.REVIEW_MAX_RUNS_PER_DAY ?? 100) || 100;
+    const today = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM runs WHERE started_at > ?", Date.now() - 86_400_000).one().n;
+    if (today >= cap) throw new Error(`run limit: ${cap} runs a day for ${this.repo}; try again later`);
     if (p.state === "draft") {
       this.sql.exec("UPDATE prs SET state = 'ready' WHERE id = ?", id);
       this.log("pr.ready", id, { by });
@@ -348,7 +398,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
   }
 
   /** The PR's run is no longer in charge; if it was still going, it's cancelled. Returns its instance to stop. */
-  private detachRun(id: number, why: string): string | null {
+  private detachRun(id: number, why: string): RunRow | null {
     const p = this.mustPr(id);
     if (!p.current_run) return null;
     const run = this.runRow(p.current_run);
@@ -356,16 +406,27 @@ export class RepoStore extends DurableObject<StoreEnv> {
     if (!run || run.status !== "running") return null;
     this.sql.exec("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ?", Date.now(), run.id);
     this.log("run.cancelled", id, { run: run.id, why });
-    return run.instance;
+    return run;
   }
 
-  /** Best effort: correctness comes from record* refusing a non-current run, not from the terminate landing. */
-  private async terminate(instance: string): Promise<void> {
+  /**
+   * Stop a cancelled run: its Workflow, and the agent sessions it started (they'd bill until their budgets ran out).
+   * Best effort: correctness comes from record* refusing a non-current run, not from these landing.
+   */
+  private async terminate(run: RunRow): Promise<void> {
     try {
-      await (await this.env.REVIEW_RUN.get(instance)).terminate();
+      await (await this.env.REVIEW_RUN.get(run.instance)).terminate();
     } catch {
       /* already finished, or never started */
     }
+    const sessions = run.sessions ? (JSON.parse(run.sessions) as string[]) : [];
+    const agents = this.agents();
+    await Promise.all(sessions.map((s) => agents.interrupt(s).catch(() => undefined)));
+  }
+
+  /** The Managed Agents client (overridable in tests). */
+  protected agents(): { interrupt(id: string): Promise<void> } {
+    return agentsFor(this.env);
   }
 
   private async cancelRun(id: number, why: string) {
@@ -409,7 +470,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     return this.row(r.pr)?.current_run === run ? r : null;
   }
 
-  async runContext(run: number): Promise<{ current: boolean; pr: Pr; runNumber: number; lastReviewedSha: string | null; resolved: Array<{ file: string; class: string }>; open: Finding[]; previousClassification: Classification | null }> {
+  async runContext(run: number): Promise<{ current: boolean; pr: Pr; runNumber: number; lastReviewedSha: string | null; resolved: Resolved[]; open: Finding[]; previousClassification: Classification | null }> {
     const r = this.runRow(run);
     if (!r) throw new Error(`no run ${run}`);
     const findings = this.findings(r.pr);
@@ -418,7 +479,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
       pr: this.toPr(this.mustPr(r.pr)),
       runNumber: r.number,
       lastReviewedSha: r.since_sha,
-      resolved: findings.filter((f) => f.status === "resolved").map((f) => ({ file: f.file, class: f.class })),
+      resolved: findings.filter((f) => f.status === "resolved").map((f) => ({ file: f.file, class: f.class, line: f.line, severity: f.severity })),
       open: findings.filter((f) => f.status === "open"),
       previousClassification: (() => {
         const prev = this.sql.exec<{ classification: string | null }>("SELECT classification FROM runs WHERE pr = ? AND id < ? AND status = 'done' AND classification IS NOT NULL ORDER BY id DESC LIMIT 1", r.pr, run).toArray()[0];
@@ -453,16 +514,45 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const r = this.current(run);
     if (!r) return false;
     for (const f of found) {
-      const same = this.sql.exec<{ id: number }>("SELECT id FROM findings WHERE pr = ? AND reviewer = ? AND file = ? AND class = ? AND status = 'open'", r.pr, reviewer, f.file, f.class).toArray()[0];
-      if (same)
-        this.sql.exec("UPDATE findings SET run = ?, sha = ?, line = ?, severity = ?, title = ?, evidence = ?, suggestion = ? WHERE id = ?", run, r.sha, f.line, f.severity, f.title, f.evidence, f.suggestion ?? null, same.id);
-      else
+      // A re-report is the same reviewer, file and class from an EARLIER run, near the same line: never another
+      // finding of this run (two bugs of one kind in a file are two findings). Its severity never goes down: a
+      // reviewer talked into calling it a nit doesn't make it one (reviews of 10-17).
+      const same = this.sql
+        .exec<{ id: number; line: number; severity: RawFinding["severity"] }>("SELECT id, line, severity FROM findings WHERE pr = ? AND reviewer = ? AND file = ? AND class = ? AND status = 'open' AND run < ?", r.pr, reviewer, f.file, f.class, run)
+        .toArray()
+        .filter((x) => Math.abs(x.line - f.line) <= LINE_SLACK)
+        .sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
+      if (same) {
+        const severity = WEIGHT[same.severity] >= WEIGHT[f.severity] ? same.severity : f.severity;
+        this.sql.exec("UPDATE findings SET run = ?, sha = ?, line = ?, severity = ?, title = ?, evidence = ?, suggestion = ? WHERE id = ?", run, r.sha, f.line, severity, f.title, f.evidence, f.suggestion ?? null, same.id);
+      } else
         this.sql.exec(
           "INSERT INTO findings(pr, run, sha, reviewer, file, line, severity, class, title, evidence, suggestion, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
           r.pr, run, r.sha, reviewer, f.file, f.line, f.severity, f.class, f.title, f.evidence, f.suggestion ?? null,
         );
     }
     if (found.length) this.log("run.findings", r.pr, { run, reviewer, count: found.length });
+    return true;
+  }
+
+  /** Whether `run` is still the PR's run in charge (cheap: no findings loaded). */
+  async isCurrent(run: number): Promise<boolean> {
+    return !!this.current(run);
+  }
+
+  /** The paths changed since the last reviewed commit (null on a first review). */
+  async recordDelta(run: number, paths: string[] | null): Promise<boolean> {
+    if (!this.current(run)) return false;
+    this.sql.exec("UPDATE runs SET delta = ? WHERE id = ?", paths ? JSON.stringify(paths) : null, run);
+    return true;
+  }
+
+  /** A Managed Agents session this run started, so cancelling the run can stop it. */
+  async recordSession(run: number, session: string): Promise<boolean> {
+    const r = this.current(run);
+    if (!r) return false;
+    const all = r.sessions ? (JSON.parse(r.sessions) as string[]) : [];
+    if (!all.includes(session)) this.sql.exec("UPDATE runs SET sessions = ? WHERE id = ?", JSON.stringify([...all, session]), run);
     return true;
   }
 
@@ -475,7 +565,8 @@ export class RepoStore extends DurableObject<StoreEnv> {
   /** The PR's whole change for the web UI (the container's `diff` mode), cached per head commit. */
   async getDiff(id: number): Promise<{ sha: string; diff: string; changedPaths: string[] }> {
     const p = this.mustPr(id);
-    const base = p.base ?? "";
+    // The diff is against the target's current head (three-dot), so it's cached per (head, target head).
+    const base = (await this.headOf(p.target)) ?? p.base ?? "";
     const hit = this.sql.exec<{ diff: string; paths: string }>("SELECT diff, paths FROM diffs WHERE sha = ? AND base = ?", p.head, base).toArray()[0];
     if (hit) return { sha: p.head, diff: hit.diff, changedPaths: JSON.parse(hit.paths) as string[] };
     const ref = await repoRef(this.env as unknown as Env, this.repo, "read", 900);
@@ -498,19 +589,22 @@ export class RepoStore extends DurableObject<StoreEnv> {
   async merge(id: number, by: string): Promise<{ ok: true; sha: string } | { ok: false; blockers: string[] }> {
     const view = await this.getPr(id);
     if (!view.verdict.mergeable) return { ok: false, blockers: view.verdict.blockers };
+    let commands: Array<{ name: string; run: string; timeoutSeconds: number }> = [];
+    try {
+      commands = parseCiConfig(view.run?.ci_config ?? null) ?? [];
+    } catch (err) {
+      if (!(err instanceof ConfigError)) throw err;
+      return { ok: false, blockers: [err.message] };
+    }
+    // One limit for the whole merge, from what the container may take (CI on the merged commit, twice if the target
+    // moved), so the push token and the lock both outlive it (code review, 10-17).
+    const limitS = 2 * runTimeoutSeconds({ mode: "merge", commands } as never) + 300;
     const lock = Number(this.meta("merging") ?? 0);
-    if (lock > Date.now() - 30 * 60_000) return { ok: false, blockers: ["another merge is in progress; try again shortly"] };
+    if (lock > Date.now() - limitS * 1000) return { ok: false, blockers: ["another merge is in progress; try again shortly"] };
     this.sql.exec("INSERT INTO meta(key, value) VALUES ('merging', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(Date.now()));
     try {
       const pr = view.pr;
-      let commands: Array<{ name: string; run: string; timeoutSeconds: number }> = [];
-      try {
-        commands = parseCiConfig(view.run?.ci_config ?? null) ?? [];
-      } catch (err) {
-        if (!(err instanceof ConfigError)) throw err;
-        return { ok: false, blockers: [err.message] };
-      }
-      const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 1800);
+      const ref = await repoRef(this.env as unknown as Env, this.repo, "write", limitS);
       for (let attempt = 0; attempt < 2; attempt++) {
         const target = await this.headOf(pr.target);
         if (!target) return { ok: false, blockers: [`branch ${pr.target} not found`] };
@@ -521,6 +615,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
         ) as { error?: string; merged?: boolean; sha?: string; retry?: boolean; targetHead?: string; reason?: string; checks?: Array<{ name: string; status: string; log: string; ms: number }> };
         if (res.error) return { ok: false, blockers: [`merge failed: ${res.error}`] };
         if (res.merged && res.sha) {
+          if (pr.target === PROTECTED_BRANCH) this.setMeta(PROTECTED_KEY, res.sha); // the merge's own push stays
           this.sql.exec("UPDATE prs SET state = 'merged' WHERE id = ?", id);
           this.log("pr.merged", id, { by, sha: res.sha, head: pr.head, onto: target });
           return { ok: true, sha: res.sha };
@@ -553,8 +648,13 @@ export class RepoStore extends DurableObject<StoreEnv> {
         .filter((n) => (REVIEWERS as readonly string[]).includes(n));
       // And only a full run on a different commit: a single check, or the same commit again, not reporting a finding
       // is the model varying, not a fix (review of 10-17).
+      // And only in a file that changed since the last review: a cheap commit plus "these are fixed" in the code
+      // doesn't clear a finding in a file nobody touched (security review, 10-17).
+      const delta = r.delta ? new Set(JSON.parse(r.delta) as string[]) : null;
       if (r.scope === null)
-        for (const reviewer of passed) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ? AND sha != ?", r.pr, reviewer, run, r.sha);
+        for (const reviewer of passed)
+          for (const f of this.sql.exec<{ id: number; file: string }>("SELECT id, file FROM findings WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ? AND sha != ?", r.pr, reviewer, run, r.sha).toArray())
+            if (!delta || delta.has(f.file)) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE id = ?", f.id);
     }
     this.log("run.finished", r.pr, { run, outcome });
     return true;

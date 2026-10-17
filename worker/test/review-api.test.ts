@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { Directory } from "../src/review/directory";
 import { handle } from "../src/review/entry";
+import { forgetAccessKeys } from "../src/review/identity";
 import { reviewTools } from "../src/review/mcp";
 import { routeReviewPush } from "../src/review/routing";
 import { sqlStorage } from "./harness/sql";
@@ -13,7 +14,8 @@ const AUD = "aud-1";
 
 /** A Cloudflare Access stand-in: signs JWTs for an email and serves its key at the team's certs URL. */
 async function access() {
-  const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  forgetAccessKeys();
+  const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const kid = `k-${crypto.randomUUID()}`;
   const jwk = { ...(await crypto.subtle.exportKey("jwk", publicKey)), kid, alg: "RS256" };
   const real = globalThis.fetch;
@@ -52,8 +54,8 @@ async function app() {
     return { status: res.status, body: (await res.json().catch(() => null)) as Record<string, unknown> };
   };
   /** The same call, signed in through Access as `email` (a person at the web UI). */
-  const asPerson = async (email: string, method: string, path: string, body?: unknown) => {
-    const res = await handle(new Request(`https://atc.example${path}`, { method, headers: { "cf-access-jwt-assertion": await signJwt(email), "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }), env as never, {} as never);
+  const asPerson = async (email: string, method: string, path: string, body?: unknown, origin: string | null = "https://atc.example") => {
+    const res = await handle(new Request(`https://atc.example${path}`, { method, headers: { "cf-access-jwt-assertion": await signJwt(email), "content-type": "application/json", ...(origin ? { origin } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }), env as never, {} as never);
     return { status: res.status, body: (await res.json().catch(() => null)) as Record<string, unknown> };
   };
   return { s, env, directory, created, call, asPerson, token, bobToken };
@@ -92,7 +94,7 @@ test("git credentials: a write token for the repo, and the commands to use it", 
   assert.equal(r.status, 200);
   assert.equal(r.body.remote, "https://artifacts.example/shop");
   assert.equal(r.body.token, "write-shop");
-  assert.match(String((r.body.commands as Record<string, string>).push), /http\.extraHeader="Authorization: Bearer write-shop".*push/);
+  assert.match(String((r.body.commands as Record<string, string>).push), /GIT_CONFIG_VALUE_0="Authorization: Bearer write-shop"; git push /);
 });
 
 test("opening a PR makes the caller its author, whatever the body says", async () => {
@@ -134,13 +136,13 @@ test("an unknown repo is a 404", async () => {
 
 test("tokens: created once in plain text, then listed without it, and revocable", async () => {
   const a = await app();
-  const made = await a.call("POST", "/api/tokens", { label: "laptop" });
+  const made = await a.asPerson("ann@x", "POST", "/api/tokens", { label: "laptop" });
   assert.equal(made.status, 201);
   assert.match(String(made.body.token), /^atc_/);
   const list = (await a.call("GET", "/api/tokens")).body.tokens as Array<{ id: number; label: string }>;
   assert.ok(list.some((t) => t.label === "laptop"));
   assert.equal(JSON.stringify(list).includes(String(made.body.token)), false);
-  assert.equal((await a.call("DELETE", `/api/tokens/${made.body.id}`)).status, 200);
+  assert.equal((await a.asPerson("ann@x", "DELETE", `/api/tokens/${made.body.id}`)).status, 200);
   assert.equal((await a.call("GET", "/api/me", undefined, String(made.body.token))).status, 401);
 });
 
@@ -166,11 +168,11 @@ test("the admin secret mints a personal token for an email (an ordinary token: i
   const a = await app();
   const mint = (secret: string | undefined, env: Record<string, unknown>) =>
     handle(new Request("https://atc.example/api/admin/tokens", { method: "POST", headers: { ...(secret ? { authorization: `Bearer ${secret}` } : {}), "content-type": "application/json" }, body: JSON.stringify({ email: "Scott@X", label: "e2e" }) }), env as never, {} as never);
-  assert.equal((await mint("s3cret-admin", a.env)).status, 401, "no ADMIN_SECRET configured: refused");
-  const env = { ...a.env, ADMIN_SECRET: "s3cret-admin" };
+  assert.equal((await mint("s3cret-admin-0123456789abcdef0123456789", a.env)).status, 401, "no ADMIN_SECRET configured: refused");
+  const env = { ...a.env, ADMIN_SECRET: "s3cret-admin-0123456789abcdef0123456789" };
   assert.equal((await mint("wrong", env)).status, 401);
   assert.equal((await mint(undefined, env)).status, 401);
-  const res = await mint("s3cret-admin", env);
+  const res = await mint("s3cret-admin-0123456789abcdef0123456789", env);
   assert.equal(res.status, 201);
   const { token } = (await res.json()) as { token: string };
   assert.match(token, /^atc_/);
@@ -178,7 +180,7 @@ test("the admin secret mints a personal token for an email (an ordinary token: i
   assert.equal(who.status, 200, "the minted token is a working personal token");
   assert.equal((await a.directory.personForToken(await hashOf(token)))?.email, "scott@x");
   // The admin secret itself is not a personal token: it can't call anything else.
-  assert.equal((await handle(new Request("https://atc.example/api/repos", { headers: { authorization: "Bearer s3cret-admin" } }), env as never, {} as never)).status, 401);
+  assert.equal((await handle(new Request("https://atc.example/api/repos", { headers: { authorization: "Bearer s3cret-admin-0123456789abcdef0123456789" } }), env as never, {} as never)).status, 401);
 });
 
 async function hashOf(token: string) {
@@ -246,4 +248,70 @@ test("MCP run_checks tells agents to poll until checks aren't running (a partial
   const src = (await import("node:fs")).readFileSync(new URL("../src/review/mcp.ts", import.meta.url), "utf8");
   assert.match(src, /until verdict\.checks isn't running/);
   assert.doesNotMatch(src, /until verdict\.checks is done/);
+});
+
+
+test("CSRF: a browser request that changes something must come from this site, as JSON", async () => {
+  const a = await app();
+  const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`);
+  assert.equal((await a.asPerson("bob@x", "POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" }, "https://evil.example")).status, 403);
+  assert.equal((await a.asPerson("bob@x", "POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" }, null)).status, 403);
+  const form = await handle(new Request(`https://atc.example/api/repos/shop/prs/${pr.id}/merge`, { method: "POST", headers: { "cf-access-jwt-assertion": "x", origin: "https://atc.example", "content-type": "text/plain" }, body: "{}" }), a.env as never, {} as never);
+  assert.equal(form.status, 403, "a text/plain form post is refused before anything else");
+  assert.equal((await a.asPerson("bob@x", "POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" })).status, 200);
+  assert.equal((await a.asPerson("bob@x", "GET", `/api/repos/shop/prs/${pr.id}`, undefined, null)).status, 200, "reads don't need it");
+});
+
+test("only an Access sign-in creates or revokes tokens: a token (maybe an agent's) can't mint more", async () => {
+  const a = await app();
+  assert.equal((await a.call("POST", "/api/tokens", { label: "more" })).status, 403);
+  assert.equal((await a.call("DELETE", "/api/tokens/1")).status, 403);
+});
+
+test("a short admin secret disables the admin endpoint", async () => {
+  const a = await app();
+  const env = { ...a.env, ADMIN_SECRET: "short" };
+  const res = await handle(new Request("https://atc.example/api/admin/tokens", { method: "POST", headers: { authorization: "Bearer short", "content-type": "application/json" }, body: JSON.stringify({ email: "x@x" }) }), env as never, {} as never);
+  assert.equal(res.status, 401);
+});
+
+test("MCP refuses repos that aren't registered", async () => {
+  const a = await app();
+  const tools = reviewTools(a.env as never, { email: "ann@x", name: "ann" });
+  await assert.rejects(tools.get_pr({ repo: "nope", pr: 1 }), /no repo nope/);
+});
+
+test("a malformed percent-escape in a path is a 400, not a 500", async () => {
+  const a = await app();
+  assert.equal((await a.call("GET", "/api/repos/%E0%A4%A/prs")).status, 400);
+});
+
+test("the web UI's own pages are served as HTML, /settings included", async () => {
+  const a = await app();
+  for (const path of ["/", "/settings", "/repos/shop", "/repos/shop/prs/1"]) {
+    const res = await handle(new Request(`https://atc.example${path}`), a.env as never, {} as never);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/, path);
+  }
+});
+
+test("hitting the daily run cap is a 429", async () => {
+  const a = await app();
+  (a.s.co as unknown as { env: Record<string, unknown> }).env.REVIEW_MAX_RUNS_PER_DAY = "1";
+  const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { only: ["ci"] });
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`)).status, 429);
+});
+
+test("git credentials never put the token on a git command line (shell history, ps)", async () => {
+  const a = await app();
+  const r = await a.call("POST", "/api/repos/shop/git-credentials");
+  for (const cmd of Object.values(r.body.commands as Record<string, string>)) assert.doesNotMatch(cmd, /git -c http\.extraHeader/);
+  assert.match(String((r.body.commands as Record<string, string>).push), /GIT_CONFIG_VALUE_0/);
+});
+
+test("a person can create at most 50 repos", async () => {
+  const a = await app();
+  for (let i = 0; i < 49; i++) await a.directory.addRepo(`r${i}`, "ann@x", null);
+  assert.equal((await a.call("POST", "/api/repos", { name: "one-more" })).status, 429);
 });

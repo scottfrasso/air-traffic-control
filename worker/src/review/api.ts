@@ -24,6 +24,8 @@ class HttpError extends Error {
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 const KINDS: ResolutionKind[] = ["wrong", "intentional", "wontfix"];
+/** Each repo is a Durable Object and an Artifacts repo; this keeps one person (or their agent) from making thousands. */
+const MAX_REPOS_PER_PERSON = 50;
 /** People push with this; long enough for a working session, short enough to not live forever. */
 const GIT_TOKEN_TTL_S = 8 * 3600;
 
@@ -41,6 +43,11 @@ async function body<T>(request: Request): Promise<T> {
 type Ctx = { env: ApiEnv; person: Caller; request: Request; params: string[]; directory: DurableObjectStub<Directory> };
 type Route = [method: string, pattern: RegExp, handler: (c: Ctx) => Promise<Response>];
 
+/** Some things only a person signed in through Access may do: a token could be an agent's (security review, 10-17). */
+function accessOnly(c: Ctx, what: string) {
+  if (c.person.via !== "access") throw new HttpError(403, `only a person signed in through Cloudflare Access can ${what}`);
+}
+
 const store = (c: Ctx) => c.env.REPOS.getByName(c.params[0]!);
 const prId = (c: Ctx) => Number(c.params[1]);
 
@@ -51,6 +58,7 @@ function mapError(err: unknown): HttpError {
   if (/^no PR\d+|^no run /.test(m)) return new HttpError(404, m);
   if (/already has an open PR|is (merged|closed|draft)$|push first, or name the head/.test(m)) return new HttpError(409, m);
   if (/^unknown check /.test(m)) return new HttpError(400, m);
+  if (/^run limit: /.test(m)) return new HttpError(429, m);
   if (/branch .* not found|can't merge .* into itself/.test(m)) return new HttpError(400, m);
   return new HttpError(500, m);
 }
@@ -66,6 +74,7 @@ const routes: Route[] = [
       const { name } = await body<{ name?: unknown }>(c.request);
       if (typeof name !== "string" || !REPO_NAME.test(name)) throw new HttpError(400, "name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$");
       if (await c.directory.hasRepo(name)) throw new HttpError(409, `repo ${name} already exists`);
+      if ((await c.directory.countRepos(c.person.email)) >= MAX_REPOS_PER_PERSON) throw new HttpError(429, `at most ${MAX_REPOS_PER_PERSON} repos per person`);
       let created: { remote?: string };
       try {
         created = (await c.env.ARTIFACTS.create(name, { setDefaultBranch: "main", description: `created by ${c.person.email}` })) as { remote?: string };
@@ -86,10 +95,12 @@ const routes: Route[] = [
     /^\/api\/repos\/([^/]+)\/git-credentials$/,
     async (c) => {
       const ref = await repoRef(c.env as unknown as Env, c.params[0]!, "write", GIT_TOKEN_TTL_S);
-      const auth = `git -c http.extraHeader="Authorization: Bearer ${ref.token}"`;
+      // The header goes to git through its environment, never its argv (anyone on the machine can read argv). Pushes
+      // to main that didn't come from a merge are put back (RepoStore.onPush), so this token can't skip review.
+      const env = `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Bearer ${ref.token}"`;
       return json({
         remote: ref.remote, token: ref.token, expiresInSeconds: GIT_TOKEN_TTL_S,
-        commands: { clone: `${auth} clone ${ref.remote}`, push: `${auth} push ${ref.remote} HEAD:<branch>`, fetch: `${auth} fetch ${ref.remote}` },
+        commands: { env, clone: `${env}; git clone ${ref.remote}`, push: `${env}; git push ${ref.remote} HEAD:<branch>`, fetch: `${env}; git fetch ${ref.remote}` },
       });
     },
   ],
@@ -178,11 +189,12 @@ const routes: Route[] = [
     "POST",
     /^\/api\/tokens$/,
     async (c) => {
+      accessOnly(c, "create tokens");
       const { label } = await body<{ label?: unknown }>(c.request);
       return json(await c.directory.createToken(c.person.email, typeof label === "string" ? label : "token"), 201);
     },
   ],
-  ["DELETE", /^\/api\/tokens\/(\d+)$/, async (c) => (await c.directory.revokeToken(c.person.email, Number(c.params[0])), json({ ok: true }))],
+  ["DELETE", /^\/api\/tokens\/(\d+)$/, async (c) => (accessOnly(c, "revoke tokens"), await c.directory.revokeToken(c.person.email, Number(c.params[0])), json({ ok: true }))],
 ];
 
 /** The method and path of every route (the web UI's test checks its calls against this). */
@@ -194,7 +206,12 @@ export async function handleApi(request: Request, env: ApiEnv, person: Caller, d
   for (const [method, pattern, handler] of routes) {
     const m = pattern.exec(path);
     if (!m || method !== request.method) continue;
-    const params = m.slice(1).map(decodeURIComponent);
+    let params: string[];
+    try {
+      params = m.slice(1).map(decodeURIComponent);
+    } catch {
+      return json({ error: "malformed path" }, 400);
+    }
     try {
       if (path.startsWith("/api/repos/") && params[0] && !(await directory.hasRepo(params[0]))) throw new HttpError(404, `no repo ${params[0]}`);
       return await handler({ env, person, request, params, directory });

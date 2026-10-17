@@ -42,7 +42,7 @@ function repo(opts: { ci?: string; fixFiles?: Record<string, string> } = {}) {
   const ref = { name: "shop", remote, token: "" };
   const check = async (input: object) => {
     const { stdout } = await run(process.execPath, ["--experimental-strip-types", "--no-warnings", CHECK], {
-      env: { CHECK_INPUT: JSON.stringify(input), ATC_CACHE: join(root, "cache"), ATC_WORK: join(root, "w"), PATH: `${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: root, SECRET_TOKEN: "do-not-leak" },
+      env: { CHECK_INPUT: JSON.stringify(input), ATC_CACHE: join(root, "cache"), ATC_WORK: join(root, "w"), PATH: `${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: root, SECRET_TOKEN: "do-not-leak" } as unknown as NodeJS.ProcessEnv,
     });
     return JSON.parse(stdout.split("\n").find((l) => l.startsWith("@@RESULT "))!.slice(9));
   };
@@ -150,11 +150,11 @@ test("merge: CI failing on the merged commit leaves main alone", { timeout: 60_0
   }
 });
 
-test("merge: refuses (retry) when the branch moved since the review", { timeout: 60_000 }, async () => {
+test("merge: refuses when the branch moved since the review (no retry: the new head needs its own review)", { timeout: 60_000 }, async () => {
   const r = repo();
   try {
     const out = await r.check({ mode: "merge", repo: r.ref, source: "fix", target: "main", expectedSource: "0".repeat(40), expectedTarget: r.base, message: "m", commands: [] });
-    assert.deepEqual([out.merged, out.retry], [false, true]);
+    assert.deepEqual([out.merged, out.retry], [false, undefined]);
     assert.equal(r.mainHead(), r.base);
   } finally {
     r.cleanup();
@@ -214,7 +214,7 @@ test("git never sees a token on its command line (anyone can read /proc/*/cmdlin
     writeFileSync(join(bin, "git"), `#!/bin/sh\necho "$@" >> ${log}\nexec ${join(GIT_DIR, "git")} "$@"\n`, { mode: 0o755 });
     const ref = { ...r.ref, token: "secret-token-xyz" };
     const { stdout } = await run(process.execPath, ["--experimental-strip-types", "--no-warnings", CHECK], {
-      env: { CHECK_INPUT: JSON.stringify({ mode: "ci", repo: ref, branch: "fix", sha: r.head, commands: [{ name: "t", run: "true", timeoutSeconds: 10 }] }), ATC_CACHE: join(r.root, "cache"), ATC_WORK: join(r.root, "w"), PATH: `${bin}:${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: r.root },
+      env: { CHECK_INPUT: JSON.stringify({ mode: "ci", repo: ref, branch: "fix", sha: r.head, commands: [{ name: "t", run: "true", timeoutSeconds: 10 }] }), ATC_CACHE: join(r.root, "cache"), ATC_WORK: join(r.root, "w"), PATH: `${bin}:${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: r.root } as unknown as NodeJS.ProcessEnv,
     });
     assert.match(stdout, /"passed"/);
     const argv = readFileSync(log, "utf8");
@@ -233,6 +233,91 @@ test("ci: a command's background processes don't outlive it", { timeout: 60_000 
     assert.equal(out.checks[0].status, "passed");
     const left = spawnSync("pgrep", ["-f", `sleep ${marker}`], { encoding: "utf8" }).stdout.trim();
     assert.equal(left, "", `still running: ${left}`);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("diff: after main is merged into the branch, main's own changes aren't part of the PR (three-dot against main's head)", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    r.g("checkout", "-q", "main");
+    r.write({ "src/other.ts": "export const o = 1;\n" });
+    r.g("add", "-A");
+    r.g("commit", "-q", "-m", "main moves on");
+    r.g("push", "-q", "origin", "HEAD:main");
+    r.g("checkout", "-q", "fix");
+    r.g("merge", "-q", "--no-edit", "main");
+    r.g("push", "-q", "origin", "HEAD:fix");
+    const head = r.g("rev-parse", "HEAD");
+    const d = await r.check({ mode: "diff", repo: r.ref, branch: "fix", target: "main", sha: head, base: r.base });
+    assert.equal(d.error, undefined, d.error);
+    assert.deepEqual(d.changedPaths.sort(), ["src/cart.ts", "src/new.ts"], "src/other.ts came from main");
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("a renamed file lists its old path too, so moving a protected file out of an owners glob is still a change to it", { timeout: 60_000 }, async () => {
+  const r = repo({ fixFiles: { "README.md": "x\n" } });
+  try {
+    mkdirSync(join(r.root, "work", "lib"), { recursive: true });
+    r.g("mv", "src/cart.ts", "lib/cart.ts");
+    r.g("commit", "-q", "-m", "move");
+    r.g("push", "-q", "origin", "HEAD:fix");
+    const head = r.g("rev-parse", "HEAD");
+    const d = await r.check({ mode: "diff", repo: r.ref, branch: "fix", target: "main", sha: head, base: r.base });
+    assert.ok(d.changedPaths.includes("src/cart.ts") && d.changedPaths.includes("lib/cart.ts"), JSON.stringify(d.changedPaths));
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("snapshot: budgets (.atc/review.yml) come from main, whatever target the PR names (a PR picks its target)", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    r.g("checkout", "-q", "main");
+    r.g("checkout", "-q", "-b", "rich");
+    r.write({ ".atc/review.yml": "budgets:\n  reviewer: 2000\n" });
+    r.g("add", "-A");
+    r.g("commit", "-q", "-m", "big budgets");
+    r.g("push", "-q", "origin", "HEAD:rich");
+    const s = await r.check({ mode: "snapshot", repo: r.ref, branch: "fix", target: "rich", sha: r.head, base: r.base });
+    assert.equal(s.error, undefined, s.error);
+    assert.equal(s.config.review, null, "main has no review.yml, so the defaults apply");
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("ci: commands run with a file-size limit (and, as root, a process limit for the job's own uid)", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    const c = await r.check({ mode: "ci", repo: r.ref, branch: "fix", sha: r.head, commands: [{ name: "limits", run: "ulimit -f", timeoutSeconds: 30 }] });
+    assert.equal(c.error, undefined, c.error);
+    const fsize = c.checks[0].log.trim();
+    assert.ok(Number(fsize) <= 4194304, `fsize ${fsize}`);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("restore: puts a branch back to a commit, only if it's still where we saw it", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    r.g("checkout", "-q", "main");
+    r.write({ "src/backdoor.ts": "export const x = 1;\n" });
+    r.g("add", "-A");
+    r.g("commit", "-q", "-m", "straight to main");
+    r.g("push", "-q", "origin", "HEAD:main");
+    const bad = r.mainHead();
+    const stale = await r.check({ mode: "restore", repo: r.ref, branch: "main", sha: r.base, current: "0".repeat(40) });
+    assert.equal(stale.restored, false, "main isn't where we think: leave it");
+    assert.equal(r.mainHead(), bad);
+    const out = await r.check({ mode: "restore", repo: r.ref, branch: "main", sha: r.base, current: bad });
+    assert.equal(out.error, undefined, out.error);
+    assert.equal(out.restored, true);
+    assert.equal(r.mainHead(), r.base);
   } finally {
     r.cleanup();
   }

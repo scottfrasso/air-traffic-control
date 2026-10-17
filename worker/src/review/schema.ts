@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS runs(
   ci_config TEXT,                      -- the head's .atc/ci.yml (merge re-runs it on the merged commit)
   instance TEXT NOT NULL,              -- Workflow instance id
   scope TEXT,                          -- JSON CheckName[] for a partial run (single checks); NULL: everything
+  delta TEXT,                          -- JSON paths changed since the last reviewed commit; NULL on a first review
+  sessions TEXT,                       -- JSON Managed Agents session ids, interrupted if the run is cancelled
   started_at INTEGER NOT NULL, finished_at INTEGER);
 
 -- CI commands (kind ci) and pipeline steps (kind step: classifier, each reviewer, verification).
@@ -46,9 +48,17 @@ CREATE TABLE IF NOT EXISTS approvals(pr INTEGER NOT NULL, sha TEXT NOT NULL, by 
 CREATE TABLE IF NOT EXISTS diffs(sha TEXT NOT NULL, base TEXT NOT NULL, diff TEXT NOT NULL, paths TEXT NOT NULL, PRIMARY KEY(sha, base));
 
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, pr INTEGER, kind TEXT NOT NULL, detail TEXT NOT NULL);
+
+CREATE INDEX IF NOT EXISTS events_by_pr ON events(pr, id);
+CREATE INDEX IF NOT EXISTS findings_by_pr ON findings(pr, status);
+CREATE INDEX IF NOT EXISTS runs_by_pr ON runs(pr, id);
 `;
 
 /** Columns added after a store was first created: added in place, once. */
 export const REPO_MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
   { table: "runs", column: "scope", ddl: "ALTER TABLE runs ADD COLUMN scope TEXT" },
+  // Paths changed since the last reviewed commit (JSON; NULL on a first review): only their findings can become fixed.
+  { table: "runs", column: "delta", ddl: "ALTER TABLE runs ADD COLUMN delta TEXT" },
+  // Managed Agents sessions the run started (JSON), so cancelling the run stops them too.
+  { table: "runs", column: "sessions", ddl: "ALTER TABLE runs ADD COLUMN sessions TEXT" },
 ];

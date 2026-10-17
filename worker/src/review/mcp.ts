@@ -16,15 +16,19 @@ export interface McpEnv {
  * and findings, and answer a finding. Plain functions (tested directly); the MCP server below only registers them.
  */
 export function reviewTools(env: McpEnv, person: Person) {
-  const repo = (name: string) => env.REPOS.getByName(name);
+  // Like the HTTP API: only registered repos (a typo would otherwise create an empty store).
+  const repo = async (name: string) => {
+    if (!(await env.DIRECTORY.getByName("directory").hasRepo(name))) throw new Error(`no repo ${name}`);
+    return env.REPOS.getByName(name);
+  };
   return {
     open_pr: async (a: { repo: string; title: string; source: string; target?: string; intent?: Record<string, string> }) =>
-      repo(a.repo).openPr({ title: a.title, author: person.email, source: a.source, ...(a.target ? { target: a.target } : {}), ...(a.intent ? { intent: a.intent } : {}) }),
+      (await repo(a.repo)).openPr({ title: a.title, author: person.email, source: a.source, ...(a.target ? { target: a.target } : {}), ...(a.intent ? { intent: a.intent } : {}) }),
     run_checks: async (a: { repo: string; pr: number; sha?: string; only?: CheckName[] }) =>
-      repo(a.repo).runChecks(a.pr, person.email, { ...(a.sha ? { sha: a.sha } : {}), ...(a.only ? { only: a.only } : {}) }),
-    mark_ready: async (a: { repo: string; pr: number }) => repo(a.repo).markReady(a.pr, person.email),
+      (await repo(a.repo)).runChecks(a.pr, person.email, { ...(a.sha ? { sha: a.sha } : {}), ...(a.only ? { only: a.only } : {}) }),
+    mark_ready: async (a: { repo: string; pr: number }) => (await repo(a.repo)).markReady(a.pr, person.email),
     get_pr: async (a: { repo: string; pr: number }) => {
-      const v = await repo(a.repo).getPr(a.pr);
+      const v = await (await repo(a.repo)).getPr(a.pr);
       return {
         id: v.pr.id, title: v.pr.title, state: v.pr.state, head: v.pr.head, verdict: v.verdict, // verdict.checks: not_run | running | done | partial | stale
         checks: v.checks.map((c) => ({ name: c.name, kind: c.kind, status: c.status, log: c.status === "passed" ? undefined : c.log.slice(-2000) })),
@@ -32,7 +36,7 @@ export function reviewTools(env: McpEnv, person: Person) {
       };
     },
     resolve_finding: async (a: { repo: string; pr: number; finding: number; kind: "wrong" | "intentional" | "wontfix"; reason: string }) =>
-      repo(a.repo).resolveFinding(a.pr, a.finding, person.email, a.kind, a.reason, "token"), // MCP is always an agent's token
+      (await repo(a.repo)).resolveFinding(a.pr, a.finding, person.email, a.kind, a.reason, "token"), // MCP is always an agent's token
   };
 }
 

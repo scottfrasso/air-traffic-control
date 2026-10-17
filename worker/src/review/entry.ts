@@ -15,12 +15,29 @@ export type ReviewWorkerEnv = ApiEnv & IdentityEnv & {
 async function mintToken(request: Request, env: ReviewWorkerEnv): Promise<Response> {
   const given = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/, "");
   // Compare digests, so the comparison takes the same time however much of the secret matches.
-  if (!env.ADMIN_SECRET || !given || (await hashToken(given)) !== (await hashToken(env.ADMIN_SECRET))) return unauthorized();
+  // A short secret turns the endpoint off: it can mint a token for anyone (security review, 10-17).
+  if (!env.ADMIN_SECRET || env.ADMIN_SECRET.length < 32 || !given || (await hashToken(given)) !== (await hashToken(env.ADMIN_SECRET))) return unauthorized();
   const body = (await request.json().catch(() => ({}))) as { email?: unknown; label?: unknown };
   if (typeof body.email !== "string" || !/^[^@\s]+@[^@\s]+$/.test(body.email)) return Response.json({ error: "email required" }, { status: 400 });
   const directory = env.DIRECTORY.getByName("directory");
   const person = await directory.ensurePerson(body.email.toLowerCase());
   return Response.json(await directory.createToken(person.email, typeof body.label === "string" ? body.label : "admin"), { status: 201 });
+}
+
+/** The web UI's own pages (one HTML shell; the script routes). */
+const UI_PAGES = /^\/(?:settings\/?|repos\/.+)?$/;
+
+/**
+ * CSRF: Access authenticates a browser by its cookie, which a page on another site can make it send. So a request
+ * that changes something, unless it carries a bearer token (scripts and agents, not browsers), must come from this
+ * site (Origin) and be JSON (a cross-site form can't send that without a CORS preflight, which we never answer).
+ */
+function sameSiteWrite(request: Request, url: URL): boolean {
+  if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return true;
+  if ((request.headers.get("authorization") ?? "").startsWith("Bearer ")) return true;
+  const origin = request.headers.get("origin");
+  const json = (request.headers.get("content-type") ?? "").split(";")[0]!.trim() === "application/json";
+  return origin === url.origin && json;
 }
 
 const unauthorized = () =>
@@ -34,8 +51,9 @@ export async function handle(request: Request, env: ReviewWorkerEnv, ctx: Execut
   const url = new URL(request.url);
   if (url.pathname === "/health") return Response.json({ ok: true });
   if (request.method === "POST" && url.pathname === "/api/admin/tokens") return mintToken(request, env);
-  if (request.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/repos/")))
+  if (request.method === "GET" && UI_PAGES.test(url.pathname))
     return new Response(ui, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'" } });
+  if (!sameSiteWrite(request, url)) return Response.json({ error: "cross-site request refused: send JSON from this site" }, { status: 403 });
   const directory = env.DIRECTORY.getByName("directory");
   const person = await personFromRequest(request, env, directory);
   if (!person) return unauthorized();

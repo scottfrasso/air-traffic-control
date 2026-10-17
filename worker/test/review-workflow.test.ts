@@ -63,3 +63,11 @@ test("the container gets a short-lived read token, never one with write scope, f
   await runReview(reviewDeps(w.env as never, w.step as never, w.params), w.params);
   for (const c of w.containerCalls) assert.equal((c as unknown as { repo: { token: string } }).repo.token, "read-token");
 });
+
+
+test("starting an agent session is never retried (a lost response would start a second, untracked, billing session)", async () => {
+  const { stepConfig } = await import("../src/review/workflow");
+  assert.equal(stepConfig("security: start").retries?.limit, 0);
+  assert.equal(stepConfig("verify security 0: start").retries?.limit, 0);
+  assert.ok((stepConfig("security: poll 3").retries?.limit ?? 0) > 0);
+});

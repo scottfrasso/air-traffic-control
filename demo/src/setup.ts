@@ -16,7 +16,7 @@ import { setDefaultResultOrder } from "node:dns";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { ROOT } from "./lib/env.ts";
+import { readDotenv, ROOT } from "./lib/env.ts";
 
 // API tokens are often IP-filtered on IPv4 only; prefer it (same as NODE_OPTIONS=--dns-result-order=ipv4first elsewhere).
 setDefaultResultOrder("ipv4first");
@@ -26,16 +26,7 @@ const WRANGLER = resolve(ROOT, "worker/wrangler.jsonc");
 const QUEUES = ["agentmesh-review-push-events", "agentmesh-review-push-events-dlq"];
 const NAMESPACE = "agentmesh";
 
-const readEnv = (): Record<string, string> => {
-  try {
-    return Object.fromEntries(
-      readFileSync(ENV_FILE, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && l.includes("="))
-        .map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim().replace(/^["']|["']$/g, "")]),
-    );
-  } catch {
-    return {};
-  }
-};
+const readEnv = () => readDotenv(ENV_FILE);
 const env = { ...readEnv(), ...Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLOUDFLARE_|AGENTMESH_)/.test(k))) } as Record<string, string | undefined>;
 const say = (msg: string) => console.log(`${DRY ? "[dry run] " : ""}${msg}`);
 
@@ -131,12 +122,14 @@ async function main() {
   // Temporary, until Access is set up: lets `POST /api/admin/tokens` mint personal tokens (they still can't approve).
   const adminSecret = process.env.ADMIN_SECRET || readEnv().ADMIN_SECRET || "";
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
-  const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
-  if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
-    say(
-      "note: CLOUDFLARE_AGENTMESH_WORKER_API_KEY not set, so the Worker gets CLOUDFLARE_API_TOKEN. That works only if the token " +
-        "is NOT IP-restricted (the Worker calls the API from Cloudflare's network). Better: a separate token with Queues edit only.",
+  // The Worker only needs to create push subscriptions; the deploy token can do far more, so it's used only on request
+  // (security review, 10-17).
+  if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY && !process.argv.includes("--worker-uses-deploy-token"))
+    throw new Error(
+      "set CLOUDFLARE_AGENTMESH_WORKER_API_KEY (a token with Queues edit and event subscriptions only) in .env, or pass " +
+        "--worker-uses-deploy-token to give the Worker CLOUDFLARE_API_TOKEN (it must not be IP-restricted)",
     );
+  const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
 
   if (DRY) {
     say(`would run: wrangler deploy --secrets-file <CF_API_TOKEN${anthropicKey ? ", ANTHROPIC_API_KEY" : ""}> (needs Docker for the checker image)`);

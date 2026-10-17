@@ -20,7 +20,7 @@ export async function buildSnapshot(opts: {
   const { pr } = opts;
   const out = JSON.parse(
     await opts.run({ mode: "snapshot", repo: opts.ref, branch: pr.source, target: pr.target, sha: opts.sha, base: pr.base, since: opts.since }),
-  ) as { error?: string; diff: string; changedPaths: string[]; sinceDiff?: string; tarGzBase64: string; config: Snapshot["config"] };
+  ) as { error?: string; diff: string; changedPaths: string[]; sinceDiff?: string; sinceChangedPaths?: string[]; tarGzBase64: string; config: Snapshot["config"] };
   if (out.error) throw new Error(`snapshot failed: ${out.error}`);
   const tar = Uint8Array.from(atob(out.tarGzBase64), (c) => c.charCodeAt(0));
   const intent = JSON.stringify({ id: pr.id, title: pr.title, source: pr.source, target: pr.target, intent: pr.intent });
@@ -34,6 +34,7 @@ export async function buildSnapshot(opts: {
     fileIds: { "repo.tar.gz": repoTar, "diff.patch": diff, "pr.json": prJson, ...(since ? { "since.patch": since } : {}) },
     // The whole change: the classifier and the hard rules judge all of it on every run.
     changedPaths: out.changedPaths,
+    sinceChangedPaths: opts.since ? (out.sinceChangedPaths ?? []) : null,
     config: out.config,
   };
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { Directory } from "../src/review/directory";
-import { hashToken, personFromRequest, verifyAccessJwt } from "../src/review/identity";
+import { forgetAccessKeys, hashToken, personFromRequest, verifyAccessJwt } from "../src/review/identity";
 import { sqlStorage } from "./harness/sql";
 
 const TEAM = "acme.cloudflareaccess.com";
@@ -11,7 +11,8 @@ const b64url = (data: ArrayBuffer | Uint8Array | string) =>
   Buffer.from(typeof data === "string" ? data : data instanceof Uint8Array ? data : new Uint8Array(data)).toString("base64url");
 
 async function signer() {
-  const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  forgetAccessKeys();
+  const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const id = `k-${crypto.randomUUID()}`; // Access key ids are unique; the verifier caches keys by team
   const jwk = { ...(await crypto.subtle.exportKey("jwk", publicKey)), kid: id, alg: "RS256" };
   const sign = async (claims: Record<string, unknown>, kid = id) => {
@@ -91,4 +92,28 @@ test("without Access configured, a JWT header is ignored (never trusted unverifi
   const s = await signer();
   const { d } = directory();
   assert.equal(await personFromRequest(new Request("https://x/", { headers: { "cf-access-jwt-assertion": await s.sign(claims()) } }), {}, d, s.certs), null);
+});
+
+test("JWTs with unknown key ids can't make us re-fetch the Access keys more than once a minute", async () => {
+  const s = await signer();
+  let fetches = 0;
+  const counting = (async () => (fetches++, new Response(JSON.stringify({ keys: [] })))) as unknown as typeof fetch;
+  const team = { teamDomain: `t${Date.now()}.cloudflareaccess.com`, aud: AUD };
+  const forged = await s.sign(claims(), "k-unknown");
+  for (let i = 0; i < 5; i++) assert.equal(await verifyAccessJwt(forged, team, counting), null);
+  assert.equal(fetches, 1, "one fetch: a forced refresh waits until the keys are a minute old");
+});
+
+test("personal tokens expire after 90 days", async () => {
+  const { d } = directory();
+  const { token } = await d.createToken("ann@x.dev", "laptop");
+  const hash = await hashToken(token);
+  assert.equal((await d.personForToken(hash))?.email, "ann@x.dev");
+  const real = Date.now;
+  Date.now = () => real() + 91 * 86_400_000;
+  try {
+    assert.equal(await d.personForToken(hash), null);
+  } finally {
+    Date.now = real;
+  }
 });

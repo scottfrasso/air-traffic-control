@@ -56,6 +56,9 @@ export interface RawFinding {
   suggestion?: string;
 }
 
+/** A finding the author answered: it hides the same bug near the same line, at the same or lower severity. */
+export type Resolved = Pick<RawFinding, "file" | "class" | "line" | "severity">;
+
 export interface Finding extends RawFinding {
   id: number;
   pr: number;
@@ -103,4 +106,8 @@ export interface Verdict {
   humanReasons: string[];
   mergeable: boolean;
   blockers: string[];
+  /** The tier needs an approval from someone other than the author, and there isn't one yet. */
+  needsNonAuthor: boolean;
+  /** Open important findings (each blocks merge). */
+  openImportant: number;
 }

@@ -12,7 +12,7 @@ export function store(repo = "shop") {
   const db = new DatabaseSync(":memory:");
   /** Branch → head sha, as Artifacts would answer. */
   const heads = new Map<string, string>([["main", "m0"]]);
-  const runs: Array<{ id: string; params: { repo: string; pr: number; sha: string; run: number } }> = [];
+  const runs: Array<{ id: string; params: { repo: string; pr: number; sha: string; run: number; only?: string[] } }> = [];
   const terminated: string[] = [];
   const self = {
     db,

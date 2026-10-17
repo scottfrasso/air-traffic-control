@@ -6,9 +6,12 @@ CREATE TABLE IF NOT EXISTS people(email TEXT PRIMARY KEY, name TEXT NOT NULL, cr
 -- Personal API tokens: only the SHA-256 is kept; the token itself is shown once, at creation.
 CREATE TABLE IF NOT EXISTS tokens(
   id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, label TEXT NOT NULL,
-  hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER);
+  hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER, expires_at INTEGER);
 CREATE TABLE IF NOT EXISTS repos(name TEXT PRIMARY KEY, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, subscription_id TEXT);
 `;
+
+/** Personal tokens last this long; make a new one in the UI (security review, 10-17). */
+export const TOKEN_TTL_MS = 90 * 86_400_000;
 
 /** One global instance ("directory"): people, their API tokens, and the list of repos. */
 export class Directory extends DurableObject {
@@ -18,6 +21,8 @@ export class Directory extends DurableObject {
     super(ctx, env as never);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    const cols = this.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('tokens')").toArray().map((c) => c.name);
+    if (!cols.includes("expires_at")) this.sql.exec("ALTER TABLE tokens ADD COLUMN expires_at INTEGER");
   }
 
   async ensurePerson(email: string): Promise<Person> {
@@ -31,7 +36,8 @@ export class Directory extends DurableObject {
   async createToken(email: string, label: string): Promise<{ id: number; token: string }> {
     const person = await this.ensurePerson(email);
     const token = newToken();
-    this.sql.exec("INSERT INTO tokens(email, label, hash, created_at) VALUES (?, ?, ?, ?)", person.email, label.trim().slice(0, 80) || "token", await hashToken(token), Date.now());
+    const now = Date.now();
+    this.sql.exec("INSERT INTO tokens(email, label, hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", person.email, label.trim().slice(0, 80) || "token", await hashToken(token), now, now + TOKEN_TTL_MS);
     return { id: this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id, token };
   }
 
@@ -46,7 +52,7 @@ export class Directory extends DurableObject {
 
   async personForToken(hash: string): Promise<Person | null> {
     const p = this.sql
-      .exec<{ email: string; name: string }>("SELECT p.email, p.name FROM tokens t JOIN people p ON p.email = t.email WHERE t.hash = ? AND t.revoked_at IS NULL", hash)
+      .exec<{ email: string; name: string }>("SELECT p.email, p.name FROM tokens t JOIN people p ON p.email = t.email WHERE t.hash = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)", hash, Date.now())
       .toArray()[0];
     return p ? { email: p.email, name: p.name } : null;
   }
@@ -57,6 +63,10 @@ export class Directory extends DurableObject {
 
   async listRepos(): Promise<Array<{ name: string; created_by: string; created_at: number }>> {
     return this.sql.exec<{ name: string; created_by: string; created_at: number }>("SELECT name, created_by, created_at FROM repos ORDER BY name").toArray();
+  }
+
+  async countRepos(by: string): Promise<number> {
+    return this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM repos WHERE created_by = ?", by.toLowerCase()).one().n;
   }
 
   async hasRepo(name: string): Promise<boolean> {

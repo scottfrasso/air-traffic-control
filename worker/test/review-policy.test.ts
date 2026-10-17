@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyHardRules, atLeast, computeVerdict, countApprovals, dedupeAcross, filterNew, mergeGate, requiredApprovals, tallyVotes, type VerdictInput } from "../src/review/policy";
+import { applyHardRules, atLeast, computeVerdict, countApprovals, dedupeAcross, filterNew, isReal, requiredApprovals, type VerdictInput } from "../src/review/policy";
 import type { Approval, Classification, Finding, RawFinding } from "../src/review/types";
 
 const cls = (over: Partial<Classification> = {}): Classification => ({ tier: "low", needsHuman: false, humanReasons: [], reviewers: ["correctness"], depth: "standard", ...over });
@@ -19,22 +19,17 @@ test("needsHuman raises a low-tier PR to one approval", () => {
   assert.equal(requiredApprovals("low", true), 1);
 });
 
-test("the author's own approval of the head satisfies a medium-tier PR", () => {
-  assert.equal(countApprovals([ap("ann@x")], "h1", "ann@x", "medium").satisfied(1), true);
-});
-
-test("the author alone doesn't satisfy a high-tier PR, even with two approvals counted", () => {
-  const c = countApprovals([ap("ann@x"), ap("bob@x")], "h1", "ann@x", "high");
-  assert.equal(c.satisfied(2), true);
-  assert.equal(countApprovals([ap("ann@x")], "h1", "ann@x", "high").satisfied(1), false);
+test("the author's own approval of the head counts once; others count as non-authors", () => {
+  assert.deepEqual(countApprovals([ap("ann@x")], "h1", "ann@x"), { count: 1, nonAuthor: 0 });
+  assert.deepEqual(countApprovals([ap("ann@x"), ap("bob@x"), ap("bob@x")], "h1", "ann@x"), { count: 2, nonAuthor: 1 });
 });
 
 test("the same person approving twice counts once", () => {
-  assert.equal(countApprovals([ap("bob@x"), ap("bob@x")], "h1", "ann@x", "high").count, 1);
+  assert.equal(countApprovals([ap("bob@x"), ap("bob@x")], "h1", "ann@x").count, 1);
 });
 
 test("an approval for an older commit doesn't count", () => {
-  assert.equal(countApprovals([ap("bob@x", "h0")], "h1", "ann@x", "medium").count, 0);
+  assert.equal(countApprovals([ap("bob@x", "h0")], "h1", "ann@x").count, 0);
 });
 
 test("touching .atc/ci.yml always needs a human, and never lowers the tier", () => {
@@ -51,11 +46,11 @@ test("a path listed in .atc/owners needs a human", () => {
 });
 
 test("a finding is real when at least 2 of 3 verifiers say so", () => {
-  assert.deepEqual(tallyVotes([[true, true, false], [true, false, false]]), [true, false]);
+  assert.deepEqual([isReal([true, true, false]), isReal([true, false, false])], [true, false]);
 });
 
 test("a finding the author resolved is never posted again for the same file and class", () => {
-  assert.deepEqual(filterNew([raw(), raw({ file: "src/b.ts" })], [{ file: "src/a.ts", class: "bug" }], 2).map((f) => f.file), ["src/b.ts"]);
+  assert.deepEqual(filterNew([raw(), raw({ file: "src/b.ts" })], [{ file: "src/a.ts", class: "bug", line: 1, severity: "important" }], 2).map((f) => f.file), ["src/b.ts"]);
 });
 
 test("from the 4th run, new nits are dropped but important findings kept", () => {
@@ -67,7 +62,7 @@ test("clean review, green CI, low tier: mergeable with no approvals", () => {
   const v = computeVerdict(input());
   assert.equal(v.review, "clean");
   assert.equal(v.mergeable, true);
-  assert.deepEqual(mergeGate(v), { ok: true, blockers: [] });
+  assert.deepEqual(v.blockers, []);
 });
 
 test("an open important finding blocks merge, and says how many", () => {
@@ -175,4 +170,28 @@ test("dedupeAcross never merges within one reviewer or across files", () => {
   });
   assert.equal(out.correctness!.length, 2);
   assert.equal(out.security!.length, 1);
+});
+
+test("dedupeAcross keeps the most severe report of a bug, before the lane it belongs to", () => {
+  const out = dedupeAcross({
+    correctness: [rf("src/db.ts", 10, "sql-injection", "User input concatenated into the SQL query", "important")],
+    security: [rf("src/db.ts", 10, "sql-injection", "User input concatenated into the SQL query", "nit")],
+  });
+  assert.deepEqual([out.correctness!.length, out.security!.length], [1, 0]);
+});
+
+test("a resolved finding hides only the same bug near the same line, at the same or lower severity", () => {
+  const resolved = [{ file: "src/api.ts", class: "missing-auth-check", line: 10, severity: "nit" as const }];
+  const found = [
+    rf("src/api.ts", 11, "missing-auth-check", "same nit again", "nit"),
+    rf("src/api.ts", 12, "missing-auth-check", "a real bypass", "important"),
+    rf("src/api.ts", 90, "missing-auth-check", "another place", "nit"),
+  ];
+  assert.deepEqual(filterNew(found, resolved, 1).map((f) => f.title), ["a real bypass", "another place"]);
+});
+
+test("the verdict carries what the UI shows as fields, not only as blocker text", () => {
+  const v = computeVerdict({ state: "ready", ci: "pass", reviewDone: true, errored: [], open: [], securityRan: true, classification: { tier: "high", needsHuman: true, humanReasons: [], reviewers: ["correctness"], depth: "standard" }, approvals: [], head: "h", author: "ann@x" });
+  assert.equal(v.needsNonAuthor, true);
+  assert.equal(v.openImportant, 0);
 });

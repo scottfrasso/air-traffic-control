@@ -6,7 +6,8 @@
 //   ci        run the repo's CI commands at a commit, each a check, bounded per command
 //   diff      the PR's whole change for the web UI
 //   merge     merge a PR branch onto its target, run CI on the result, push the target only if CI passes
-import { execFileSync, spawn } from "node:child_process";
+//   restore   put a protected branch back to a commit (a push that didn't come from a merge)
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -16,7 +17,8 @@ type Input =
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
   | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
-  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] };
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] }
+  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string };
 
 interface CiCommand { name: string; run: string; timeoutSeconds: number }
 interface CiCheck { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number }
@@ -184,8 +186,9 @@ const fileAt = (sha: string, path: string): string | null => {
 const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
 
 const diffOf = (range: string[]) => {
-  const d = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", ...range]).out);
-  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", ...range]).out.split("\n").filter(Boolean) };
+  // --no-renames: a rename lists both paths, so moving a protected file out of an owners glob still needs a person.
+  const d = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", "--no-renames", ...range]).out);
+  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", "--no-renames", ...range]).out.split("\n").filter(Boolean) };
 };
 
 /**
@@ -197,7 +200,9 @@ function changes(i: { repo: RepoRef; branch: string; target: string; sha: string
   const targetHead = fetchBranch(i.repo, i.target);
   fetchBranch(i.repo, i.branch);
   if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
-  const whole = diffOf(i.base ? [`${i.base}...${i.sha}`] : [`${i.sha}^`, i.sha]);
+  // Against the target's head, three-dot (from their merge base): once the branch merges the target in, the target's
+  // own changes drop out of the PR, as on any code host. The stored base is only a hint (review of 10-17).
+  const whole = diffOf([`${targetHead}...${i.sha}`]);
   const delta = i.since && git(["cat-file", "-e", `${i.since}^{commit}`], { allowFail: true }).ok ? diffOf([i.since, i.sha]) : null;
   return { targetHead, diff: whole.diff, changedPaths: whole.paths, ...(delta ? { sinceDiff: delta.diff, sinceChangedPaths: delta.paths } : {}) };
 }
@@ -210,27 +215,42 @@ function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
     mode: "snapshot", sha: i.sha, ...change, tarGzBase64: tarGz.toString("base64"),
     // CI is the PR's own (it may change its tests). Review guidance, budgets and owners come from the target: a PR
     // must not rewrite the rules it is reviewed by (review of PR #50).
-    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(targetHead, ".atc/review.yml"), owners: fileAt(targetHead, ".atc/owners"), reviewMd: fileAt(targetHead, "REVIEW.md") },
+    // Budgets and minApprovals come from main whatever the target: the author picks the target, so a branch of their
+    // own with big budgets must not set what a run may spend (security review, 10-17).
+    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(i.target === DEFAULT_BRANCH ? targetHead : fetchBranch(i.repo, DEFAULT_BRANCH), ".atc/review.yml"), owners: fileAt(targetHead, ".atc/owners"), reviewMd: fileAt(targetHead, "REVIEW.md") },
     timings,
   };
 }
 
-/** The unprivileged user CI commands run as when the container runs as root (Dockerfile: useradd ci). */
-const CI_UID = 10001;
-const asCi = typeof process.getuid === "function" && process.getuid() === 0 ? { uid: CI_UID, gid: CI_UID } : {};
+/** The repo's main branch: where budgets and minApprovals live. */
+const DEFAULT_BRANCH = "main";
+
+/**
+ * When the container runs as root, each CI job runs as its own throwaway uid, so one job's leftovers can't touch
+ * another PR's worktree, and everything that uid still runs afterwards is killed, even what left the process group
+ * with setsid (security review, 10-17). Not root (tests): run as ourselves.
+ */
+const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+const jobUser = () => (ROOT ? { uid: 20000 + Math.floor(Math.random() * 40000), gid: 10001 } : null);
+/**
+ * Per job: files up to 4 GB (ulimit -f counts 1 KiB blocks), and for a job's own uid at most 512 processes (the
+ * process limit counts every process of the uid, so it only makes sense for a uid of its own).
+ */
+const limits = (user: { uid: number } | null) => `ulimit -f 4194304 2>/dev/null;${user ? " ulimit -u 512 2>/dev/null;" : ""}`;
 
 /**
  * One CI command in its own process group, as the ci user when we're root, with a minimal environment (no tokens, no
  * CHECK_INPUT). When it exits or times out, its whole group is killed, so nothing it started in the background
  * outlives it to tamper with the shared repo or later runs (review of PR #50).
  */
-function runCommand(c: CiCommand, cwd: string, home: string): Promise<{ status: number | null; timedOut: boolean; out: string; error?: Error }> {
+function runCommand(c: CiCommand, cwd: string, home: string, user: { uid: number; gid: number } | null): Promise<{ status: number | null; timedOut: boolean; out: string; error?: Error }> {
   return new Promise((resolve) => {
     let out = "";
     let timedOut = false;
     const killGroup = (pid: number | undefined) => { if (pid) try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ } };
-    const child = spawn("sh", ["-c", `exec 2>&1\n${c.run}`], {
-      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" }, detached: true, stdio: ["ignore", "pipe", "pipe"], ...asCi,
+    const child = spawn("sh", ["-c", `exec 2>&1\n${limits(user)}\n${c.run}`], {
+      // (The cast: wrangler's generated types add the Worker's vars to ProcessEnv; this process has only these.)
+      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" } as unknown as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(user ?? {}),
     });
     child.stdout.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
     child.stderr.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
@@ -250,9 +270,10 @@ async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
   const wt = mkdtempSync(join(WORK, "ci-"));
   const home = mkdtempSync(join(WORK, "ci-home-"));
   const out: CiCheck[] = [];
+  const user = jobUser();
   try {
     git(["worktree", "add", "-q", "--detach", wt, sha]);
-    if ("uid" in asCi) execFileSync("chown", ["-R", `${CI_UID}:${CI_UID}`, wt, home]);
+    if (user) execFileSync("chown", ["-R", `${user.uid}:${user.gid}`, wt, home]);
     let stopped = false;
     for (const c of commands) {
       if (stopped) {
@@ -261,7 +282,7 @@ async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
       }
       progress(`ci ${c.name}`);
       const t = Date.now();
-      const r = await runCommand(c, wt, home);
+      const r = await runCommand(c, wt, home, user);
       const ms = Date.now() - t;
       const tail = r.out.slice(-7800);
       if (r.timedOut) out.push({ name: c.name, status: "errored", log: `${tail}\n[timed out after ${c.timeoutSeconds} s]`, ms });
@@ -270,6 +291,8 @@ async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
       stopped = out.at(-1)!.status !== "passed";
     }
   } finally {
+    // Whatever the job's uid still runs (a daemon started with setsid escapes the group kill) dies with the job.
+    if (user) spawnSync("pkill", ["-KILL", "-U", String(user.uid)], { stdio: "ignore" }); // exit 1 = nothing left: fine
     git(["worktree", "remove", "--force", wt], { allowFail: true });
     rmSync(home, { recursive: true, force: true });
   }
@@ -286,41 +309,59 @@ async function ci(i: Extract<Input, { mode: "ci" }>) {
 async function merge(i: Extract<Input, { mode: "merge" }>) {
   const target = fetchBranch(i.repo, i.target);
   const source = fetchBranch(i.repo, i.source);
-  if (source !== i.expectedSource) return { mode: "merge", merged: false, retry: true, reason: `${i.source} moved to ${source.slice(0, 7)} since it was reviewed (${i.expectedSource.slice(0, 7)})` };
+  // `retry` means one thing: the target moved, so merging again onto `targetHead` may work (code review, 10-17).
+  if (source !== i.expectedSource) return { mode: "merge", merged: false, reason: `${i.source} moved to ${source.slice(0, 7)} since it was reviewed (${i.expectedSource.slice(0, 7)})` };
   if (target !== i.expectedTarget) return { mode: "merge", merged: false, retry: true, reason: `${i.target} moved to ${target.slice(0, 7)}; merge again onto the new head`, targetHead: target };
-  const onto = ontoBase(source, target, i.message);
+  const onto = ontoTarget(source, target, i.message);
   if ("conflicts" in onto) return { mode: "merge", merged: false, reason: `merge conflict with ${i.target} in ${onto.conflicts.join(", ")}`, conflicts: onto.conflicts };
-  const checks = await runCi(onto.sha, i.commands);
-  if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
-  const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
-  if (!push.ok) return { mode: "merge", merged: false, retry: true, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); retry`, checks };
-  return { mode: "merge", merged: true, sha: onto.sha, checks, timings };
+  try {
+    const checks = await runCi(onto.sha, i.commands);
+    if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
+    const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+    if (!push.ok) return { mode: "merge", merged: false, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); merge again`, checks };
+    return { mode: "merge", merged: true, sha: onto.sha, checks, timings };
+  } finally {
+    if (onto.sha !== source) git(["update-ref", "-d", ontoRef(onto.sha)], { allowFail: true }); // pushed or not, the scratch ref goes
+  }
 }
 
 /**
- * Merge-queue step: put `fork` on top of `base`. If the fork already contains base, that's the fork itself;
- * otherwise create a merge commit in a scratch worktree (first parent = base, so pushing it to main is a fast-forward).
+ * Put the PR's head on top of the target's head. If the head already contains the target, that's the head itself;
+ * otherwise create a merge commit in a scratch worktree (first parent = target, so pushing it is a fast-forward).
  */
-function ontoBase(fork: string, base: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
-  if (git(["merge-base", "--is-ancestor", base, fork], { allowFail: true }).ok) return { sha: fork };
+const ontoRef = (sha: string) => `refs/agentmesh/onto-${sha.slice(0, 12)}`;
+
+function ontoTarget(head: string, target: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
+  if (git(["merge-base", "--is-ancestor", target, head], { allowFail: true }).ok) return { sha: head };
   const wt = mkdtempSync(join(WORK, "onto-"));
   const prev = dir;
   try {
-    git(["worktree", "add", "-q", "--detach", wt, base]);
+    git(["worktree", "add", "-q", "--detach", wt, target]);
     dir = wt;
-    const merge = git(["merge", "--no-ff", "-q", "-m", message, fork], { allowFail: true });
+    const merge = git(["merge", "--no-ff", "-q", "-m", message, head], { allowFail: true });
     if (!merge.ok) {
       const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
       return { conflicts, output: merge.out.slice(0, 2000) };
     }
     const sha = git(["rev-parse", "HEAD"]).out;
     dir = repoDir;
-    git(["update-ref", `refs/agentmesh/onto-${sha.slice(0, 12)}`, sha]); // keep the object reachable for push
+    git(["update-ref", ontoRef(sha), sha]); // keep the object reachable until it's pushed
     return { sha };
   } finally {
     dir = prev;
     git(["worktree", "remove", "--force", wt], { allowFail: true });
   }
+}
+
+/**
+ * Put `branch` back to `sha`, but only if it is still at `current` (force-with-lease): a later legitimate move, such
+ * as a merge landing meanwhile, is never undone.
+ */
+function restore(i: Extract<Input, { mode: "restore" }>) {
+  const now = fetchBranch(i.repo, i.branch);
+  if (now !== i.current) return { mode: "restore", restored: false, reason: `${i.branch} is at ${now.slice(0, 7)}, not ${i.current.slice(0, 7)}`, timings };
+  const push = timed("push restore", () => git([...LOW_SPEED, "push", "-q", `--force-with-lease=refs/heads/${i.branch}:${i.current}`, i.repo.remote, `${i.sha}:refs/heads/${i.branch}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+  return push.ok ? { mode: "restore", restored: true, timings } : { mode: "restore", restored: false, reason: push.out.slice(-500), timings };
 }
 
 /** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
@@ -335,6 +376,7 @@ async function run(): Promise<unknown> {
     return { mode: "diff", diff, changedPaths, timings };
   }
   if (input.mode === "ci") return ci(input);
+  if (input.mode === "restore") return restore(input);
   return merge(input);
 }
 

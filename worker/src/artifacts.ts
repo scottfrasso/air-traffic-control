@@ -6,8 +6,3 @@ export async function repoRef(env: Env, repo: string, scope: "read" | "write", t
   const [token, info] = await Promise.all([handle.createToken(scope, ttlSeconds), handle.info()]);
   return { name: repo, remote: info.remote, token: token.plaintext };
 }
-
-export async function headOf(env: Env, repo: string, ref = "main"): Promise<ArtifactsCommitMetadata | null> {
-  using handle = await env.ARTIFACTS.get(repo);
-  return (await handle.log({ ref, limit: 1 }))[0] ?? null;
-}

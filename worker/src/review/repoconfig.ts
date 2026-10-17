@@ -4,7 +4,7 @@ import { z } from "zod";
 /**
  * Per-repo configuration, read from the PR's head:
  *   .atc/ci.yml      the CI commands that gate the agents
- *   .atc/review.yml  session budgets (US cents) and review depth
+ *   .atc/review.yml  session budgets (US cents), and minApprovals (0 lets a low-risk change merge with no person; default 1)
  *   .atc/owners      globs of paths that always need a human
  */
 
@@ -51,7 +51,8 @@ export function parseCiConfig(text: string | null): CiCommand[] | null {
 
 export interface ReviewConfig {
   budgets: { classifier: number; reviewer: number; verifier: number };
-  depth?: "quick" | "standard" | "deep";
+  /** At least this many people approve any change (0 or 1; the risk tier can ask for more). Default 1. */
+  minApprovals: 0 | 1;
 }
 
 export const DEFAULT_BUDGETS = { classifier: 50, reviewer: 200, verifier: 30 } as const;
@@ -60,14 +61,14 @@ export const MAX_BUDGETS = { classifier: 500, reviewer: 2000, verifier: 200 } as
 
 const review = z.object({
   budgets: z.object({ classifier: z.number().positive(), reviewer: z.number().positive(), verifier: z.number().positive() }).partial().optional(),
-  depth: z.enum(["quick", "standard", "deep"]).optional(),
+  minApprovals: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 
 export function parseReviewConfig(text: string | null): ReviewConfig {
   const r = text === null ? {} : check(review, yaml(text, ".atc/review.yml") ?? {}, ".atc/review.yml");
   const b = { ...DEFAULT_BUDGETS, ...(r.budgets ?? {}) };
   const budgets = { classifier: Math.min(b.classifier, MAX_BUDGETS.classifier), reviewer: Math.min(b.reviewer, MAX_BUDGETS.reviewer), verifier: Math.min(b.verifier, MAX_BUDGETS.verifier) };
-  return { budgets, ...(r.depth ? { depth: r.depth } : {}) };
+  return { budgets, minApprovals: r.minApprovals ?? 1 };
 }
 
 export function parseOwners(text: string | null): string[] {

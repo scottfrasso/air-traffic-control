@@ -13,7 +13,8 @@ export type CheckInput =
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
   | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
-  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] };
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] }
+  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string };
 
 /** Hard limit on a container run that doesn't run the repo's own commands (snapshot, diff). */
 export const CHECK_TIMEOUT_S = 240;

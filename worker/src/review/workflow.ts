@@ -41,6 +41,13 @@ const QUICK: WorkflowStepConfig = { retries: { limit: 3, delay: "5 seconds", bac
 /** CI runs the repo's own commands: up to an hour (checker.ts runTimeoutSeconds), so its step allows a bit more. */
 const CI: WorkflowStepConfig = { retries: { limit: 1, delay: "30 seconds", backoff: "constant" }, timeout: "65 minutes" };
 
+/** Starting a session is a POST that isn't idempotent: a retry after a lost response would start a second one. */
+const START: WorkflowStepConfig = { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" };
+
+export function stepConfig(name: string): WorkflowStepConfig {
+  return name === "ci" ? CI : name.endsWith(": start") ? START : QUICK;
+}
+
 /** The real dependencies of one run: durable steps, the RepoStore, the checker container, Managed Agents. */
 export function reviewDeps(env: ReviewEnv, step: WorkflowStep, params: ReviewRunParams): ReviewDeps {
   const store = env.REPOS.getByName(params.repo);
@@ -57,7 +64,7 @@ export function reviewDeps(env: ReviewEnv, step: WorkflowStep, params: ReviewRun
       if (out.error) throw new Error(`CI couldn't run: ${out.error}`);
       return out.checks ?? [];
     },
-    step: <T>(name: string, fn: () => Promise<T>) => step.do(name, name === "ci" ? CI : QUICK, fn as never) as Promise<T>,
+    step: <T>(name: string, fn: () => Promise<T>) => step.do(name, stepConfig(name), fn as never) as Promise<T>,
     sleep: (name, ms) => step.sleep(name, ms),
   };
 }

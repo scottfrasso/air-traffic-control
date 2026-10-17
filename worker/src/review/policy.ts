@@ -1,5 +1,5 @@
 import { matchesGlob } from "./repoconfig";
-import { REVIEWERS, type Approval, type CheckName, type Classification, type Finding, type PrState, type RawFinding, type Reviewer, type Tier, type Verdict } from "./types";
+import { REVIEWERS, type Approval, type CheckName, type Resolved, type Classification, type Finding, type PrState, type RawFinding, type Reviewer, type Tier, type Verdict } from "./types";
 
 /**
  * The merge policy, as pure functions (spec: "Verdict and merge policy"). Models classify and find; this code
@@ -41,43 +41,48 @@ export function atLeast(prev: Classification | null, next: Classification): Clas
  * to talk the pipeline out of reviewing code at all), plus every reviewer that still has open findings (only a
  * reviewer that runs again can see that its finding was fixed).
  */
+/**
+ * Who reviews: the classifier's pick, every reviewer with open findings, and on any change correctness and security
+ * (a model talked into skipping security can't skip it; security review, 10-17).
+ */
 export function effectiveReviewers(picked: Reviewer[], openFindingsBy: Reviewer[], hasChanges: boolean): Reviewer[] {
-  const set = new Set<Reviewer>([...picked, ...openFindingsBy, ...(hasChanges ? (["correctness"] as const) : [])]);
+  const set = new Set<Reviewer>([...picked, ...openFindingsBy, ...(hasChanges ? (["correctness", "security"] as const) : [])]);
   return REVIEWERS.filter((r) => set.has(r));
 }
 
-const BY_TIER: Record<Tier, number> = { low: 0, medium: 1, high: 2 };
-
 export function requiredApprovals(tier: Tier, needsHuman: boolean): number {
-  return Math.max(BY_TIER[tier], needsHuman ? 1 : 0);
+  return Math.max(TIER_RANK[tier], needsHuman ? 1 : 0); // low, medium, high: 0, 1, 2 people
 }
 
 /**
  * Approvals that count: for the current head only, one per person. The author counts as one approver (they direct
  * the agent), but a high-tier PR needs at least one approver who isn't the author.
  */
-export function countApprovals(approvals: Approval[], head: string, author: string, tier: Tier) {
+export function countApprovals(approvals: Approval[], head: string, author: string) {
   const people = new Set(approvals.filter((a) => a.sha === head).map((a) => a.by));
   const nonAuthor = [...people].filter((p) => p !== author).length;
-  return {
-    count: people.size,
-    nonAuthor,
-    satisfied: (required: number) => people.size >= required && (tier !== "high" || required === 0 || nonAuthor >= 1),
-  };
+  return { count: people.size, nonAuthor };
 }
 
-/** Per finding, real if at least `quorum` of its verifier votes say so. */
-export function tallyVotes(votes: boolean[][], quorum = 2): boolean[] {
-  return votes.map((v) => v.filter(Boolean).length >= quorum);
+/** A finding is real if at least `quorum` of its verifier's votes say so. */
+export function isReal(votes: boolean[], quorum = 2): boolean {
+  return votes.filter(Boolean).length >= quorum;
 }
 
 /** After this many runs a PR stops getting new nits (the post's convergence lesson). */
 export const NIT_RUNS = 3;
 
-/** Drop findings the author already resolved (same file and class), and from run NIT_RUNS + 1 on, new nits. */
-export function filterNew(found: RawFinding[], resolved: Array<{ file: string; class: string }>, runNumber: number): RawFinding[] {
-  const done = new Set(resolved.map((r) => `${r.file}\u0000${r.class}`));
-  return found.filter((f) => !done.has(`${f.file}\u0000${f.class}`) && (runNumber <= NIT_RUNS || f.severity !== "nit"));
+/** How much a severity matters: an answer to a nit never hides an important finding (security review, 10-17). */
+export const WEIGHT: Record<RawFinding["severity"], number> = { nit: 0, "pre-existing": 1, important: 2 };
+
+/**
+ * Drop findings the author already answered: the same file and class, near the same line, and no more severe than
+ * the answered one (so answering a nit can't hide a real bug of that class there later). From run NIT_RUNS + 1 on,
+ * new nits are dropped too.
+ */
+export function filterNew(found: RawFinding[], resolved: Resolved[], runNumber: number): RawFinding[] {
+  const answered = (f: RawFinding) => resolved.some((r) => r.file === f.file && r.class === f.class && Math.abs(r.line - f.line) <= LINE_SLACK && WEIGHT[f.severity] <= WEIGHT[r.severity]);
+  return found.filter((f) => !answered(f) && (runNumber <= NIT_RUNS || f.severity !== "nit"));
 }
 
 export interface VerdictInput {
@@ -114,7 +119,7 @@ export function computeVerdict(i: VerdictInput): Verdict {
   const needsHuman = !!i.classification?.needsHuman || i.ci === "none" || review === "incomplete";
   const tier = i.classification?.tier ?? null;
   const required = tier ? requiredApprovals(tier, needsHuman) : needsHuman ? 1 : 0;
-  const counted = countApprovals(i.approvals, i.head, i.author, tier ?? "low");
+  const counted = countApprovals(i.approvals, i.head, i.author);
 
   const run = i.run === undefined ? { sha: i.head, finished: i.reviewDone || ciFailed, only: null } : i.run;
   const checks: Verdict["checks"] = !run ? "not_run" : !run.finished ? "running" : run.sha !== i.head ? "stale" : run.only ? "partial" : "done";
@@ -131,20 +136,17 @@ export function computeVerdict(i: VerdictInput): Verdict {
   if (importantOpen.length) blockers.push(`${importantOpen.length} open important finding${importantOpen.length > 1 ? "s" : ""}`);
   if (securityOpen.length) blockers.push("open security finding");
   if (done && counted.count < required) blockers.push(`needs ${required} approval${required > 1 ? "s" : ""}, has ${counted.count}`);
-  if (done && tier === "high" && required > 0 && counted.nonAuthor === 0) blockers.push("high risk: needs an approval from someone other than the author");
+  const needsNonAuthor = tier === "high" && required > 0 && counted.nonAuthor === 0;
+  if (done && needsNonAuthor) blockers.push("high risk: needs an approval from someone other than the author");
 
-  return { checks, checkedSha: run?.sha ?? null, ci: i.ci, review, security, tier, requiredApprovals: required, approvals: counted.count, needsHuman, humanReasons, mergeable: blockers.length === 0, blockers };
-}
-
-export function mergeGate(v: Verdict): { ok: boolean; blockers: string[] } {
-  return { ok: v.mergeable, blockers: v.blockers };
+  return { checks, checkedSha: run?.sha ?? null, ci: i.ci, review, security, tier, requiredApprovals: required, approvals: counted.count, needsHuman, humanReasons, mergeable: blockers.length === 0, blockers, needsNonAuthor, openImportant: importantOpen.length };
 }
 
 const STOP = new Set(["the", "and", "for", "into", "with", "from", "that", "this", "when", "are", "not", "has", "have", "its", "but", "via", "new", "still", "only"]);
 const words = (f: RawFinding) =>
   new Set(`${f.class} ${f.title}`.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !STOP.has(w)).map((w) => (w.length > 3 ? w.replace(/s$/, "") : w)));
 /** Same bug: same file, within a few lines, and most of the shorter description's words in the other. */
-const LINE_SLACK = 5;
+export const LINE_SLACK = 5;
 const SIMILAR = 0.5;
 function sameBug(a: RawFinding, b: RawFinding): boolean {
   if (a.file !== b.file || Math.abs(a.line - b.line) > LINE_SLACK) return false;
@@ -164,7 +166,7 @@ const SEVERITY_RANK: Record<RawFinding["severity"], number> = { important: 0, ni
 
 /**
  * Reviewers overlap (live run, 10-17: every reviewer reported the same off-by-one). Before verification, keep one
- * finding per bug across reviewers: the one from the reviewer whose lane it is, else the most severe, else the first
+ * finding per bug across reviewers: the most severe report, then the one from the reviewer whose lane it is, then the first
  * reviewer. Findings from one reviewer are never merged with each other, and different bugs on one line stay apart.
  */
 export function dedupeAcross(byRole: Partial<Record<Reviewer, RawFinding[]>>): Partial<Record<Reviewer, RawFinding[]>> {
@@ -179,7 +181,7 @@ export function dedupeAcross(byRole: Partial<Record<Reviewer, RawFinding[]>>): P
   for (const ids of members.values()) {
     const best = [...ids].sort((a, b) => {
       const [x, y] = [all[a]!, all[b]!];
-      return Number(y.r === lane(y.f)) - Number(x.r === lane(x.f)) || SEVERITY_RANK[x.f.severity] - SEVERITY_RANK[y.f.severity] || a - b;
+      return SEVERITY_RANK[x.f.severity] - SEVERITY_RANK[y.f.severity] || Number(y.r === lane(y.f)) - Number(x.r === lane(x.f)) || a - b;
     })[0]!;
     keep.add(best);
   }
