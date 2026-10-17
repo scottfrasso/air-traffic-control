@@ -1,21 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
-import { CHECK_TIMEOUT_S } from "./landing";
 
-/** What container/check.ts accepts (tokens are short-lived Artifacts repo tokens). */
+/** What container/check.ts accepts (tokens are short-lived Artifacts repo tokens, minted per call). */
 export interface RepoRef {
   name: string;
   remote: string;
   token: string;
 }
+
+type CiCommand = { name: string; run: string; timeoutSeconds: number };
+
 export type CheckInput =
-  | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
-  | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string } }
-  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> }
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
   | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
-  | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> }
-  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> };
+  | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] };
+
+/** Hard limit on a container run that doesn't run the repo's own commands (snapshot, diff). */
+export const CHECK_TIMEOUT_S = 240;
 
 /**
  * How long one container run may take before it's killed. CI and merges run the repo's own commands (each bounded by
@@ -26,70 +27,11 @@ export function runTimeoutSeconds(input: CheckInput): number {
   return CHECK_TIMEOUT_S;
 }
 
-export interface TsError {
-  file: string;
-  line: number;
-  col: number;
-  code: string;
-  message: string;
-  lineText: string;
-}
-export interface Typecheck {
-  sha: string;
-  ok: boolean;
-  errors: TsError[];
-  output: string;
-  /** True when served from the container's tree-hash cache. */
-  cached?: boolean;
-  ms?: number;
-}
-export type Timing = { step: string; ms: number; cached?: boolean };
-export interface PairResult {
-  mode: "pair";
-  a: string;
-  b: string;
-  aloneA: Typecheck;
-  aloneB: Typecheck;
-  merge: { clean: boolean; conflicts: string[]; output?: string; typecheck?: Typecheck };
-  timings?: Timing[];
-}
-export interface SingleResult {
-  mode: "single";
-  repo: string;
-  /** The fork head that was checked (result.sha may be the PR merged onto main). */
-  forkSha: string;
-  /** Main commit the PR was merged onto for the check (null if no baseline given). */
-  baseHead: string | null;
-  /** True when the PR is fine alone but conflicts with current main (textually or by typecheck). */
-  mainConflict?: boolean;
-  result: Typecheck;
-  timings?: Timing[];
-}
-export interface LandResult {
-  mode: "land";
-  landed: boolean;
-  retry?: boolean;
-  mainConflict?: boolean;
-  landedSha?: string;
-  merged?: boolean;
-  reason?: string;
-  forkHead?: string;
-  previousHead?: string;
-  baseHead?: string;
-  typecheck?: Typecheck;
-}
-export interface NotesResult {
-  mode: "notes";
-  /** Landed commits whose flight log note reached refs/notes/atc. */
-  written: string[];
-  error?: string;
-}
-
 const decoder = new TextDecoder();
 
 /**
- * The Sandbox: a Durable Object that owns one container (Sandbox SDK 1.0 model, ADR-0010) where we
- * clone forks, `git merge` them, and run `tsc --noEmit`. One Checker per baseline keeps the container warm.
+ * The checker: a Durable Object that owns one container (ADR-0010), one per repo ("review-<repo>"), where we fetch
+ * branches, build snapshots, run CI commands and merge. Kept warm so fetches are incremental.
  */
 export class Checker extends DurableObject<Env> {
   private async container(): Promise<Container> {
@@ -98,13 +40,13 @@ export class Checker extends DurableObject<Env> {
     if (!c.running) {
       const image = c.images.checker;
       if (!image) throw new Error("checker image missing from wrangler containers.images");
-      c.start({ image, enableInternet: true, instance: "standard-3" }); // 2 vCPU: several merges + tsc run concurrently
+      c.start({ image, enableInternet: true, instance: "standard-3" }); // 2 vCPU: CI commands and git in parallel
     }
     await c.setInactivityTimeout(10 * 60_000);
     return c;
   }
 
-  /** Run one check; returns the JSON result as a string (keeps the RPC boundary simple). */
+  /** Run one job; returns the JSON result as a string (keeps the RPC boundary simple). */
   async run(input: CheckInput): Promise<string> {
     const c = await this.container();
     const proc = await c.exec(["timeout", "--kill-after=5", String(runTimeoutSeconds(input)), "node", "/opt/agentmesh/check.ts"], {
@@ -133,14 +75,3 @@ export class Checker extends DurableObject<Env> {
     return line.slice("@@RESULT ".length);
   }
 }
-
-/**
- * Pick one of a small pool of Checkers per baseline. Pushes spread over the pool by fork, and all of one push's checks
- * (its check on main and its pair checks) share a container, so main's build and the fork's results are reused.
- */
-export function checkerFor(env: Env, baseline: string, key: string): DurableObjectStub<Checker> {
-  let h = 0;
-  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return env.CHECKER.getByName(`checker-${baseline}-${h % CHECKER_POOL}`);
-}
-export const CHECKER_POOL = 3;

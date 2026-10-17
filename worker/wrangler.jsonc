@@ -8,14 +8,12 @@
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "agentmesh" }],
   "durable_objects": {
     "bindings": [
-      { "name": "COORDINATOR", "class_name": "Coordinator" },
       { "name": "CHECKER", "class_name": "Checker" },
       { "name": "REPOS", "class_name": "RepoStore" },
       { "name": "DIRECTORY", "class_name": "Directory" }
     ]
   },
   "exports": {
-    "Coordinator": { "type": "durable-object", "storage": "sqlite" },
     "Checker": { "type": "durable-object", "storage": "sqlite" },
     "RepoStore": { "type": "durable-object", "storage": "sqlite" },
     "Directory": { "type": "durable-object", "storage": "sqlite" }
@@ -31,14 +29,12 @@
     "consumers": [{ "queue": "agentmesh-push-events", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3, "dead_letter_queue": "agentmesh-push-events-dlq" }]
   },
   "workflows": [
-    { "name": "agentmesh-push-pipeline", "binding": "PUSH_PIPELINE", "class_name": "PushPipeline" },
     { "name": "agentmesh-review-run", "binding": "REVIEW_RUN", "class_name": "ReviewRun" }
   ],
   "vars": {
     "ARTIFACTS_NAMESPACE": "agentmesh",
     "CF_ACCOUNT_ID": "cd5005b633a7bdac0f47d9f93c3ad45c",
     "PUSH_QUEUE_ID": "9d2beda0c8d84a39a41c90fa5d59fd9f",
-    "PUBLIC_REPLAY_BASELINES": "shop-261011185716",
     // Review pipeline. Access: the team domain (e.g. acme.cloudflareaccess.com) and the application's AUD tag.
     "ACCESS_TEAM_DOMAIN": "",
     "ACCESS_AUD": "",

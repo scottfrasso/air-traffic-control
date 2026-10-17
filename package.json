@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "pnpm -r --filter=!shop-core typecheck",
+    "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r --if-present test",
     "setup:cloudflare": "pnpm --dir demo exec tsx src/setup.ts",
     "setup:agents": "pnpm --dir demo exec tsx src/setup-agents.ts",

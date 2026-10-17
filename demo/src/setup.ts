@@ -6,13 +6,12 @@
  *   2. creates the queues agentmesh-push-events and agentmesh-push-events-dlq if missing
  *   3. creates the Artifacts namespace agentmesh if missing
  *   4. writes CF_ACCOUNT_ID and PUSH_QUEUE_ID into worker/wrangler.jsonc
- *   5. generates AGENTMESH_API_KEY into .env if missing (never printed)
- *   6. deploys the Worker with its secrets (AGENTMESH_API_KEY, CF_API_TOKEN) via `wrangler deploy --secrets-file`
- *   7. writes AGENTMESH_URL and CLOUDFLARE_ACCOUNT_ID into .env, so ./demo/run.sh targets this deployment
+ *   5. deploys the Worker with its secrets (CF_API_TOKEN, and ANTHROPIC_API_KEY if .env has it) via `wrangler deploy --secrets-file`
+ *   6. writes AGENTMESH_URL and CLOUDFLARE_ACCOUNT_ID into .env, so `pnpm e2e:review` targets this deployment
+ * Then: `pnpm setup:agents` (the review agents), Cloudflare Access in front of the Worker, a personal token in the UI.
  * Every resource it touches is named agentmesh*. Secrets are never printed.
  */
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { setDefaultResultOrder } from "node:dns";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,7 +41,7 @@ const say = (msg: string) => console.log(`${DRY ? "[dry run] " : ""}${msg}`);
 
 /**
  * Add KEY=value to .env unless it is already set there. `respectShell`: also skip when the shell has it (for the API
- * key, which run.sh would send from the shell; non-secret values are still written so a later shell without them works).
+ * key; non-secret values are still written so a later shell without them works).
  */
 function setEnv(key: string, value: string, secret = false, respectShell = false) {
   if (readEnv()[key] || (respectShell && process.env[key])) return;
@@ -125,10 +124,10 @@ async function main() {
     if (!DRY) writeFileSync(WRANGLER, after);
   } else say("worker/wrangler.jsonc: already points at this account and queue");
 
-  setEnv("AGENTMESH_API_KEY", randomBytes(32).toString("hex"), true, true);
   setEnv("CLOUDFLARE_ACCOUNT_ID", acct);
-  // The key run.sh will send: the shell's if set (run.sh prefers it), else .env's.
-  const apiKey = process.env.AGENTMESH_API_KEY || readEnv().AGENTMESH_API_KEY || "<generated>"; // "" counts as unset (run.sh's need() then reports it missing)
+  // Managed Agents for the review pipeline. Optional: without it every agent step is errored and a human must approve.
+  const anthropicKey = process.env.ANTHROPIC_API_KEY || readEnv().ANTHROPIC_API_KEY || "";
+  if (!anthropicKey) say("note: ANTHROPIC_API_KEY not set: CI runs, but every agent review is errored (a person must approve) until it is.");
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
   const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
   if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
@@ -138,14 +137,14 @@ async function main() {
     );
 
   if (DRY) {
-    say("would run: wrangler deploy --secrets-file <AGENTMESH_API_KEY, CF_API_TOKEN> (needs Docker for the checker image)");
+    say(`would run: wrangler deploy --secrets-file <CF_API_TOKEN${anthropicKey ? ", ANTHROPIC_API_KEY" : ""}> (needs Docker for the checker image)`);
     return;
   }
   const dir = mkdtempSync(join(tmpdir(), "agentmesh-setup-"));
   const secrets = join(dir, "secrets.json");
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   try {
-    writeFileSync(secrets, JSON.stringify({ AGENTMESH_API_KEY: apiKey, CF_API_TOKEN: workerToken }), { mode: 0o600 });
+    writeFileSync(secrets, JSON.stringify({ CF_API_TOKEN: workerToken, ...(anthropicKey ? { ANTHROPIC_API_KEY: anthropicKey } : {}) }), { mode: 0o600 });
     say("deploying (building the checker image with Docker can take a few minutes)...");
     // Async, so the event loop stays free: a signal reaches our handler (which passes it on to wrangler) instead of
     // waiting behind a blocking spawn, and `finally` always removes the secrets file (reviews of #39 and #41).
@@ -187,10 +186,10 @@ async function main() {
     if (exit.code !== 0) throw new Error(`wrangler deploy failed (exit ${exit.code})`);
     const url = /https:\/\/agentmesh\.[a-z0-9-]+\.workers\.dev/.exec(out)?.[0];
     if (url) setEnv("AGENTMESH_URL", url);
-    const target = process.env.AGENTMESH_URL || readEnv().AGENTMESH_URL; // what run.sh will use
+    const target = process.env.AGENTMESH_URL || readEnv().AGENTMESH_URL; // what pnpm e2e:review will use
     if (!url || target !== url)
-      say(`warning: AGENTMESH_URL (shell or .env) is ${target ?? "unset"}${url ? `, but this deploy is ${url}` : " and the deploy URL wasn't found"}. Set it to your Worker's URL before ./demo/run.sh.`);
-    say(`deployed${url ? `: ${url}` : ""}. Next: ./demo/run.sh`);
+      say(`warning: AGENTMESH_URL (shell or .env) is ${target ?? "unset"}${url ? `, but this deploy is ${url}` : " and the deploy URL wasn't found"}. Set it to your Worker's URL before pnpm e2e:review.`);
+    say(`deployed${url ? `: ${url}` : ""}. Next: pnpm setup:agents, put Cloudflare Access in front of it, create a personal token in the UI (REVIEW_TOKEN in .env), then pnpm e2e:review`);
   } finally {
     cleanup();
   }

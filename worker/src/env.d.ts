@@ -1,9 +1,7 @@
 // Secrets are not in wrangler.jsonc, so `wrangler types` can't see them. Declared here
 // on both the global `Env` and `Cloudflare.Env` (which the generated types keep separate).
 interface AgentmeshSecrets {
-  /** Shared bearer key for /api, /mcp and the dashboard. Set with `wrangler secret put AGENTMESH_API_KEY`. */
-  AGENTMESH_API_KEY: string;
-  /** Cloudflare API token used only to create/delete per-fork push subscriptions (ADR-0002). */
+  /** Cloudflare API token used only to create per-repo push subscriptions (ADR-0002). */
   CF_API_TOKEN: string;
   /** Claude Managed Agents (review pipeline). Optional: without it every agent step is errored and a human must approve. */
   ANTHROPIC_API_KEY?: string;

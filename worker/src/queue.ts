@@ -1,5 +1,3 @@
-import { baselineOf } from "./artifacts";
-import { isPushed, type ArtifactsEvent } from "./events";
 
 /** The part of a Queues message the consumer uses. */
 export type QueueMessage<T> = { id: string; body: T; attempts: number; ack(): void; retry(options?: { delaySeconds?: number }): void };
@@ -23,13 +21,4 @@ export async function consumeBatch<T>(messages: readonly QueueMessage<T>[], hand
       msg.retry({ delaySeconds });
     }
   }
-}
-
-/** An Artifacts event → the Coordinator of the repo's baseline. Only pushes to main matter (ADR-0002). */
-export async function routePushEvent(env: Env, event: ArtifactsEvent): Promise<void> {
-  if (!isPushed(event) || event.payload.ref !== "refs/heads/main") return;
-  const repo = event.source.repoName;
-  const stub = env.COORDINATOR.getByName(baselineOf(repo));
-  await stub.ensure(baselineOf(repo));
-  await stub.onPush(repo, event.payload.after, "event", event);
 }

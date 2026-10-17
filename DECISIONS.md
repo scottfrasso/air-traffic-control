@@ -11,28 +11,29 @@ the raw spike findings (milestone 1).
 | [0002](docs/adr/0002-push-events-via-per-fork-queue-subscriptions.md) | Push events via per-fork Queue event subscriptions | Accepted |
 | [0003](docs/adr/0003-local-artifacts-stand-in.md) | Local Artifacts stand-in | Superseded by 0004 |
 | [0004](docs/adr/0004-real-artifacts-only.md) | Real Artifacts only, no simulator | Accepted |
-| [0005](docs/adr/0005-shared-api-key.md) | Shared API key on all routes | Accepted |
-| [0006](docs/adr/0006-reconcile-fork-heads.md) | Push events + head-reconcile fallback | Accepted |
-| [0007](docs/adr/0007-lightweight-symbol-extraction.md) | Scan-based symbol extraction; tsc is the source of truth | Accepted |
-| [0008](docs/adr/0008-baseline-per-run-and-dashboard-polling.md) | Fresh baseline per run; dashboard polls | Accepted |
-| [0009](docs/adr/0009-stateless-mcp-and-token-split.md) | Stateless MCP; separate subscription token | Accepted |
-| [0010](docs/adr/0010-checker-container.md) | Speculative merges in a container-backed Checker DO | Accepted |
-| [0011](docs/adr/0011-landing-gate.md) | Landing gate, arbitration, full-ancestry merge base | Partly superseded by 0015 |
-| [0012](docs/adr/0012-runway-dashboard.md) | 8-bit runway dashboard (now side view + ATC sequence) | Accepted |
-| [0013](docs/adr/0013-incremental-checks.md) | Compute main once, check only deltas (repo cache, tree-hash results, incremental tsc) | Accepted |
-| [0014](docs/adr/0014-live-push-replay-webhooks.md) | Live WebSocket push, recorded replay, outbound webhooks, real agents | Accepted |
-| [0015](docs/adr/0015-merge-queue-landing.md) | Merge-queue landing; only real conflicts go around | Accepted |
+| [0005](docs/adr/0005-shared-api-key.md) | Shared API key on all routes | Superseded by 0027 |
+| [0006](docs/adr/0006-reconcile-fork-heads.md) | Push events + head-reconcile fallback | Superseded by 0027 |
+| [0007](docs/adr/0007-lightweight-symbol-extraction.md) | Scan-based symbol extraction; tsc is the source of truth | Superseded by 0027 |
+| [0008](docs/adr/0008-baseline-per-run-and-dashboard-polling.md) | Fresh baseline per run; dashboard polls | Superseded by 0027 |
+| [0009](docs/adr/0009-stateless-mcp-and-token-split.md) | Stateless MCP; separate subscription token | Accepted, amended by 0027 |
+| [0010](docs/adr/0010-checker-container.md) | Speculative merges in a container-backed Checker DO | Accepted, amended by 0027 |
+| [0011](docs/adr/0011-landing-gate.md) | Landing gate, arbitration, full-ancestry merge base | Superseded by 0027 |
+| [0012](docs/adr/0012-runway-dashboard.md) | 8-bit runway dashboard (now side view + ATC sequence) | Superseded by 0027 |
+| [0013](docs/adr/0013-incremental-checks.md) | Compute main once, check only deltas (repo cache, tree-hash results, incremental tsc) | Superseded by 0027 |
+| [0014](docs/adr/0014-live-push-replay-webhooks.md) | Live WebSocket push, recorded replay, outbound webhooks, real agents | Superseded by 0027 |
+| [0015](docs/adr/0015-merge-queue-landing.md) | Merge-queue landing; only real conflicts go around | Superseded by 0027 |
 | [0016](docs/adr/0016-submission-video.md) | Submission video: staged airport scenes + one recorded run | Accepted (length superseded by 0017) |
 | [0017](docs/adr/0017-competition-requirements.md) | The competition rules shape the submission (5–10 min video, public repo, judging weights) | Accepted |
-| [0018](docs/adr/0018-landing-reliability.md) | Land only what was checked: pinned heads, owned lock, current-head pair coverage | Accepted |
-| [0019](docs/adr/0019-flight-log-and-savings.md) | Flight log as a git note (refs/notes/atc); savings from the event log | Accepted |
-| [0020](docs/adr/0020-public-replay.md) | Key-less read-only replay of allow-listed recorded runs | Accepted |
-| [0021](docs/adr/0021-checks-never-stay-pending.md) | Checks never stay pending: re-check on any main move, record failures, restart stuck runs | Accepted |
+| [0018](docs/adr/0018-landing-reliability.md) | Land only what was checked: pinned heads, owned lock, current-head pair coverage | Superseded by 0027 |
+| [0019](docs/adr/0019-flight-log-and-savings.md) | Flight log as a git note (refs/notes/atc); savings from the event log | Superseded by 0027 |
+| [0020](docs/adr/0020-public-replay.md) | Key-less read-only replay of allow-listed recorded runs | Superseded by 0027 |
+| [0021](docs/adr/0021-checks-never-stay-pending.md) | Checks never stay pending: re-check on any main move, record failures, restart stuck runs | Superseded by 0027 |
 | [0022](docs/adr/0022-coordinator-tests-in-node.md) | Coordinator DO tests in plain Node on node:sqlite | Accepted |
-| [0023](docs/adr/0023-review-gate.md) | Optional review gate: REVIEW clearance, approval per head | Accepted |
-| [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Accepted |
-| [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted |
-| [0026](docs/adr/0026-competing-attempts.md) | Competing attempts at one task: compare, STAND DOWN, pick | Accepted |
+| [0023](docs/adr/0023-review-gate.md) | Optional review gate: REVIEW clearance, approval per head | Superseded by 0027 |
+| [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Superseded by 0027 |
+| [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted, amended by 0027 |
+| [0026](docs/adr/0026-competing-attempts.md) | Competing attempts at one task: compare, STAND DOWN, pick | Superseded by 0027 |
+| [0027](docs/adr/0027-pr-review-pipeline.md) | Pull requests and an agent review pipeline replace Air Traffic Control | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 

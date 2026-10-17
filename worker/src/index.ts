@@ -7,9 +7,6 @@ export { Checker } from "./checker";
 export { RepoStore } from "./review/store";
 export { Directory } from "./review/directory";
 export { ReviewRun } from "./review/workflow";
-// The ATC subsystem's classes stay exported until their bindings are removed (Task 13).
-export { Coordinator } from "./coordinator";
-export { PushPipeline } from "./pipeline";
 
 export default {
   fetch(request, env, ctx): Promise<Response> {
