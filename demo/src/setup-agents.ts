@@ -66,6 +66,14 @@ async function call<T>(key: string, method: string, path: string, body?: unknown
   return JSON.parse(text) as T;
 }
 
+/** wrangler.jsonc with AGENT_IDS (a JSON string holding JSON, so escaped quotes) and AGENT_ENVIRONMENT_ID set. */
+export function withAgentVars(text: string, ids: Record<Role, string>, environmentId: string): string {
+  const str = String.raw`"(?:[^"\\]|\\.)*"`; // a JSON string literal, escapes included
+  return text
+    .replace(new RegExp(String.raw`"AGENT_IDS":\s*` + str), () => `"AGENT_IDS": ${JSON.stringify(JSON.stringify(ids))}`)
+    .replace(new RegExp(String.raw`"AGENT_ENVIRONMENT_ID":\s*` + str), () => `"AGENT_ENVIRONMENT_ID": ${JSON.stringify(environmentId)}`);
+}
+
 export type Listed = { id: string; name: string; system?: string; model?: string | { id: string } };
 
 /** The API lists `model` as an object ({ id, effort, speed }); compare by id, so an unchanged agent isn't re-versioned. */
@@ -108,10 +116,7 @@ async function main() {
   console.log(`environment ${ENVIRONMENT.name}: ${environmentId}`);
 
   const wranglerPath = resolve(ROOT, "worker/wrangler.jsonc");
-  const w = readFileSync(wranglerPath, "utf8")
-    .replace(/"AGENT_IDS":\s*"[^"]*"/, `"AGENT_IDS": ${JSON.stringify(JSON.stringify(ids))}`)
-    .replace(/"AGENT_ENVIRONMENT_ID":\s*"[^"]*"/, `"AGENT_ENVIRONMENT_ID": "${environmentId}"`);
-  writeFileSync(wranglerPath, w);
+  writeFileSync(wranglerPath, withAgentVars(readFileSync(wranglerPath, "utf8"), ids, environmentId));
   console.log("wrote AGENT_IDS and AGENT_ENVIRONMENT_ID into worker/wrangler.jsonc");
   console.log("next: cd worker && pnpm exec wrangler secret put ANTHROPIC_API_KEY, then deploy");
 }

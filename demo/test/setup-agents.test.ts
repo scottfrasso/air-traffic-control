@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentPlan, ENVIRONMENT, needsUpdate } from "../src/setup-agents.ts";
+import { agentPlan, ENVIRONMENT, needsUpdate, withAgentVars } from "../src/setup-agents.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -38,4 +38,13 @@ test("an agent listed with its model as an object is unchanged when its id and i
   assert.equal(needsUpdate({ id: "a", name: spec.name, system: spec.system, model: { id: spec.model, speed: "standard" } }, spec), false);
   assert.equal(needsUpdate({ id: "a", name: spec.name, system: spec.system, model: { id: "claude-opus-5-5" } }, spec), true);
   assert.equal(needsUpdate({ id: "a", name: spec.name, system: "old", model: spec.model }, spec), true);
+});
+
+test("writing the agent ids into wrangler.jsonc twice gives the same file (rerun corrupted it, 10-17)", () => {
+  const before = `  "vars": {\n    "AGENT_IDS": "",\n    "AGENT_ENVIRONMENT_ID": ""\n  }`;
+  const ids = { classifier: "agent_1", correctness: "agent_2" } as never;
+  const once = withAgentVars(before, ids, "env_1");
+  assert.equal(withAgentVars(once, ids, "env_1"), once);
+  assert.deepEqual(JSON.parse(JSON.parse(/"AGENT_IDS": ("(?:[^"\\]|\\.)*")/.exec(once)![1]!)), ids);
+  assert.match(once, /"AGENT_ENVIRONMENT_ID": "env_1"/);
 });
