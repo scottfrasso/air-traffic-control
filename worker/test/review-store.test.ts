@@ -613,3 +613,14 @@ test("opening a PR into main records main's head, so a later direct push to main
   const restore = s.checkerCalls.find((c) => c.mode === "restore");
   assert.deepEqual(restore && [restore.sha, restore.current], ["m0", "evil1"]);
 });
+
+test("a direct push to main is put back even if its push event never arrives (the store checks main on an alarm)", async () => {
+  const { s } = await withPr(); // main protected at m0 (the PR's base)
+  assert.ok(s.alarmAt && s.alarmAt > Date.now(), "the store keeps an alarm set");
+  s.heads.set("main", "evil1"); // pushed, but no event (a new repo's subscription isn't live yet)
+  const before = s.alarmAt;
+  await s.co.alarm();
+  const restore = s.checkerCalls.find((c) => c.mode === "restore");
+  assert.deepEqual(restore && [restore.sha, restore.current], ["m0", "evil1"]);
+  assert.ok(s.alarmAt! >= before!, "and sets the next one");
+});

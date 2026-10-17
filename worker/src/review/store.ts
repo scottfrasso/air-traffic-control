@@ -23,6 +23,8 @@ export interface StoreEnv {
 /** The branch only merges may move (other targets aren't protected yet). */
 const PROTECTED_BRANCH = "main";
 const PROTECTED_KEY = "protected:main";
+/** How often the store checks main itself, in case a push event never comes (a new repo's first minutes; seen 10-17). */
+const PROTECT_EVERY_MS = 2 * 60_000;
 const MAX_TITLE = 200;
 const MAX_INTENT = 2000;
 /** A title is one line (it reaches the agents' prompts) and short. */
@@ -114,8 +116,21 @@ export class RepoStore extends DurableObject<StoreEnv> {
   }
 
   async init(repo: string): Promise<void> {
-    if (this.meta("repo") === repo) return;
-    this.sql.exec("INSERT INTO meta(key, value) VALUES ('repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", repo);
+    if (this.meta("repo") !== repo) this.sql.exec("INSERT INTO meta(key, value) VALUES ('repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", repo);
+    await this.keepWatching();
+  }
+
+  /** The main-protection check runs on an alarm too: push events can be late, lost, or not flowing yet. */
+  private async keepWatching(): Promise<void> {
+    if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + PROTECT_EVERY_MS);
+  }
+
+  override async alarm(): Promise<void> {
+    try {
+      if (this.meta("repo")) await this.guardProtected(null);
+    } finally {
+      await this.ctx.storage.setAlarm(Date.now() + PROTECT_EVERY_MS);
+    }
   }
 
   private log(kind: string, pr: number | null, detail: unknown) {
@@ -153,6 +168,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     if (!head) throw new Error(`branch ${input.source} not found in ${this.repo}`);
     if (!base) throw new Error(`branch ${target} not found in ${this.repo}`);
     if (target === PROTECTED_BRANCH && !this.meta(PROTECTED_KEY)) this.setMeta(PROTECTED_KEY, base);
+    await this.keepWatching();
     const intent = Object.fromEntries(Object.keys(EMPTY_INTENT).map((k) => {
       const v = (input.intent as Record<string, unknown> | undefined)?.[k];
       return [k, typeof v === "string" ? v.slice(0, MAX_INTENT) : ""];
@@ -169,6 +185,14 @@ export class RepoStore extends DurableObject<StoreEnv> {
   async listPrs(state?: PrState): Promise<Pr[]> {
     const rows = state ? this.sql.exec<PrRow>("SELECT * FROM prs WHERE state = ? ORDER BY id DESC", state) : this.sql.exec<PrRow>("SELECT * FROM prs ORDER BY id DESC");
     return rows.toArray().map((r) => this.toPr(r));
+  }
+
+  /** The repo's own events, not tied to a PR (main protection): newest first. */
+  async repoEvents(limit = 50): Promise<Array<{ id: number; at: number; kind: string; detail: EventDetail }>> {
+    return this.sql
+      .exec<{ id: number; at: number; kind: string; detail: string }>("SELECT id, at, kind, detail FROM events WHERE pr IS NULL ORDER BY id DESC LIMIT ?", limit)
+      .toArray()
+      .map((e) => ({ ...e, detail: JSON.parse(e.detail) as EventDetail }));
   }
 
   /** Every PR with what a dashboard row shows: the verdict, finding counts, step statuses, and last activity. */
@@ -270,7 +294,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
    * If the creating push's event was missed (it can come before the repo's subscription is live; seen 10-17), the
    * first event seen trusts where main was *before* it, not the push itself.
    */
-  private async guardProtected(eventSha: string, before?: string): Promise<void> {
+  private async guardProtected(eventSha: string | null, before?: string): Promise<void> {
     const live = await this.headOf(PROTECTED_BRANCH);
     if (!live) return;
     let known = this.meta(PROTECTED_KEY);

@@ -118,6 +118,7 @@ const routes: Route[] = [
       return json({ prs, ...(unavailable.length ? { unavailable } : {}) });
     },
   ],
+  ["GET", /^\/api\/repos\/([^/]+)\/events$/, async (c) => json({ events: await store(c).repoEvents() })],
   ["GET", /^\/api\/repos\/([^/]+)\/prs$/, async (c) => {
     const state = new URL(c.request.url).searchParams.get("state");
     if (state && !["draft", "ready", "merged", "closed"].includes(state)) throw new HttpError(400, "state must be draft, ready, merged or closed");

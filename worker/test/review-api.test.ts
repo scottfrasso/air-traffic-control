@@ -315,3 +315,11 @@ test("a person can create at most 50 repos", async () => {
   for (let i = 0; i < 49; i++) await a.directory.addRepo(`r${i}`, "ann@x", null);
   assert.equal((await a.call("POST", "/api/repos", { name: "one-more" })).status, 429);
 });
+
+test("a repo's own events (main protection) are readable", async () => {
+  const a = await app();
+  await a.s.co.onPush("refs/heads/main", "m0");
+  const r = await a.call("GET", "/api/repos/shop/events");
+  assert.equal(r.status, 200);
+  assert.ok((r.body.events as Array<{ kind: string }>).some((e) => e.kind === "branch.protected"));
+});

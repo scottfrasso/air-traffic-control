@@ -22,6 +22,8 @@ export function store(repo = "shop") {
     /** What the checker container answers for `merge` (default: CI passes, pushed). */
     checker: async (input: { mode: string; [k: string]: unknown }): Promise<unknown> => ({ mode: input.mode, merged: true, sha: `merged-${String(input.expectedSource)}`, checks: [] }),
     checkerCalls: [] as Array<Record<string, unknown>>,
+    /** When the store's alarm is set for (the main-protection check). */
+    alarmAt: null as number | null,
     co: undefined as unknown as RepoStore,
     q: <T = Row>(query: string, ...params: unknown[]) => sqlStorage(db).exec<T>(query, ...params).toArray(),
     /** A push to `branch`: Artifacts moves the head, then the event reaches the store. */
@@ -31,7 +33,10 @@ export function store(repo = "shop") {
     },
   };
   const ctx = {
-    storage: { sql: sqlStorage(db), transactionSync: <T>(fn: () => T) => fn() },
+    storage: {
+      sql: sqlStorage(db), transactionSync: <T>(fn: () => T) => fn(),
+      getAlarm: async () => self.alarmAt, setAlarm: async (t: number) => void (self.alarmAt = t),
+    },
     waitUntil: (_p: Promise<unknown>) => undefined,
   };
   const env = {
