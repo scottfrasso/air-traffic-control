@@ -4,20 +4,19 @@ Guidance for any coding agent (Claude Code or otherwise) working in this repo.
 
 ## Mission
 
-See `prompt.md`. Build a coordination layer for many coding agents on one repo,
-on Cloudflare Workers + Artifacts. The competition entry was submitted on 2026-10-14; the repo is public.
+Build the review side of a code host on Cloudflare: pull requests on Cloudflare Artifacts repos that start as drafts,
+and, when marked ready, a pipeline that runs the repo's CI and then Claude Managed Agents (classifier, correctness,
+security, tests, verifiers) and gates merge on the result. Design: [ADR-0027](docs/adr/0027-pr-review-pipeline.md).
+The goal: the least human review time per change that doesn't raise reverts.
 
-## Competition (read before changing scope)
+History: this repo started as Air Traffic Control, a hackathon entry submitted on 2026-10-14
+([`docs/research/competition.md`](docs/research/competition.md)); that code is in git history before ADR-0027.
 
-- Rules, judging weights, form fields, competitors: [`docs/research/competition.md`](docs/research/competition.md).
-  What they force on us: [ADR-0017](docs/adr/0017-competition-requirements.md).
-- Judging: 50% originality/quality, 25% concurrency/coordination/context/review/conflicts, 25% ease of use.
-  Prefer work that moves one of those scores.
-- Hard requirements: 5–10 min demo video, public repo with LICENSE, a person submits the form (no automated entry).
-- Priority work is in GitHub issues labelled `competition` (`P0` > `P1` > `P2`). The current plan, in order, is in
-  `handover/04-next.md` (local only; `handover/` is gitignored) and summarised under Next in `PROGRESS.md`.
+## Working agreements
+
 - The repo is public: never commit secrets or personal details (email, location). `handover/` stays local.
   Never change repo visibility yourself.
+- Design specs and implementation plans (`docs/superpowers/specs/`, `docs/superpowers/plans/`) stay local (git-ignored).
 - Put new research in `docs/research/` so it isn't looked up twice.
 
 ## Documentation sources — use these, never guess an API
@@ -36,6 +35,7 @@ on Cloudflare Workers + Artifacts. The competition entry was submitted on 2026-1
   - Queues (event subscriptions): https://developers.cloudflare.com/queues/llms.txt
 - Any docs page can be fetched as markdown: append `index.md` to the URL, or send
   `Accept: text/markdown`.
+- Claude Managed Agents: https://platform.claude.com/docs/en/managed-agents/overview (beta header `managed-agents-2026-04-01`).
 - Artifacts is in open beta (2026-10-01). Treat training-data knowledge of it as
   unreliable; verify in docs or with a spike, and record findings in `DECISIONS.md`.
 
@@ -45,4 +45,7 @@ on Cloudflare Workers + Artifacts. The competition entry was submitted on 2026-1
 - Never print or commit secrets. `CLOUDFLARE_API_TOKEN` lives in `.env` (gitignored).
 - Only touch resources this project creates (all prefixed `agentmesh`).
 - Keep `PROGRESS.md` (done / next / blocked) and `DECISIONS.md` current.
+- Every decision, trade-off or invariant goes in an ADR (`docs/adr/`, indexed in `DECISIONS.md`): a new one, or an amendment.
+- Keep the diary (`docs/diary/YYYY-MM-DD.md`): what we built, what surprised us, numbers (cost, time, counts). It's raw
+  material for a blog post, so no secrets or personal details.
 - Commit after each verified milestone.

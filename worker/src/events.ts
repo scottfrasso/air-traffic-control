@@ -21,7 +21,7 @@ export interface PushedEvent {
   metadata: { accountId: string; eventSubscriptionId: string; eventSchemaVersion: number; eventTimestamp: string };
 }
 
-/** Any Artifacts event; we only act on `pushed` but log everything we receive. */
+/** Any Artifacts event; only `pushed` is acted on, the rest are ignored. */
 export type ArtifactsEvent = PushedEvent | { type: string; source: { namespace: string; repoName: string }; payload: unknown };
 
 export function isPushed(event: ArtifactsEvent | undefined): event is PushedEvent {

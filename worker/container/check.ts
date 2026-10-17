@@ -1,37 +1,42 @@
 // Runs inside the checker container (Node 24 strips the types natively; erasable syntax only).
 // Input: JSON in the CHECK_INPUT env var. Output: one JSON line on stdout, prefixed with "@@RESULT ".
 //
-// Modes:
-//   pair   typecheck fork A alone, fork B alone, then `git merge` B into A and typecheck the merge
-//   single typecheck one ref
-//   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
-//   notes  attach ATC's flight logs to landed commits as git notes under refs/notes/atc
-import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+// Modes (worker/src/review):
+//   snapshot  the repo at a PR's head as tar.gz, its diff, changed paths, and its .atc/* + REVIEW.md config
+//   ci        run the repo's CI commands at a commit, each a check, bounded per command
+//   diff      the PR's whole change for the web UI
+//   merge     merge a PR branch onto its target, run CI on the result, push the target only if CI passes
+//   restore   put a protected branch back to a commit (a push that didn't come from a merge)
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { landGuard } from "./guard.ts";
 
 interface RepoRef { name: string; remote: string; token: string }
-interface TsError { file: string; line: number; col: number; code: string; message: string; lineText: string }
-interface Typecheck { sha: string; ok: boolean; errors: TsError[]; output: string; cached?: boolean; ms?: number }
 
 type Input =
-  | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
-  | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
-  | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
-  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
+  | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
+  | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
+  | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] }
+  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string };
+
+interface CiCommand { name: string; run: string; timeoutSeconds: number }
+interface CiCheck { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number }
 
 const startedAt = Date.now(); // before the startup git lock, so "total" includes every wait (review of #36)
+/**
+ * Progress on stderr, so a run killed by the hard timeout still says where it was: the Checker DO puts the end of
+ * stderr in its error (the hang hunt of 2026-10-15). stdout carries only the result line.
+ */
+const progress = (msg: string) => { try { process.stderr.write(`@@ ${Date.now() - startedAt}ms ${msg}\n`); } catch { /* closed */ } };
 const input = JSON.parse(process.env.CHECK_INPUT ?? "{}") as Input;
-// Persistent cache (lives as long as the warm container): one repo whose object store accumulates every
-// fork and baseline commit, so each check fetches only deltas; typecheck results keyed by git TREE hash;
-// TypeScript incremental state computed once per baseline tree and reused by every check on top of it.
-// ATC_CACHE / ATC_WORK exist for the local tests (worker/test/container.test.ts); the container uses the defaults.
+// Persistent cache (lives as long as the warm container): one repo whose object store accumulates every branch
+// fetched, so each run fetches only deltas.
+// ATC_CACHE / ATC_WORK exist for the local tests (worker/test/review-container.test.ts); the container uses the defaults.
 const CACHE = process.env.ATC_CACHE ?? "/cache";
 const WORK = process.env.ATC_WORK ?? "/work";
 const repoDir = join(CACHE, "repo");
-mkdirSync(join(CACHE, "tc"), { recursive: true });
-mkdirSync(join(CACHE, "tsbuild"), { recursive: true });
+mkdirSync(CACHE, { recursive: true });
 mkdirSync(WORK, { recursive: true });
 
 // ── one git writer at a time (issue #8) ──
@@ -93,6 +98,8 @@ function withLock<T>(lock: string, fn: () => T): T {
   const depth = held.get(lock) ?? 0;
   if (depth > 0) { held.set(lock, depth + 1); try { return fn(); } finally { held.set(lock, depth); } }
   const mine = `${lock}.${process.pid}`;
+  const waitStart = Date.now();
+  let reported = 0;
   for (;;) {
     rmSync(mine, { recursive: true, force: true });
     mkdirSync(mine);
@@ -106,6 +113,12 @@ function withLock<T>(lock: string, fn: () => T): T {
       rmSync(mine, { recursive: true, force: true }); // don't leave it behind if the hard timeout kills us while waiting
       const owner = lockOwner(lock);
       if (owner) breakIfStale(lock, owner);
+      // Waiting long for a lock is the first suspect in a hung run: say who holds it (then every 30 s).
+      const waited = Date.now() - waitStart;
+      if (waited > 2_000 && waited - reported >= (reported ? 30_000 : 0)) {
+        reported = waited;
+        progress(`waiting ${Math.round(waited / 1000)}s for ${lock.replace(CACHE, "")} held by pid ${owner?.pid ?? "?"} (${owner ? `${Math.round(owner.age / 1000)}s old, ${alive(owner.pid) ? "alive" : "dead"}` : "gone"})`);
+      }
       sleep(20);
     }
   }
@@ -121,12 +134,6 @@ const withGitLock = <T,>(fn: () => T): T => withLock(LOCK, fn);
 const gitLockHeld = () => (held.get(LOCK) ?? 0) > 0;
 const WRITES = new Set(["init", "fetch", "update-ref", "worktree", "notes", "gc", "prune"]);
 
-/** Write to a temp file, then rename: a concurrent reader sees the old file or the whole new one, never half of it. */
-function writeAtomic(file: string, data: string | Buffer) {
-  const tmp = `${file}.tmp.${process.pid}`;
-  writeFileSync(tmp, data);
-  renameSync(tmp, file);
-}
 
 withGitLock(() => {
   if (!existsSync(join(repoDir, ".git"))) {
@@ -136,7 +143,7 @@ withGitLock(() => {
 });
 let dir = repoDir; // git commands run here; typechecks run in throwaway worktrees
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
-const timed = <T,>(step: string, fn: () => T): T => { const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
+const timed = <T,>(step: string, fn: () => T): T => { progress(`step ${step}`); const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
 function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
   // The subcommand: the first argument that isn't an option. Every `-c` value here contains "=", so it's skipped;
@@ -144,11 +151,14 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
   const sub = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
   if (dir === repoDir && WRITES.has(sub) && !gitLockHeld()) return withGitLock(() => git(args, opts));
   // No automatic gc: it would rewrite the shared repo while another check reads it.
-  const auth = ["-c", "gc.auto=0", ...(opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [])];
+  const auth = ["-c", "gc.auto=0"];
+  // The token goes through git's environment, never its argv: /proc/<pid>/cmdline is readable by every user in the
+  // container, /proc/<pid>/environ only by this one (CI commands run as another user; review of PR #50).
+  const env = opts.token ? { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${opts.token}` } : process.env;
   try {
     return {
       ok: true,
-      out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
+      out: execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
     };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
@@ -158,61 +168,184 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
   }
 }
 
-/** Fetch `main` of a repo into refs/agentmesh/<label>; returns the fetched sha. */
-function fetchMain(repo: RepoRef, label: string): string {
-  const ref = `refs/agentmesh/${repo.name}`;
-  // Fetch and read the ref under one lock, so another check's fetch of the same repo can't move it in between.
+/** Fetch a branch of a repo (review pipeline: PRs are branches); returns the fetched sha. */
+function fetchBranch(repo: RepoRef, branch: string): string {
+  const ref = `refs/atc-branches/${repo.name}/${branch}`;
   return withGitLock(() => {
-    // Bounded: a stalled remote must not hold the lock (and every other check in this container) until the hard timeout.
-    timed(`fetch ${label}`, () => git([...LOW_SPEED, "fetch", "-q", "--no-tags", repo.remote, `+refs/heads/main:${ref}`], { token: repo.token, timeoutMs: FETCH_TIMEOUT_MS }));
+    timed(`fetch ${branch}`, () => git([...LOW_SPEED, "fetch", "-q", "--no-tags", repo.remote, `+refs/heads/${branch}:${ref}`], { token: repo.token, timeoutMs: FETCH_TIMEOUT_MS }));
     return git(["rev-parse", ref]).out;
   });
 }
 
-const treeOf = (rev: string) => git(["rev-parse", `${rev}^{tree}`]).out;
+/** The text of `path` at `sha`, or null if it isn't there. */
+const fileAt = (sha: string, path: string): string | null => {
+  const r = git(["show", `${sha}:${path}`], { allowFail: true });
+  return r.ok ? `${r.out}\n` : null;
+};
 
-/** Main's incremental TypeScript state for a baseline commit, computed once and cached by tree. */
-function mainBuildInfo(baseSha: string | null): string | null {
-  if (!baseSha) return null;
-  const file = join(CACHE, "tsbuild", `${treeOf(baseSha)}.tsbuildinfo`);
-  if (existsSync(file)) return file;
-  // Concurrent checks of one push all need main's state at once: one builds it, the others wait and reuse it (issue #9).
-  return withLock(`${file}.lock`, () => (existsSync(file) ? file : buildMainInfo(baseSha, file)));
+const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
+
+const diffOf = (range: string[]) => {
+  // --no-renames: a rename lists both paths, so moving a protected file out of an owners glob still needs a person.
+  const d = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", "--no-renames", ...range]).out);
+  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", "--no-renames", ...range]).out.split("\n").filter(Boolean) };
+};
+
+/**
+ * The PR's whole change (three-dot against `base`, like a code host): risk and the hard rules are always judged on
+ * all of it, never on a follow-up's delta (review of PR #50). With `since`, also the delta since the last reviewed
+ * commit, which follow-up reviewers focus on.
+ */
+function changes(i: { repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }) {
+  const targetHead = fetchBranch(i.repo, i.target);
+  fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
+  // Against the target's head, three-dot (from their merge base): once the branch merges the target in, the target's
+  // own changes drop out of the PR, as on any code host. The stored base is only a hint (review of 10-17).
+  const whole = diffOf([`${targetHead}...${i.sha}`]);
+  const delta = i.since && git(["cat-file", "-e", `${i.since}^{commit}`], { allowFail: true }).ok ? diffOf([i.since, i.sha]) : null;
+  return { targetHead, diff: whole.diff, changedPaths: whole.paths, ...(delta ? { sinceDiff: delta.diff, sinceChangedPaths: delta.paths } : {}) };
 }
 
-function buildMainInfo(baseSha: string, file: string): string | null {
-  const wt = mkdtempSync(join(WORK, "main-"));
-  try {
-    git(["worktree", "add", "-q", "--detach", wt, baseSha]);
-    timed("build main incremental state", () => {
-      try { execFileSync("tsc", ["--noEmit", "-p", ".", "--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo"], { cwd: wt, stdio: "ignore" }); } catch { /* main may not typecheck; state is still useful */ }
+function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
+  const { targetHead, ...change } = changes(i);
+  const tarGz = timed("archive", () => execFileSync("git", ["archive", "--format=tar.gz", i.sha], { cwd: dir, maxBuffer: SNAPSHOT_MAX_BYTES * 2 }));
+  if (tarGz.byteLength > SNAPSHOT_MAX_BYTES) throw new Error(`repository archive is ${Math.round(tarGz.byteLength / 1e6)} MB, over the ${SNAPSHOT_MAX_BYTES / 1e6} MB limit`);
+  return {
+    mode: "snapshot", sha: i.sha, ...change, tarGzBase64: tarGz.toString("base64"),
+    // CI is the PR's own (it may change its tests). Review guidance, budgets and owners come from the target: a PR
+    // must not rewrite the rules it is reviewed by (review of PR #50).
+    // Budgets and minApprovals come from main whatever the target: the author picks the target, so a branch of their
+    // own with big budgets must not set what a run may spend (security review, 10-17).
+    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(i.target === DEFAULT_BRANCH ? targetHead : fetchBranch(i.repo, DEFAULT_BRANCH), ".atc/review.yml"), owners: fileAt(targetHead, ".atc/owners"), reviewMd: fileAt(targetHead, "REVIEW.md") },
+    timings,
+  };
+}
+
+/** The repo's main branch: where budgets and minApprovals live. */
+const DEFAULT_BRANCH = "main";
+
+/**
+ * When the container runs as root, each CI job runs as its own throwaway uid, so one job's leftovers can't touch
+ * another PR's worktree, and everything that uid still runs afterwards is killed, even what left the process group
+ * with setsid (security review, 10-17). Not root (tests): run as ourselves.
+ */
+const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+const jobUser = () => (ROOT ? { uid: 20000 + Math.floor(Math.random() * 40000), gid: 10001 } : null);
+/**
+ * Per job: files up to 4 GB (ulimit -f counts 1 KiB blocks), and for a job's own uid at most 512 processes (the
+ * process limit counts every process of the uid, so it only makes sense for a uid of its own).
+ */
+const limits = (user: { uid: number } | null) => `ulimit -f 4194304 2>/dev/null;${user ? " ulimit -u 512 2>/dev/null;" : ""}`;
+
+/**
+ * One CI command in its own process group, as the ci user when we're root, with a minimal environment (no tokens, no
+ * CHECK_INPUT). When it exits or times out, its whole group is killed, so nothing it started in the background
+ * outlives it to tamper with the shared repo or later runs (review of PR #50).
+ */
+function runCommand(c: CiCommand, cwd: string, home: string, user: { uid: number; gid: number } | null): Promise<{ status: number | null; timedOut: boolean; out: string; error?: Error }> {
+  return new Promise((resolve) => {
+    let out = "";
+    let timedOut = false;
+    const killGroup = (pid: number | undefined) => { if (pid) try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ } };
+    const child = spawn("sh", ["-c", `exec 2>&1\n${limits(user)}\n${c.run}`], {
+      // (The cast: wrangler's generated types add the Worker's vars to ProcessEnv; this process has only these.)
+      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" } as unknown as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(user ?? {}),
     });
-    if (existsSync(join(wt, ".atc.tsbuildinfo"))) writeAtomic(file, readFileSync(join(wt, ".atc.tsbuildinfo")));
+    child.stdout.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
+    child.stderr.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
+    const timer = setTimeout(() => { timedOut = true; killGroup(child.pid); }, c.timeoutSeconds * 1000);
+    child.on("error", (error) => { clearTimeout(timer); resolve({ status: null, timedOut, out, error }); });
+    // "exit", not "close": a background child holding the pipe open must not keep us waiting.
+    child.on("exit", (status) => {
+      clearTimeout(timer);
+      killGroup(child.pid);
+      setTimeout(() => resolve({ status, timedOut, out }), 50); // let the last output arrive
+    });
+  });
+}
+
+/** Run CI commands in a fresh worktree at `sha`, in order; the first failure stops the rest (shown as skipped). */
+async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
+  const wt = mkdtempSync(join(WORK, "ci-"));
+  const home = mkdtempSync(join(WORK, "ci-home-"));
+  const out: CiCheck[] = [];
+  const user = jobUser();
+  try {
+    git(["worktree", "add", "-q", "--detach", wt, sha]);
+    if (user) execFileSync("chown", ["-R", `${user.uid}:${user.gid}`, wt, home]);
+    let stopped = false;
+    for (const c of commands) {
+      if (stopped) {
+        out.push({ name: c.name, status: "skipped", log: "not run: an earlier command failed", ms: 0 });
+        continue;
+      }
+      progress(`ci ${c.name}`);
+      const t = Date.now();
+      const r = await runCommand(c, wt, home, user);
+      const ms = Date.now() - t;
+      const tail = r.out.slice(-7800);
+      if (r.timedOut) out.push({ name: c.name, status: "errored", log: `${tail}\n[timed out after ${c.timeoutSeconds} s]`, ms });
+      else if (r.error) out.push({ name: c.name, status: "errored", log: `could not run: ${r.error.message}`, ms });
+      else out.push({ name: c.name, status: r.status === 0 ? "passed" : "failed", log: r.status === 0 ? tail : `${tail}\n[exit ${r.status}]`, ms });
+      stopped = out.at(-1)!.status !== "passed";
+    }
   } finally {
+    // Whatever the job's uid still runs (a daemon started with setsid escapes the group kill) dies with the job.
+    if (user) spawnSync("pkill", ["-KILL", "-U", String(user.uid)], { stdio: "ignore" }); // exit 1 = nothing left: fine
     git(["worktree", "remove", "--force", wt], { allowFail: true });
+    rmSync(home, { recursive: true, force: true });
   }
-  return existsSync(file) ? file : null;
+  return out;
+}
+
+async function ci(i: Extract<Input, { mode: "ci" }>) {
+  fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
+  return { mode: "ci", checks: await runCi(i.sha, i.commands), timings };
+}
+
+/** Merge queue for a PR: source onto the target's current head, CI on that exact commit, then a fast-forward push. */
+async function merge(i: Extract<Input, { mode: "merge" }>) {
+  const target = fetchBranch(i.repo, i.target);
+  const source = fetchBranch(i.repo, i.source);
+  // `retry` means one thing: the target moved, so merging again onto `targetHead` may work (code review, 10-17).
+  if (source !== i.expectedSource) return { mode: "merge", merged: false, reason: `${i.source} moved to ${source.slice(0, 7)} since it was reviewed (${i.expectedSource.slice(0, 7)})` };
+  if (target !== i.expectedTarget) return { mode: "merge", merged: false, retry: true, reason: `${i.target} moved to ${target.slice(0, 7)}; merge again onto the new head`, targetHead: target };
+  const onto = ontoTarget(source, target, i.message);
+  if ("conflicts" in onto) return { mode: "merge", merged: false, reason: `merge conflict with ${i.target} in ${onto.conflicts.join(", ")}`, conflicts: onto.conflicts };
+  try {
+    const checks = await runCi(onto.sha, i.commands);
+    if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
+    const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+    if (!push.ok) return { mode: "merge", merged: false, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); merge again`, checks };
+    return { mode: "merge", merged: true, sha: onto.sha, checks, timings };
+  } finally {
+    if (onto.sha !== source) git(["update-ref", "-d", ontoRef(onto.sha)], { allowFail: true }); // pushed or not, the scratch ref goes
+  }
 }
 
 /**
- * Merge-queue step: put `fork` on top of `base`. If the fork already contains base, that's the fork itself;
- * otherwise create a merge commit in a scratch worktree (first parent = base, so pushing it to main is a fast-forward).
+ * Put the PR's head on top of the target's head. If the head already contains the target, that's the head itself;
+ * otherwise create a merge commit in a scratch worktree (first parent = target, so pushing it is a fast-forward).
  */
-function ontoBase(fork: string, base: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
-  if (git(["merge-base", "--is-ancestor", base, fork], { allowFail: true }).ok) return { sha: fork };
+const ontoRef = (sha: string) => `refs/agentmesh/onto-${sha.slice(0, 12)}`;
+
+function ontoTarget(head: string, target: string, message: string): { sha: string } | { conflicts: string[]; output: string } {
+  if (git(["merge-base", "--is-ancestor", target, head], { allowFail: true }).ok) return { sha: head };
   const wt = mkdtempSync(join(WORK, "onto-"));
   const prev = dir;
   try {
-    git(["worktree", "add", "-q", "--detach", wt, base]);
+    git(["worktree", "add", "-q", "--detach", wt, target]);
     dir = wt;
-    const merge = git(["merge", "--no-ff", "-q", "-m", message, fork], { allowFail: true });
+    const merge = git(["merge", "--no-ff", "-q", "-m", message, head], { allowFail: true });
     if (!merge.ok) {
       const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
       return { conflicts, output: merge.out.slice(0, 2000) };
     }
     const sha = git(["rev-parse", "HEAD"]).out;
     dir = repoDir;
-    git(["update-ref", `refs/agentmesh/onto-${sha.slice(0, 12)}`, sha]); // keep the object reachable for push
+    git(["update-ref", ontoRef(sha), sha]); // keep the object reachable until it's pushed
     return { sha };
   } finally {
     dir = prev;
@@ -220,162 +353,35 @@ function ontoBase(fork: string, base: string, message: string): { sha: string } 
   }
 }
 
-// tsc 7 reports diagnostics with exit 1; exit 2 from the Go binary is a crash, whose partial output must not be cached.
-const isTscOutcome = (ok: boolean, exit: number | null, errors: number) => ok || (exit === 1 && errors > 0);
-
-const prOf = (name: string) => (/--pr(\d+)$/.exec(name) ? `PR${/--pr(\d+)$/.exec(name)![1]}` : name);
-
-/** Typecheck a commit in a throwaway worktree. Results are cached by tree hash; main's incremental state seeds tsc. */
-function typecheck(rev: string, label: string, buildInfo: string | null): Typecheck {
-  const sha = git(["rev-parse", rev]).out;
-  const tree = treeOf(sha);
-  const cacheFile = join(CACHE, "tc", `${tree}.json`);
-  const cached = () => {
-    timings.push({ step: `typecheck ${label}`, ms: 0, cached: true });
-    return { ...(JSON.parse(readFileSync(cacheFile, "utf8")) as Typecheck), sha, cached: true, ms: 0 };
-  };
-  if (existsSync(cacheFile)) return cached();
-  // Another check of this push may be typechecking the same tree right now (the fork alone, in every pair): wait for
-  // its result instead of running tsc again (issue #9). An uncached outcome (environment failure) is recomputed.
-  return withLock(`${cacheFile}.lock`, () => (existsSync(cacheFile) ? cached() : runTypecheck(sha, label, buildInfo, cacheFile)));
-}
-
-function runTypecheck(sha: string, label: string, buildInfo: string | null, cacheFile: string): Typecheck {
-  const wt = mkdtempSync(join(WORK, "check-"));
-  const started = Date.now();
-  try {
-    git(["worktree", "add", "-q", "--detach", wt, sha]);
-    const args = ["--noEmit", "-p", ".", "--pretty", "false"];
-    if (buildInfo) {
-      copyFileSync(buildInfo, join(wt, ".atc.tsbuildinfo"));
-      args.push("--incremental", "--tsBuildInfoFile", ".atc.tsbuildinfo");
-    }
-    let output = "";
-    let ok = true;
-    let exit: number | null = 0;
-    try {
-      output = execFileSync("tsc", args, { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    } catch (err) {
-      const e = err as { stdout?: string; stderr?: string; status?: number | null };
-      output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-      ok = false;
-      exit = e.status ?? null; // null: killed by a signal (timeout)
-    }
-    const errors: TsError[] = [];
-    for (const line of output.split("\n")) {
-      const m = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/.exec(line.trim());
-      if (!m) continue;
-      const [, file = "", l = "0", c = "0", code = "", message = ""] = m;
-      let lineText = "";
-      try {
-        lineText = (readFileSync(join(wt, file), "utf8").split("\n")[Number(l) - 1] ?? "").trim();
-      } catch { /* file may not exist */ }
-      errors.push({ file, line: Number(l), col: Number(c), code, message, lineText });
-    }
-    const result: Typecheck = { sha, ok: ok && errors.length === 0, errors, output: output.slice(0, 4000) };
-    // Cache only real tsc outcomes: a pass, or tsc's own diagnostics (exit 1). A crash, a kill or a missing tsc is
-    // the environment, not the code; caching it by tree hash would make a transient failure permanent (issue #8).
-    if (isTscOutcome(ok, exit, errors.length)) writeAtomic(cacheFile, JSON.stringify(result));
-    const ms = Date.now() - started;
-    timings.push({ step: `typecheck ${label}`, ms, cached: false });
-    return { ...result, cached: false, ms };
-  } finally {
-    git(["worktree", "remove", "--force", wt], { allowFail: true });
-  }
+/**
+ * Put `branch` back to `sha`, but only if it is still at `current` (force-with-lease): a later legitimate move, such
+ * as a merge landing meanwhile, is never undone.
+ */
+function restore(i: Extract<Input, { mode: "restore" }>) {
+  const now = fetchBranch(i.repo, i.branch);
+  if (now !== i.current) return { mode: "restore", restored: false, reason: `${i.branch} is at ${now.slice(0, 7)}, not ${i.current.slice(0, 7)}`, timings };
+  const push = timed("push restore", () => git([...LOW_SPEED, "push", "-q", `--force-with-lease=refs/heads/${i.branch}:${i.current}`, i.repo.remote, `${i.sha}:refs/heads/${i.branch}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+  return push.ok ? { mode: "restore", restored: true, timings } : { mode: "restore", restored: false, reason: push.out.slice(-500), timings };
 }
 
 /** Fail a stalled transfer after 10 s below 1 KB/s, instead of hanging until the checker's hard timeout. */
 const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"];
-const NOTE_TIMEOUT_MS = 30_000;
+const PUSH_TIMEOUT_MS = 60_000;
 const FETCH_TIMEOUT_MS = 60_000;
 
-/**
- * Add flight log notes to the baseline's refs/notes/atc. ATC calls this in the background after it has recorded the
- * landing (one writer per Coordinator), and retries what fails. Idempotent: a note whose text is already there is
- * skipped, so a retry after a push that did land can't duplicate it. The push is never forced, so nothing is overwritten.
- * The local ref is per baseline.
- */
-function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>): { mode: "notes"; written: string[]; error?: string } {
-  const local = `refs/notes/agentmesh-${base.name}`;
-  git(["update-ref", "-d", local], { allowFail: true });
-  const fetch = git([...LOW_SPEED, "fetch", "-q", "--no-tags", base.remote, `+refs/notes/atc:${local}`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS });
-  // Only "no notes yet" may start a new notes history; any other fetch error would make the push diverge.
-  if (!fetch.ok && !/couldn't find remote ref/i.test(fetch.out)) return { mode: "notes", written: [], error: `fetch refs/notes/atc: ${fetch.out.slice(0, 200)}` };
-  for (const n of notes) {
-    // Never replace a note: a PR that added nothing new lands on an existing commit that already has one. Append instead.
-    const existing = git(["notes", `--ref=${local}`, "show", n.sha], { allowFail: true });
-    if (existing.ok && existing.out.includes(n.note.trim())) continue; // already written (a retry after a push that landed)
-    const has = existing.ok;
-    const add = git(["notes", `--ref=${local}`, has ? "append" : "add", "-F", "-", n.sha], { allowFail: true, input: n.note });
-    if (!add.ok) return { mode: "notes", written: [], error: `notes add ${n.sha.slice(0, 7)}: ${add.out.slice(0, 200)}` };
+async function run(): Promise<unknown> {
+  if (input.mode === "snapshot") return snapshot(input);
+  if (input.mode === "diff") {
+    const { diff, changedPaths } = changes(input);
+    return { mode: "diff", diff, changedPaths, timings };
   }
-  const push = timed("push notes", () => git([...LOW_SPEED, "push", "-q", base.remote, `${local}:refs/notes/atc`], { token: base.token, allowFail: true, timeoutMs: NOTE_TIMEOUT_MS }));
-  return push.ok ? { mode: "notes", written: notes.map((n) => n.sha) } : { mode: "notes", written: [], error: `push refs/notes/atc: ${push.out.slice(0, 200)}` };
-}
-
-function run(): unknown {
-  if (input.mode === "notes") return writeNotes(input.baseline, input.notes);
-  if (input.mode === "single") {
-    // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
-    const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
-    const sha = fetchMain(input.repo, "fork");
-    if (!base) return { mode: "single", repo: input.repo.name, forkSha: sha, baseHead: null, result: typecheck(sha, "fork", null), timings };
-    const onto = ontoBase(sha, base, `Land ${prOf(input.repo.name)} via ATC`);
-    if ("conflicts" in onto) {
-      return {
-        mode: "single", repo: input.repo.name, forkSha: sha, baseHead: base, mainConflict: true,
-        result: { sha, ok: false, errors: [], output: `merge conflict with main in ${onto.conflicts.join(", ")}` }, timings,
-      };
-    }
-    const result = typecheck(onto.sha, "on main", mainBuildInfo(base));
-    const alone = result.ok || onto.sha === sha ? null : typecheck(sha, "alone", mainBuildInfo(base));
-    return { mode: "single", repo: input.repo.name, forkSha: sha, baseHead: base, mainConflict: !result.ok && alone?.ok === true, result, timings };
-  }
-  if (input.mode === "pair") {
-    const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;
-    const a = fetchMain(input.a, "a");
-    const b = fetchMain(input.b, "b");
-    const info = mainBuildInfo(base);
-    const aloneA = typecheck(a, "A alone", info);
-    const aloneB = typecheck(b, "B alone", info);
-    // Merge B into A in a scratch worktree (no checkout of the shared cache repo).
-    const mwt = mkdtempSync(join(WORK, "merge-"));
-    try {
-      git(["worktree", "add", "-q", "--detach", mwt, a]);
-      const merge = (() => { const prev = dir; dir = mwt; try { return git(["merge", "--no-edit", "-q", b], { allowFail: true }); } finally { dir = prev; } })();
-      if (!merge.ok) {
-        dir = mwt;
-        const conflicts = git(["diff", "--name-only", "--diff-filter=U"], { allowFail: true }).out.split("\n").filter(Boolean);
-        dir = repoDir;
-        return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: false, conflicts, output: merge.out.slice(0, 2000) }, timings };
-      }
-      dir = mwt;
-      const mergedSha = git(["rev-parse", "HEAD"]).out;
-      dir = repoDir;
-      git(["update-ref", `refs/agentmesh/merge-${a.slice(0, 12)}-${b.slice(0, 12)}`, mergedSha]);
-      const merged = typecheck(mergedSha, "merge", info);
-      return { mode: "pair", a: input.a.name, b: input.b.name, aloneA, aloneB, merge: { clean: true, conflicts: [], typecheck: merged }, timings };
-    } finally {
-      dir = repoDir;
-      git(["worktree", "remove", "--force", mwt], { allowFail: true });
-    }
-  }
-  // land: merge queue. Put the PR on top of the current main, typecheck that exact commit, push it.
-  const baseHead = fetchMain(input.baseline, "base");
-  const forkHead = fetchMain(input.fork, "fork");
-  const moved = landGuard(baseHead, input.baseline.expectedHead, forkHead, input.fork.expectedHead);
-  if (moved) return { mode: "land", landed: false, retry: true, reason: moved, forkHead, baseHead };
-  const onto = ontoBase(forkHead, baseHead, `Land ${prOf(input.fork.name)} via ATC`);
-  if ("conflicts" in onto) return { mode: "land", landed: false, mainConflict: true, reason: `merge conflict with main in ${onto.conflicts.join(", ")}`, forkHead, baseHead };
-  const check = typecheck(onto.sha, "land", mainBuildInfo(baseHead));
-  if (!check.ok) return { mode: "land", landed: false, mainConflict: true, reason: "PR merged onto current main fails typecheck", forkHead, baseHead, typecheck: check };
-  const push = git(["push", "-q", input.baseline.remote, `${onto.sha}:refs/heads/main`], { token: input.baseline.token, allowFail: true });
-  if (!push.ok) return { mode: "land", landed: false, retry: true, reason: `push to main failed (${push.out.slice(0, 120)}); retry`, forkHead, baseHead };
-  return { mode: "land", landed: true, forkHead, landedSha: onto.sha, merged: onto.sha !== forkHead, previousHead: baseHead, typecheck: check, timings };
+  if (input.mode === "ci") return ci(input);
+  if (input.mode === "restore") return restore(input);
+  return merge(input);
 }
 
 try {
-  const result = run() as { timings?: unknown[] };
+  const result = (await run()) as { timings?: unknown[] };
   // Wall time of the whole check, including waits for locks and cached results (steps alone miss those; review of #36).
   if (Array.isArray(result.timings)) result.timings.push({ step: "total", ms: Date.now() - startedAt });
   console.log(`@@RESULT ${JSON.stringify(result)}`);
