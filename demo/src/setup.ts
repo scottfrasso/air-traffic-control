@@ -128,6 +128,8 @@ async function main() {
   // Managed Agents for the review pipeline. Optional: without it every agent step is errored and a human must approve.
   const anthropicKey = process.env.ANTHROPIC_API_KEY || readEnv().ANTHROPIC_API_KEY || "";
   if (!anthropicKey) say("note: ANTHROPIC_API_KEY not set: CI runs, but every agent review is errored (a person must approve) until it is.");
+  // Temporary, until Access is set up: lets `POST /api/admin/tokens` mint personal tokens (they still can't approve).
+  const adminSecret = process.env.ADMIN_SECRET || readEnv().ADMIN_SECRET || "";
   // The Worker's own token only creates per-fork push subscriptions (ADR-0002); a narrower one is better.
   const workerToken = env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY ?? token;
   if (!env.CLOUDFLARE_AGENTMESH_WORKER_API_KEY)
@@ -144,7 +146,7 @@ async function main() {
   const secrets = join(dir, "secrets.json");
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   try {
-    writeFileSync(secrets, JSON.stringify({ CF_API_TOKEN: workerToken, ...(anthropicKey ? { ANTHROPIC_API_KEY: anthropicKey } : {}) }), { mode: 0o600 });
+    writeFileSync(secrets, JSON.stringify({ CF_API_TOKEN: workerToken, ...(anthropicKey ? { ANTHROPIC_API_KEY: anthropicKey } : {}), ...(adminSecret ? { ADMIN_SECRET: adminSecret } : {}) }), { mode: 0o600 });
     say("deploying (building the checker image with Docker can take a few minutes)...");
     // Async, so the event loop stays free: a signal reaches our handler (which passes it on to wrangler) instead of
     // waiting behind a blocking spawn, and `finally` always removes the secrets file (reviews of #39 and #41).

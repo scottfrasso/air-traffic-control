@@ -66,6 +66,9 @@ the problem to solve; reviewing each change well, and knowing when a person must
 - **Identity**: Cloudflare Access in front of the UI (a verified email on every request), personal API tokens
   (hashed at rest, revocable) for the API, git and MCP; a `Directory` Durable Object holds people, tokens, repos. The
   shared API key (ADR-0005) is gone. In this slice every signed-in person can read and push every repo.
+  **Temporary bootstrap** (until Access is configured): `POST /api/admin/tokens {email}` with `Bearer <ADMIN_SECRET>`
+  (a Worker secret; unset turns it off) mints a personal token for that email. It is an ordinary token, so it can't
+  approve or resolve important findings. Remove it, or unset the secret, once Access is in front of the UI.
 - **Surfaces**: a web UI (repos, tokens, PR list, PR page: verdict, checks with logs, findings inline in the diff,
   Ready / Draft / Approve / Resolve / Merge), a JSON API, and MCP tools for coding agents (`open_pr`, `mark_ready`,
   `get_pr`, `resolve_finding`).

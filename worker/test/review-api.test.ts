@@ -161,3 +161,26 @@ test("MCP get_pr gives the verdict and open findings, acting as the token's pers
   const view = (await tools.get_pr({ repo: "shop", pr: opened.id })) as { state: string; verdict: { review: string }; openFindings: unknown[] };
   assert.deepEqual([view.state, view.verdict.review, view.openFindings.length], ["ready", "pending", 0]);
 });
+
+test("the admin secret mints a personal token for an email (an ordinary token: it still can't approve); a wrong or unset secret is refused", async () => {
+  const a = await app();
+  const mint = (secret: string | undefined, env: Record<string, unknown>) =>
+    handle(new Request("https://atc.example/api/admin/tokens", { method: "POST", headers: { ...(secret ? { authorization: `Bearer ${secret}` } : {}), "content-type": "application/json" }, body: JSON.stringify({ email: "Scott@X", label: "e2e" }) }), env as never, {} as never);
+  assert.equal((await mint("s3cret-admin", a.env)).status, 401, "no ADMIN_SECRET configured: refused");
+  const env = { ...a.env, ADMIN_SECRET: "s3cret-admin" };
+  assert.equal((await mint("wrong", env)).status, 401);
+  assert.equal((await mint(undefined, env)).status, 401);
+  const res = await mint("s3cret-admin", env);
+  assert.equal(res.status, 201);
+  const { token } = (await res.json()) as { token: string };
+  assert.match(token, /^atc_/);
+  const who = await handle(new Request("https://atc.example/api/tokens", { headers: { authorization: `Bearer ${token}` } }), env as never, {} as never);
+  assert.equal(who.status, 200, "the minted token is a working personal token");
+  assert.equal((await a.directory.personForToken(await hashOf(token)))?.email, "scott@x");
+  // The admin secret itself is not a personal token: it can't call anything else.
+  assert.equal((await handle(new Request("https://atc.example/api/repos", { headers: { authorization: "Bearer s3cret-admin" } }), env as never, {} as never)).status, 401);
+});
+
+async function hashOf(token: string) {
+  return (await import("../src/review/identity")).hashToken(token);
+}
