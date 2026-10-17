@@ -151,7 +151,8 @@ export class RepoStore extends DurableObject<StoreEnv> {
 
   /** Every PR with what a dashboard row shows: the verdict, finding counts, step statuses, and last activity. */
   async listSummaries(limit = 50): Promise<PrSummary[]> {
-    const ids = this.sql.exec<{ id: number }>("SELECT id FROM prs ORDER BY id DESC LIMIT ?", limit).toArray();
+    // The most recently active PRs (an old PR with a fresh push still makes the cut).
+    const ids = this.sql.exec<{ id: number }>("SELECT p.id FROM prs p LEFT JOIN events e ON e.pr = p.id GROUP BY p.id ORDER BY max(coalesce(e.at, p.created_at)) DESC LIMIT ?", limit).toArray();
     const out: PrSummary[] = [];
     for (const { id } of ids) {
       const v = await this.getPr(id);
@@ -241,25 +242,57 @@ export class RepoStore extends DurableObject<StoreEnv> {
 
   /**
    * Run the checks (the gauntlet, or only some of it) on the PR's head: what an agent calls when its work is done.
-   * A draft becomes ready. The same request again for a head that's checking or checked is the same run, at no cost;
-   * a run still going on an older head is cancelled, since one run is in charge of a PR.
+   * A draft becomes ready. Asking again for a head that's being checked, or that a clean run already covered, returns
+   * that run at no cost; a run that ended with a failure can be run again (flaky CI). Starting a new run cancels one
+   * still going on an older head, since one run is in charge of a PR. Every state change happens before the first
+   * await, so two calls at once start one run.
    */
   async runChecks(id: number, by: string, opts: { sha?: string; only?: CheckName[] } = {}): Promise<{ run: number }> {
-    const p = this.mustPr(id);
+    let p = this.mustPr(id);
     if (!OPEN_STATES.includes(p.state)) throw new Error(`PR${id} is ${p.state}`);
-    if (opts.sha && opts.sha !== p.head) throw new Error(`PR${id} is at ${p.head}, not ${opts.sha}: push first, or name the head`);
     for (const c of opts.only ?? []) if (!CHECK_NAMES.includes(c)) throw new Error(`unknown check ${c}: use ${CHECK_NAMES.join(", ")}`);
+    const names = (sha: string) => (opts.sha!.length >= 7 ? sha.startsWith(opts.sha!) : sha === opts.sha);
+    if (opts.sha && !names(p.head)) {
+      // The push event may not have arrived yet (it comes through a queue): ask the branch itself (review of 10-17).
+      const live = await this.headOf(p.source);
+      p = this.mustPr(id);
+      if (live && live !== p.head && names(live)) {
+        this.sql.exec("UPDATE prs SET head = ? WHERE id = ?", live, id);
+        this.log("pr.pushed", id, { sha: live });
+        p = this.mustPr(id);
+      }
+      if (!names(p.head)) throw new Error(`PR${id} is at ${p.head}, not ${opts.sha}: push first, or name the head`);
+    }
     const only = opts.only?.length ? CHECK_NAMES.filter((c) => opts.only!.includes(c)) : null;
     const scope = only ? JSON.stringify(only) : null;
-    const cur = p.current_run ? this.sql.exec<RunRow>("SELECT * FROM runs WHERE id = ?", p.current_run).toArray()[0] : undefined;
-    if (cur && cur.sha === p.head && cur.scope === scope && (cur.status === "running" || cur.status === "done")) return { run: cur.id };
+    const cur = p.current_run ? this.runRow(p.current_run) : null;
+    if (cur && cur.sha === p.head) {
+      if (cur.status === "running" && cur.scope === scope) return { run: cur.id };
+      if (cur.status === "done" && this.cleanRun(cur.id) && (cur.scope === scope || (cur.scope === null && this.covers(cur.id, only)))) return { run: cur.id };
+    }
     if (p.state === "draft") {
       this.sql.exec("UPDATE prs SET state = 'ready' WHERE id = ?", id);
       this.log("pr.ready", id, { by });
     }
-    await this.cancelRun(id, "checks requested again");
+    const stopped = this.detachRun(id, "checks requested again");
     this.log("checks.requested", id, { by, sha: p.head, only: only ?? [] });
-    return { run: await this.startRun(id, only) };
+    const run = this.insertRun(id, only);
+    if (stopped) await this.terminate(stopped);
+    // If it can't start, the PR keeps the result it had (a finished run), not "never checked".
+    await this.launch(id, run, only, cur && cur.status !== "running" ? cur.id : null);
+    return { run };
+  }
+
+  /** No failed or errored check in it, CI at merge time included. */
+  private cleanRun(run: number): boolean {
+    return this.sql.exec("SELECT 1 FROM checks WHERE run = ? AND status IN ('failed', 'errored') LIMIT 1", run).toArray().length === 0;
+  }
+
+  /** A full run passed every requested single check: CI, and each reviewer that ran in it. */
+  private covers(run: number, only: CheckName[] | null): boolean {
+    if (!only) return true;
+    const rows = this.sql.exec<{ name: string; kind: string; status: string }>("SELECT name, kind, status FROM checks WHERE run = ?", run).toArray();
+    return only.every((c) => (c === "ci" ? rows.some((r) => r.kind === "ci" && r.status === "passed") : rows.some((r) => r.kind === "step" && r.name === c && r.status === "passed")));
   }
 
   /** The older name for runChecks (the whole gauntlet), kept for agents that call it. */
@@ -283,44 +316,61 @@ export class RepoStore extends DurableObject<StoreEnv> {
     this.log("pr.closed", id, { by });
   }
 
-  private async startRun(id: number, only: CheckName[] | null = null): Promise<number> {
+  /** A new run in charge of the PR (synchronous: no await, so concurrent callers see it). */
+  private insertRun(id: number, only: CheckName[] | null): number {
     const p = this.mustPr(id);
     const number = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM runs WHERE pr = ?", id).one().n + 1;
-    const since = this.sql.exec<{ sha: string }>("SELECT sha FROM runs WHERE pr = ? AND status = 'done' ORDER BY id DESC LIMIT 1", id).toArray()[0]?.sha ?? null;
+    // Only a full run is a "last reviewed commit": a single check after it doesn't hide the change since (review of 10-17).
+    const since = this.sql.exec<{ sha: string }>("SELECT sha FROM runs WHERE pr = ? AND status = 'done' AND scope IS NULL ORDER BY id DESC LIMIT 1", id).toArray()[0]?.sha ?? null;
     this.sql.exec("INSERT INTO runs(pr, sha, number, status, since_sha, instance, scope, started_at) VALUES (?, ?, ?, 'running', ?, '', ?, ?)", id, p.head, number, since, only ? JSON.stringify(only) : null, Date.now());
     const run = this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id;
     const instance = `${this.repo}-pr${id}-${p.head.slice(0, 12)}-r${run}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
     this.sql.exec("UPDATE runs SET instance = ? WHERE id = ?", instance, run);
     this.sql.exec("UPDATE prs SET current_run = ? WHERE id = ?", run, id);
     this.log("run.started", id, { run, sha: p.head, number });
+    return run;
+  }
+
+  /** Start the run's Workflow; if that fails, remove the run and put `restore` (the previous result) back in charge. */
+  private async launch(id: number, run: number, only: CheckName[] | null, restore: number | null): Promise<void> {
+    const r = this.runRow(run)!;
     try {
-      await this.env.REVIEW_RUN.create({ id: instance, params: { repo: this.repo, pr: id, sha: p.head, run, ...(only ? { only } : {}) } });
+      await this.env.REVIEW_RUN.create({ id: r.instance, params: { repo: this.repo, pr: id, sha: r.sha, run, ...(only ? { only } : {}) } });
     } catch (err) {
       if (!isDuplicateInstance((err as Error).message)) {
-        // Leave nothing half-started: no run that will never report. Ready (or the queue's retry) starts it again.
+        // Leave nothing half-started: no run that will never report. Run checks again starts it.
         this.sql.exec("DELETE FROM runs WHERE id = ?", run);
-        this.sql.exec("UPDATE prs SET current_run = NULL WHERE id = ? AND current_run = ?", id, run);
+        this.sql.exec("UPDATE prs SET current_run = ? WHERE id = ? AND current_run = ?", restore, id, run);
         this.log("run.start_failed", id, { run, error: (err as Error).message.slice(0, 300) });
         throw err;
       }
     }
-    return run;
   }
 
-  private async cancelRun(id: number, why: string) {
+  /** The PR's run is no longer in charge; if it was still going, it's cancelled. Returns its instance to stop. */
+  private detachRun(id: number, why: string): string | null {
     const p = this.mustPr(id);
-    if (!p.current_run) return;
-    const run = this.sql.exec<RunRow>("SELECT * FROM runs WHERE id = ?", p.current_run).toArray()[0];
+    if (!p.current_run) return null;
+    const run = this.runRow(p.current_run);
     this.sql.exec("UPDATE prs SET current_run = NULL WHERE id = ?", id);
-    if (!run || run.status !== "running") return;
+    if (!run || run.status !== "running") return null;
     this.sql.exec("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ?", Date.now(), run.id);
     this.log("run.cancelled", id, { run: run.id, why });
-    // Best effort: correctness comes from record* refusing a non-current run, not from the terminate landing.
+    return run.instance;
+  }
+
+  /** Best effort: correctness comes from record* refusing a non-current run, not from the terminate landing. */
+  private async terminate(instance: string): Promise<void> {
     try {
-      await (await this.env.REVIEW_RUN.get(run.instance)).terminate();
+      await (await this.env.REVIEW_RUN.get(instance)).terminate();
     } catch {
       /* already finished, or never started */
     }
+  }
+
+  private async cancelRun(id: number, why: string) {
+    const stopped = this.detachRun(id, why);
+    if (stopped) await this.terminate(stopped);
   }
 
   async approve(id: number, by: string, sha: string, via: Via): Promise<{ ok: boolean; error?: string }> {
@@ -501,7 +551,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
         .toArray()
         .map((c) => c.name)
         .filter((n) => (REVIEWERS as readonly string[]).includes(n));
-      for (const reviewer of passed) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ?", r.pr, reviewer, run);
+      // And only a full run on a different commit: a single check, or the same commit again, not reporting a finding
+      // is the model varying, not a fix (review of 10-17).
+      if (r.scope === null)
+        for (const reviewer of passed) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ? AND sha != ?", r.pr, reviewer, run, r.sha);
     }
     this.log("run.finished", r.pr, { run, outcome });
     return true;

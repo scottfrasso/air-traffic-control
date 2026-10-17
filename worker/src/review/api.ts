@@ -99,9 +99,12 @@ const routes: Route[] = [
     /^\/api\/prs$/,
     async (c) => {
       // The dashboard: every repo's PRs, newest activity first.
+      // One repo that can't answer is listed as unavailable; the others still show (review of 10-17).
       const repos = await c.directory.listRepos();
-      const all = await Promise.all(repos.map(async (r) => (await c.env.REPOS.getByName(r.name).listSummaries()).map((s) => ({ repo: r.name, ...s }))));
-      return json({ prs: all.flat().sort((a, b) => b.updatedAt - a.updatedAt) });
+      const all = await Promise.allSettled(repos.map(async (r) => (await c.env.REPOS.getByName(r.name).listSummaries()).map((s) => ({ repo: r.name, ...s }))));
+      const unavailable = repos.filter((_, i) => all[i]!.status === "rejected").map((r) => r.name);
+      const prs = all.flatMap((x) => (x.status === "fulfilled" ? x.value : [])).sort((a, b) => b.updatedAt - a.updatedAt);
+      return json({ prs, ...(unavailable.length ? { unavailable } : {}) });
     },
   ],
   ["GET", /^\/api\/repos\/([^/]+)\/prs$/, async (c) => {
@@ -129,10 +132,11 @@ const routes: Route[] = [
     /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/checks$/,
     async (c) => {
       // What an agent calls when its work is done: the gauntlet on the head (or the named commit), or single checks.
-      const b = await body<{ sha?: unknown; only?: unknown }>(c.request);
+      const b = (await body<{ sha?: unknown; only?: unknown } | null>(c.request)) as { sha?: unknown; only?: unknown } | null;
+      if (b === null || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "body must be a JSON object");
       if (b.sha !== undefined && typeof b.sha !== "string") throw new HttpError(400, "sha must be a commit");
-      if (b.only !== undefined && (!Array.isArray(b.only) || b.only.some((x) => !CHECK_NAMES.includes(x as CheckName))))
-        throw new HttpError(400, `only must be a list of: ${CHECK_NAMES.join(", ")}`);
+      if (b.only !== undefined && (!Array.isArray(b.only) || !b.only.length || b.only.some((x) => !CHECK_NAMES.includes(x as CheckName))))
+        throw new HttpError(400, `only must be a non-empty list of: ${CHECK_NAMES.join(", ")} (leave it out for all checks)`);
       return json(await store(c).runChecks(prId(c), c.person.email, { ...(b.sha ? { sha: b.sha as string } : {}), ...(b.only ? { only: b.only as CheckName[] } : {}) }));
     },
   ],

@@ -221,3 +221,29 @@ test("MCP run_checks runs the gauntlet on the head, or single checks, as the tok
   const view = (await tools.get_pr({ repo: "shop", pr: opened.id })) as { verdict: { checks: string } };
   assert.equal(view.verdict.checks, "running");
 });
+
+test("run checks rejects a null body and an empty only list with a 400", async () => {
+  const a = await app();
+  const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, null)).status, 400);
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { only: [] })).status, 400);
+  assert.equal(a.s.runs.length, 0);
+});
+
+test("the dashboard still lists the other repos when one repo's store fails", async () => {
+  const a = await app();
+  await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" });
+  await a.directory.addRepo("broken", "ann@x", null);
+  const real = a.env.REPOS.getByName;
+  a.env.REPOS.getByName = ((name: string) => (name === "broken" ? { listSummaries: async () => { throw new Error("down"); } } : real(name))) as never;
+  const r = await a.call("GET", "/api/prs");
+  assert.equal(r.status, 200);
+  assert.deepEqual((r.body.prs as Array<{ repo: string }>).map((p) => p.repo), ["shop"]);
+  assert.deepEqual(r.body.unavailable, ["broken"]);
+});
+
+test("MCP run_checks tells agents to poll until checks aren't running (a partial or stale run never says done)", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../src/review/mcp.ts", import.meta.url), "utf8");
+  assert.match(src, /until verdict\.checks isn't running/);
+  assert.doesNotMatch(src, /until verdict\.checks is done/);
+});

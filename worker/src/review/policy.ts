@@ -127,7 +127,7 @@ export function computeVerdict(i: VerdictInput): Verdict {
   if (checks === "stale") blockers.push(`checks ran on ${short(run!.sha)}, the head is ${short(i.head)}: run the checks again`);
   if (checks === "partial") blockers.push(`only some checks ran (${run!.only!.join(", ")}): run all the checks before merging`);
   if (ciFailed) blockers.push("CI failed");
-  if (i.state === "ready" && checks !== "not_run" && (i.ci === "pending" || review === "pending")) blockers.push("review in progress");
+  if (i.state === "ready" && checks === "running") blockers.push("review in progress");
   if (importantOpen.length) blockers.push(`${importantOpen.length} open important finding${importantOpen.length > 1 ? "s" : ""}`);
   if (securityOpen.length) blockers.push("open security finding");
   if (done && counted.count < required) blockers.push(`needs ${required} approval${required > 1 ? "s" : ""}, has ${counted.count}`);

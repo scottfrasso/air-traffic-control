@@ -40,6 +40,24 @@ what the checks found, and the diff with findings in place.
   and run checks; Approve and answering important findings are disabled and say why (ADR-0027: only Access sign-ins
   approve).
 
+## After review (same day)
+A fresh review found that partial runs leaked into full ones. Fixed, each with a test that failed first:
+- Only a **full** run is a "last reviewed commit" (`since`); a single check after it no longer hides the change since.
+- Findings are marked **fixed only by a full run on a different commit**: not by a single check (which skips the
+  hard rules and the risk floor), and not by re-running the same commit (not reporting a finding again is the model
+  varying, not a fix). Otherwise an agent could re-run the security check until a finding it may not dismiss vanished.
+- A single check that a **clean** full run on the head already covered returns that run, so it can't turn a mergeable
+  PR into a partial one. A done run with any failed or errored check (a reviewer, CI at merge time) can be run again.
+- `sha` may be 7+ characters, and naming a commit the push event hasn't delivered yet reads the branch's live head
+  and moves the PR there (the queue lags the push).
+- Every state change in `runChecks` happens before its first await, so two calls at once start one run; if the new
+  run's Workflow can't start, the PR keeps its previous result.
+- A finished partial run is never "in progress"; the dashboard API lists the repos it couldn't read instead of failing;
+  `POST …/checks` rejects a non-object body and an empty `only`.
+- UI: polling re-renders only when what's shown changed and never while someone types or has a menu open; Run checks
+  works while a run on an older head is going; Close and Back to draft (while running) ask first; the run menu works
+  from the keyboard; small coloured text meets 4.5:1.
+
 ## Consequences
 - Agents decide when to spend: the e2e now pushes, sees the verdict go stale with nothing run, and triggers again.
 - An agent that forgets to call `run_checks` leaves its PR stale; the dashboard shows it under "Agent's turn".

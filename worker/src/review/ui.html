@@ -12,6 +12,7 @@
     --paper: #f3f5f7; --sheet: #ffffff; --ink: #18202a; --muted: #5b6675; --rule: #d5dbe3; --rule-soft: #e6eaef;
     --go: #1f8a5b; --hold: #b87308; --stop: #c8322f; --idle: #aab3bf; --act: #3949ab; --act-ink: #ffffff;
     --go-wash: #e3f3ea; --hold-wash: #fbf0dc; --stop-wash: #fbe5e4; --act-wash: #e8eaf8;
+    --go-ink: #146343; --hold-ink: #7f4e00; --stop-ink: #a1221f;
     --add: #e6f4ec; --add-mark: #b9e0c8; --del: #fbe9e8; --del-mark: #f1c4c1;
     --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -22,6 +23,7 @@
       --paper: #12171e; --sheet: #192029; --ink: #e3e8ee; --muted: #93a0b0; --rule: #2c3643; --rule-soft: #222b36;
       --go: #3fb27f; --hold: #e0a03a; --stop: #f0605a; --idle: #4b5767; --act: #8c9cf0; --act-ink: #12171e;
       --go-wash: #16302a; --hold-wash: #33291a; --stop-wash: #3a1f22; --act-wash: #232a48;
+      --go-ink: #5fcf9b; --hold-ink: #f0b85c; --stop-ink: #ff8a84;
       --add: #15291f; --add-mark: #1f4a33; --del: #2f1b1d; --del-mark: #5a2a2c;
     }
   }
@@ -29,6 +31,7 @@
     --paper: #12171e; --sheet: #192029; --ink: #e3e8ee; --muted: #93a0b0; --rule: #2c3643; --rule-soft: #222b36;
     --go: #3fb27f; --hold: #e0a03a; --stop: #f0605a; --idle: #4b5767; --act: #8c9cf0; --act-ink: #12171e;
     --go-wash: #16302a; --hold-wash: #33291a; --stop-wash: #3a1f22; --act-wash: #232a48;
+    --go-ink: #5fcf9b; --hold-ink: #f0b85c; --stop-ink: #ff8a84;
     --add: #15291f; --add-mark: #1f4a33; --del: #2f1b1d; --del-mark: #5a2a2c;
   }
   * { box-sizing: border-box; }
@@ -101,9 +104,9 @@
   .station p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
   .station .subs { display: flex; flex-direction: column; align-items: center; gap: 1px; margin-top: 6px; }
   .riskchip { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 5px; margin: 2px 0 3px; }
-  .riskchip.low { background: var(--go-wash); color: var(--go); }
-  .riskchip.medium { background: var(--hold-wash); color: var(--hold); }
-  .riskchip.high { background: var(--stop-wash); color: var(--stop); }
+  .riskchip.low { background: var(--go-wash); color: var(--go-ink); }
+  .riskchip.medium { background: var(--hold-wash); color: var(--hold-ink); }
+  .riskchip.high { background: var(--stop-wash); color: var(--stop-ink); }
   .station .subs span { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
   .station .subs .lamp { width: 8px; height: 8px; border: 0; box-shadow: none; }
 
@@ -126,15 +129,15 @@
   .pr-row .title { font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
   .pr-row .meta { font-size: 13px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
   .pr-row .next { font-size: 13px; line-height: 1.4; }
-  .pr-row .next.go { color: var(--go); font-weight: 600; }
+  .pr-row .next.go { color: var(--go-ink); font-weight: 600; }
   .risk { font-size: 13px; color: var(--muted); line-height: 1.45; }
   .risk b { font-weight: 600; color: var(--ink); }
   .tag { display: inline-block; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 5px; background: var(--rule-soft); color: var(--muted); }
   .tag.draft { background: var(--rule-soft); }
   .tag.ready { background: var(--act-wash); color: var(--act); }
-  .tag.merged { background: var(--go-wash); color: var(--go); }
-  .tag.closed { background: var(--stop-wash); color: var(--stop); }
-  .tag.stale { background: var(--hold-wash); color: var(--hold); }
+  .tag.merged { background: var(--go-wash); color: var(--go-ink); }
+  .tag.closed { background: var(--stop-wash); color: var(--stop-ink); }
+  .tag.stale { background: var(--hold-wash); color: var(--hold-ink); }
   .empty { padding: 48px 24px; text-align: center; color: var(--muted); }
   .empty h2 { color: var(--ink); }
   .side-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; margin-top: 40px; }
@@ -175,9 +178,9 @@
   .finding .answer { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   .finding .answer input { flex: 1 1 220px; }
   .sev { font-size: 12px; font-weight: 600; }
-  .sev.important { color: var(--stop); }
+  .sev.important { color: var(--stop-ink); }
   .sev.nit { color: var(--muted); }
-  .sev.pre-existing { color: var(--hold); }
+  .sev.pre-existing { color: var(--hold-ink); }
 
   .files { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 20px; align-items: start; }
   .filelist { position: sticky; top: 12px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 8px; font-size: 13px; max-height: calc(100vh - 24px); overflow: auto; }
@@ -226,6 +229,7 @@
     .top { padding: 0 16px; gap: 12px; }
     .top nav a { padding: 6px 6px; }
     .who { display: none; }
+    .brand-name { display: none; }
     main { padding: 22px 16px 64px; }
     h1 { font-size: 22px; }
     .track { grid-template-columns: minmax(0, 1fr); padding: 14px 16px; }
@@ -244,7 +248,7 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/" data-nav><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Reviews</a>
+  <a class="brand" href="/" data-nav><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">Reviews</span></a>
   <nav id="nav"></nav>
   <div class="who" id="who"></div>
 </header>
@@ -295,8 +299,22 @@ function go(href) { prTab = "overview"; history.pushState(null, "", href); route
 function link(href, text, cls) { return h("a", { href, class: cls, onclick: (e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); go(href); } }, text); }
 function fail(err) { return h("p", { class: "err" }, err.message || String(err)); }
 
+/**
+ * While something runs, look again every few seconds, but re-render only when what's shown changed, and never under
+ * someone's hands: not while they type in a field or have a menu open (review of 10-17).
+ */
+function poll(read, shown, render, ms) {
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    const busy = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.querySelector(".menu");
+    let now = shown;
+    try { now = await read(); } catch (_) {}
+    if (now !== shown && !busy) render(); else poll(read, busy ? shown : now, render, ms);
+  }, ms);
+}
+
 function signIn() {
-  clearInterval(timer);
+  clearTimeout(timer);
   document.getElementById("nav").replaceChildren();
   document.getElementById("who").replaceChildren();
   const input = h("input", { type: "password", placeholder: "atc_…", autocomplete: "off", style: "flex: 1 1 320px" });
@@ -369,8 +387,8 @@ function stations(view) {
   const need = v.requiredApprovals, got = v.approvals;
   const nonAuthor = v.blockers.some((b) => /someone other than the author/.test(b));
   const reviewOver = v.checks === "done" || v.checks === "stale" || v.checks === "partial";
-  out.push({ key: "approvals", name: "Approvals", lamp: pr.state === "merged" ? "go" : !reviewOver ? "idle" : need === 0 ? "go" : got >= need && !nonAuthor ? "go" : "hold",
-    text: pr.state === "merged" ? "Approved" : !reviewOver ? "Set by the risk" : need === 0 ? "None needed" : `${got} of ${need}${nonAuthor ? ", one not the author" : ""}` });
+  out.push({ key: "approvals", name: "Approvals", lamp: pr.state === "merged" ? "go" : !reviewOver || v.checks === "partial" ? "idle" : need === 0 ? "go" : got >= need && !nonAuthor ? "go" : "hold",
+    text: pr.state === "merged" ? "Approved" : !reviewOver ? "Set by the risk" : v.checks === "partial" ? "Set by a full run" : need === 0 ? "None needed" : `${got} of ${need}${nonAuthor ? ", one not the author" : ""}` });
 
   out.push({ key: "merge", name: "Merge", lamp: pr.state === "merged" ? "go" : pr.state === "closed" ? "off" : v.mergeable ? "go" : reviewOver ? "stop" : "idle",
     text: pr.state === "merged" ? "Merged" : pr.state === "closed" ? "Closed" : v.mergeable ? "Ready to merge" : reviewOver ? "Blocked" : "After every check" });
@@ -386,8 +404,8 @@ function nextStep(pr, v) {
   if (v.checks === "running") return { tone: "", text: "Checks are running." };
   if (v.checks === "stale") return { tone: "hold", text: `The head moved to ${short(pr.head)} after the checks ran on ${short(v.checkedSha)}. Run the checks again.` };
   if (v.checks === "not_run") return { tone: "hold", text: "Checks haven't run on this commit." };
-  if (v.checks === "partial") return { tone: "hold", text: "Only some checks ran. Run all of them before merging." };
   if (v.ci === "fail") return { tone: "stop", text: "CI failed, so the review agents didn't run. Fix it and run the checks again." };
+  if (v.checks === "partial") return { tone: "hold", text: "Only some checks ran. Run all of them before merging." };
   const findings = v.blockers.find((b) => /important finding/.test(b));
   if (findings) return { tone: "stop", text: `${findings[0].toUpperCase()}${findings.slice(1)}. The agent fixes them and runs the checks again, or a person answers them.` };
   if (v.approvals < v.requiredApprovals || v.blockers.some((b) => /author/.test(b))) {
@@ -403,7 +421,7 @@ function track(view) {
   const stale = view.verdict.checks === "stale";
   return h("section", { class: `track${stale ? " stale" : ""}`, "aria-label": "Checks" },
     stations(view).map((s) => h("div", { class: "station" },
-      lamp(s.lamp, `${s.name}: ${s.text}`),
+      h("span", { class: `lamp ${s.lamp}`, "aria-hidden": "true" }),
       h("h3", {}, s.name),
       s.risk ? h("span", { class: `riskchip ${s.risk}` }, `${s.risk[0].toUpperCase()}${s.risk.slice(1)} risk`) : null,
       h("p", {}, s.text),
@@ -438,8 +456,9 @@ const BUCKETS = [
 let bucket = null;
 
 async function dashboard() {
+  clearTimeout(timer);
   frame("prs");
-  const { prs } = await api("GET", `/api/prs`);
+  const { prs, unavailable } = await api("GET", `/api/prs`);
   if (!bucket) bucket = (BUCKETS.find((b) => prs.some(b.test)) || BUCKETS[0]).key;
   const b = BUCKETS.find((x) => x.key === bucket);
   const rows = prs.filter(b.test);
@@ -447,8 +466,9 @@ async function dashboard() {
     h("div", { class: "head" }, h("div", {}, h("h1", {}, "Pull requests"), h("p", { class: "muted", style: "margin: 6px 0 0" }, "Agents push as often as they like. Checks run only when an agent, or you, asks for them."))),
     h("div", { class: "tabs", role: "tablist" }, BUCKETS.map((x) => h("button", { role: "tab", "aria-selected": String(x.key === bucket), onclick: () => { bucket = x.key; dashboard().catch((e) => show(fail(e))); } }, x.name, " ", h("span", { class: "count" }, prs.filter(x.test).length)))),
     h("div", { class: "prs", style: "margin-top: 14px" }, rows.length ? rows.map(prRow) : h("div", { class: "empty" }, emptyText(bucket, prs.length))),
+    unavailable && unavailable.length ? h("p", { class: "note", style: "margin-top: 12px" }, `Couldn't load ${unavailable.join(", ")} just now; they'll show again on the next refresh.`) : null,
   );
-  if (prs.some((s) => s.verdict.checks === "running")) timer = setTimeout(route, 8000);
+  if (prs.some((s) => s.verdict.checks === "running")) poll(async () => JSON.stringify((await api("GET", `/api/prs`)).prs.map((x) => [x.pr.id, x.repo, x.verdict, x.steps])), JSON.stringify(prs.map((x) => [x.pr.id, x.repo, x.verdict, x.steps])), route, 8000);
 }
 
 function emptyText(key, total) {
@@ -602,7 +622,7 @@ function fileDiff(file, findings, card) {
 
 function runMenu(repo, view, refresh, msg) {
   const holder = h("div", { class: "split" });
-  const busy = view.verdict.checks === "running";
+  const busy = view.verdict.checks === "running" && view.run && view.run.sha === view.pr.head;
   const start = async (only) => {
     try { await api("POST", `/api/repos/${enc(repo)}/prs/${view.pr.id}/checks`, { sha: view.pr.head, ...(only ? { only } : {}) }); refresh(); } catch (e) { msg.textContent = e.message; }
   };
@@ -614,21 +634,30 @@ function runMenu(repo, view, refresh, msg) {
     [["tests"], "Tests review only", "One agent session, plus verification"],
   ];
   let menu = null;
-  const close = () => { if (menu) { menu.remove(); menu = null; } };
+  const close = () => { if (menu) { menu.remove(); menu = null; caret.setAttribute("aria-expanded", "false"); } };
   const toggle = (e) => {
     e.stopPropagation();
     if (menu) return close();
-    menu = h("div", { class: "menu", role: "menu" }, ITEMS.map(([only, name, what]) => h("button", { role: "menuitem", onclick: () => { close(); start(only); } }, name, h("span", {}, what))));
+    menu = h("div", { class: "menu", role: "menu", onkeydown: (k) => {
+      const items = [...menu.querySelectorAll("button")], at = items.indexOf(document.activeElement);
+      if (k.key === "Escape") { close(); caret.focus(); }
+      else if (k.key === "ArrowDown") { k.preventDefault(); items[(at + 1) % items.length].focus(); }
+      else if (k.key === "ArrowUp") { k.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+    } }, ITEMS.map(([only, name, what]) => h("button", { role: "menuitem", onclick: () => { close(); start(only); } }, name, h("span", {}, what))));
     holder.append(menu);
+    caret.setAttribute("aria-expanded", "true");
+    menu.querySelector("button").focus();
     document.addEventListener("click", close, { once: true });
   };
+  const caret = h("button", { class: "primary", disabled: busy, "aria-label": "Run single checks", "aria-haspopup": "menu", "aria-expanded": "false", onclick: toggle }, "▾");
   holder.append(
     h("button", { class: "primary", disabled: busy, onclick: () => start(null) }, busy ? "Checks running…" : view.run ? `Run checks on ${short(view.pr.head)}` : "Run checks"),
-    h("button", { class: "primary", disabled: busy, "aria-label": "Run single checks", "aria-haspopup": "menu", onclick: toggle }, "▾"));
+    caret);
   return holder;
 }
 
 async function prPage(repo, id) {
+  clearTimeout(timer);
   frame("prs");
   const refresh = () => prPage(repo, id).catch((e) => show(fail(e)));
   const view = await api("GET", `/api/repos/${enc(repo)}/prs/${id}`);
@@ -665,8 +694,8 @@ async function prPage(repo, id) {
       pr.state === "ready" ? h("button", { disabled: !canApprove || iApproved, title: !canApprove ? "Approving needs an Access sign-in: a token could be an agent's" : null, onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/approve`, { sha: view.pr.head })) }, iApproved ? `You approved ${short(pr.head)}` : `Approve ${short(pr.head)}`) : null,
       pr.state === "ready" ? h("button", { class: "go", disabled: !v.mergeable, title: v.mergeable ? null : v.blockers.join("; "), onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/merge`)) }, "Merge") : null,
       h("span", { class: "spacer" }),
-      pr.state === "ready" ? h("button", { class: "quiet", onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/draft`)) }, "Back to draft") : null,
-      h("button", { class: "quiet danger", onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/close`)) }, "Close PR"),
+      pr.state === "ready" ? h("button", { class: "quiet", onclick: () => (v.checks !== "running" || confirm("Checks are running. Back to draft stops them; what they've spent so far is lost.")) && act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/draft`))() }, "Back to draft") : null,
+      h("button", { class: "quiet danger", onclick: () => confirm(`Close #${pr.id} without merging? It can't be reopened.`) && act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/close`))() }, "Close PR"),
       msg) : null,
     open && !canApprove && pr.state === "ready" ? h("p", { class: "note" }, "You're signed in with a token, so you can run checks but not approve. Approvals need an Access sign-in.") : null,
     tabBar,
@@ -718,7 +747,8 @@ async function prPage(repo, id) {
     };
     body.replaceChildren(h("section", { class: "section panel" }, h("ul", { class: "events" }, view.events.map((e) => h("li", {}, h("time", { datetime: new Date(e.at).toISOString(), title: new Date(e.at).toLocaleString() }, ago(e.at)), h("span", {}, say(e)))))));
   }
-  if (open && v.checks === "running") timer = setTimeout(route, 5000);
+  const key = (x) => JSON.stringify([x.pr.head, x.verdict, x.checks.map((c) => [c.name, c.status]), x.findings.length]);
+  if (open && v.checks === "running") poll(async () => key(await api("GET", `/api/repos/${enc(repo)}/prs/${id}`)), key(view), refresh, 5000);
 }
 
 async function route() {

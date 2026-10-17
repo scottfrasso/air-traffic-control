@@ -364,3 +364,128 @@ test("a late or reordered push event can't move a PR back to an older commit; a 
   assert.equal((await s.co.getPr(pr.id)).pr.head, "f2");
   assert.equal(s.runs.length, runs);
 });
+
+// ── review of the triggered-checks change (10-17) ──
+const fullDone = async (s: Awaited<ReturnType<typeof withPr>>["s"], run: number, opts: { reviewers?: Array<"correctness" | "security" | "tests">; errored?: string } = {}) => {
+  await s.co.recordCheck(run, { run, name: "test", kind: "ci", status: "passed", log: "", ms: 1 });
+  await s.co.recordClassification(run, { tier: "low", needsHuman: false, humanReasons: [], reviewers: opts.reviewers ?? ["correctness"], depth: "standard" });
+  for (const r of opts.reviewers ?? ["correctness"]) await s.co.recordStep(run, r, opts.errored === r ? "errored" : "passed");
+  await s.co.finishRun(run, "done");
+};
+
+test("a partial run never becomes the 'last reviewed commit': the next full run still reviews the whole delta", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  await s.push("fix", "f2");
+  const b = await s.co.runChecks(pr.id, "ann@x", { only: ["ci"] });
+  await s.co.recordCheck(b.run, { run: b.run, name: "test", kind: "ci", status: "passed", log: "", ms: 1 });
+  await s.co.finishRun(b.run, "done");
+  const c = await s.co.runChecks(pr.id, "ann@x");
+  assert.equal((await s.co.runContext(c.run)).lastReviewedSha, "f1");
+});
+
+test("an important finding is marked fixed only by a full run on a different commit, never by a partial run or a re-run of the same commit", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await s.co.recordFindings(a.run, "security", [{ file: "src/a.ts", line: 3, severity: "important", class: "injection", title: "t", evidence: "e" }]);
+  await fullDone(s, a.run, { reviewers: ["correctness", "security"], errored: "correctness" });
+  const same = await s.co.runChecks(pr.id, "ann@x"); // re-run: correctness errored, so it may run again
+  assert.notEqual(same.run, a.run);
+  await fullDone(s, same.run, { reviewers: ["correctness", "security"] });
+  assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open", "same commit: not reporting it again isn't a fix");
+  await s.push("fix", "f2");
+  const part = await s.co.runChecks(pr.id, "ann@x", { only: ["security"] });
+  await s.co.recordStep(part.run, "security", "passed");
+  await s.co.finishRun(part.run, "done");
+  assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open", "a partial run can't clear it");
+  const full = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, full.run, { reviewers: ["correctness", "security"] });
+  assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "fixed");
+});
+
+test("single checks a clean full run on the head already covered return that run, so a mergeable PR stays mergeable", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run, { reviewers: ["correctness", "security"] });
+  assert.deepEqual(await s.co.runChecks(pr.id, "ann@x", { only: ["ci", "security"] }), a);
+  assert.equal(s.runs.length, 1);
+  assert.equal((await s.co.getPr(pr.id)).verdict.mergeable, true);
+  const t = await s.co.runChecks(pr.id, "ann@x", { only: ["tests"] }); // tests didn't run in it: a real single check
+  assert.notEqual(t.run, a.run);
+});
+
+test("a done run with a failure can be run again on the same commit (flaky CI at merge, an errored reviewer)", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  s.q("INSERT INTO checks(run, name, kind, status, log, ms) VALUES (?, 'merge: test', 'ci', 'failed', 'flaky', 1)", a.run); // as merge() records it
+  const b = await s.co.runChecks(pr.id, "ann@x");
+  assert.notEqual(b.run, a.run);
+  assert.equal(s.runs.length, 2);
+});
+
+test("run checks for a commit the push event hasn't delivered yet reads the branch, moves the head, and runs; a short sha works", async () => {
+  const { s, pr } = await withPr();
+  s.heads.set("fix", "f2abcdef0123"); // pushed; the queue hasn't told the store yet
+  const r = await s.co.runChecks(pr.id, "ann@x", { sha: "f2abcdef" });
+  assert.equal((await s.co.getPr(pr.id)).pr.head, "f2abcdef0123");
+  assert.equal(s.runs.at(-1)!.params.sha, "f2abcdef0123");
+  assert.equal(r.run, s.runs.at(-1)!.params.run);
+  await assert.rejects(s.co.runChecks(pr.id, "ann@x", { sha: "f9" }), /is at f2abcdef0123, not f9/);
+});
+
+test("two run-checks calls at once start one run", async () => {
+  const { s, pr } = await withPr();
+  const [a, b] = await Promise.all([s.co.runChecks(pr.id, "ann@x"), s.co.runChecks(pr.id, "bob@x")]);
+  assert.equal(a.run, b.run);
+  assert.equal(s.runs.length, 1);
+  assert.equal(s.q("SELECT 1 FROM runs").length, 1);
+});
+
+test("if a new run can't start, the PR keeps its previous result", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  await s.push("fix", "f2");
+  (s.co as unknown as { env: { REVIEW_RUN: { create: unknown } } }).env.REVIEW_RUN.create = async () => { throw new Error("workflows unavailable"); };
+  await assert.rejects(s.co.runChecks(pr.id, "ann@x"), /workflows unavailable/);
+  const v = await s.co.getPr(pr.id);
+  assert.equal(v.run?.id, a.run);
+  assert.equal(v.verdict.checks, "stale");
+});
+
+test("merge is refused while checks are stale or partial", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  await s.push("fix", "f2");
+  const stale = await s.co.merge(pr.id, "ann@x");
+  assert.equal(stale.ok, false);
+  const p = await s.co.runChecks(pr.id, "ann@x", { only: ["ci"] });
+  await s.co.recordCheck(p.run, { run: p.run, name: "test", kind: "ci", status: "passed", log: "", ms: 1 });
+  await s.co.finishRun(p.run, "done");
+  const partial = await s.co.merge(pr.id, "ann@x");
+  assert.ok(!partial.ok && partial.blockers.some((b) => /only some checks ran/.test(b)), JSON.stringify(partial));
+});
+
+test("a finished partial run without CI isn't 'in progress'", async () => {
+  const { s, pr } = await withPr();
+  const p = await s.co.runChecks(pr.id, "ann@x", { only: ["security"] });
+  await s.co.recordStep(p.run, "security", "passed");
+  await s.co.finishRun(p.run, "done");
+  const v = (await s.co.getPr(pr.id)).verdict;
+  assert.equal(v.blockers.includes("review in progress"), false, v.blockers.join("; "));
+});
+
+test("a store created before single checks existed gains the scope column", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { sqlStorage } = await import("./harness/sql");
+  const { RepoStore } = await import("../src/review/store");
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, pr INTEGER NOT NULL, sha TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, since_sha TEXT, classification TEXT, ci_config TEXT, instance TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER)");
+  db.exec("INSERT INTO runs(pr, sha, number, status, instance, started_at) VALUES (1, 'a', 1, 'done', 'x', 1)");
+  new RepoStore({ storage: { sql: sqlStorage(db), transactionSync: <T>(fn: () => T) => fn() }, waitUntil: () => undefined } as never, {} as never);
+  new RepoStore({ storage: { sql: sqlStorage(db), transactionSync: <T>(fn: () => T) => fn() }, waitUntil: () => undefined } as never, {} as never); // twice: idempotent
+  assert.deepEqual(db.prepare("SELECT scope FROM runs").all().map((r) => r.scope), [null]);
+});
