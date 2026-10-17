@@ -1,0 +1,4 @@
+commands:
+  - name: test
+    run: node --test
+    timeout: 120

@@ -5,7 +5,9 @@
   "scripts": {
     "typecheck": "pnpm -r --filter=!shop-core typecheck",
     "test": "pnpm -r --if-present test",
-    "setup:cloudflare": "pnpm --dir demo exec tsx src/setup.ts"
+    "setup:cloudflare": "pnpm --dir demo exec tsx src/setup.ts",
+    "setup:agents": "pnpm --dir demo exec tsx src/setup-agents.ts",
+    "e2e:review": "pnpm --dir demo exec tsx src/review-e2e.ts"
   },
   "packageManager": "pnpm@10.13.1"
 }
