@@ -41,9 +41,9 @@ the problem to solve; reviewing each change well, and knowing when a person must
   behind and Ready starts it again. Push events are applied by the branch's live head, never the event's sha.
 - **Agents are Claude Managed Agents** behind an `AgentClient` interface (`ManagedAgentsClient` over fetch;
   `FakeAgentClient` in tests). Definitions (`atc-classifier`, `atc-correctness`, `atc-security`, `atc-tests`,
-  `atc-verifier`) are created by `pnpm setup:agents`; the sandbox environment allows package registries only.
+  `atc-verifier`) are created by `pnpm setup:agents` (classifier on Haiku 5.5, the rest on Sonnet 5.5, for cost); the sandbox environment allows package registries only.
   **No repo credential ever enters a sandbox**: sessions get read-only file resources. Prompts treat repo and PR
-  content as data. Every session has a budget (US cents: classifier 200, reviewer 500, verifier 50; per repo in
+  content as data. Every session has a budget (US cents: classifier 50, reviewer 200, verifier 30; per repo in
   `.atc/review.yml`, capped at 500/2000/200). Only the role's output file is downloaded, at most 256 KB. Polling backs
   off from 10 s to one a minute. A session that fails, hits its budget, times out or writes invalid output errors its
   step.

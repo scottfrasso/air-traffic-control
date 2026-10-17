@@ -28,7 +28,7 @@ export function need(name: string): string {
 }
 
 export const config = {
-  workerUrl: process.env.AGENTMESH_URL ?? dotenv.AGENTMESH_URL ?? "https://agentmesh.scottfrasso.workers.dev",
+  workerUrl: process.env.AGENTMESH_URL ?? dotenv.AGENTMESH_URL ?? "https://agentmesh-review.scottfrasso.workers.dev",
   accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? dotenv.CLOUDFLARE_ACCOUNT_ID ?? "cd5005b633a7bdac0f47d9f93c3ad45c",
   namespace: "agentmesh",
   cfToken: () => need("CLOUDFLARE_API_TOKEN"),

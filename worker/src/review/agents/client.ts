@@ -11,7 +11,7 @@ export type Role = "classifier" | Reviewer | "verifier";
 
 export interface SessionSpec {
   role: Role;
-  /** Uploaded with `upload` first; mounted read-only at /mnt/session/uploads/<name>. */
+  /** Uploaded with `upload` first; mounted read-only at /mnt/session/uploads/<name> (mount_path is relative to that). */
   files: Array<{ name: string; fileId: string }>;
   message: string;
   /** Hard cap on what the session may spend, in US cents. */
@@ -40,12 +40,17 @@ const AGENTS_BETA = "managed-agents-2026-04-01";
 const FILES_BETA = "files-api-2025-04-14";
 /** An output file bigger than this is refused: it must fit in a Workflow step result (1 MiB) with room to spare. */
 export const MAX_OUTPUT_BYTES = 256 * 1024;
+/** Outputs show up in the file list 1-3 s after the session goes idle (docs; seen live): look this many times. */
+const OUTPUT_LOOKS = 4;
+const OUTPUT_LOOK_GAP_MS = 2_000;
 
 export class ManagedAgentsClient implements AgentClient {
   private readonly fetch: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor(private readonly opts: { apiKey: string; agentIds: Record<Role, string>; environmentId: string; fetch?: typeof fetch }) {
+  constructor(private readonly opts: { apiKey: string; agentIds: Record<Role, string>; environmentId: string; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> }) {
     this.fetch = opts.fetch ?? ((...a) => fetch(...a));
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
   private headers(extra: Record<string, string> = {}) {
@@ -78,7 +83,7 @@ export class ManagedAgentsClient implements AgentClient {
   }
 
   async start(spec: SessionSpec): Promise<string> {
-    const resources = spec.files.map((f) => ({ type: "file", file_id: f.fileId, mount_path: `/mnt/session/uploads/${f.name}` }));
+    const resources = spec.files.map((f) => ({ type: "file", file_id: f.fileId, mount_path: `/${f.name}` }));
     const session = await this.call<{ id: string }>("POST", "/v1/sessions", {
       agent: { type: "agent", id: this.opts.agentIds[spec.role] },
       environment_id: this.opts.environmentId,
@@ -98,12 +103,21 @@ export class ManagedAgentsClient implements AgentClient {
     const stop = s.stop_reason?.type ?? (await this.lastStopReason(id));
     if (stop === "budget_reached") return { status: "budget", outputs: {}, error: "budget reached" };
     if (stop === "requires_action") return { status: "errored", outputs: {}, error: "the agent asked for approval of a tool call" };
-    const list = await this.call<{ data: Array<{ id: string; filename: string }> }>("GET", `/v1/files?scope_id=${encodeURIComponent(id)}`);
-    const file = list.data.filter((f) => f.filename.split("/").pop() === output).at(-1);
+    const file = await this.outputFile(id, output);
     if (!file) return { status: "done", outputs: {} }; // the step reports the missing file as invalid output
     const text = await this.call<string>("GET", `/v1/files/${file.id}/content`);
     if (new TextEncoder().encode(text).byteLength > MAX_OUTPUT_BYTES) return { status: "errored", outputs: {}, error: `${output} is too large (over ${MAX_OUTPUT_BYTES / 1024} KB)` };
     return { status: "done", outputs: { [output]: text } };
+  }
+
+  /** The session's output file by name: only files the agent wrote (downloadable), never a mounted input. */
+  private async outputFile(id: string, output: string): Promise<{ id: string } | undefined> {
+    for (let look = 1; ; look++) {
+      const list = await this.call<{ data: Array<{ id: string; filename: string; downloadable?: boolean }> }>("GET", `/v1/files?scope_id=${encodeURIComponent(id)}`);
+      const file = list.data.filter((f) => f.downloadable !== false && f.filename.split("/").pop() === output).at(-1);
+      if (file || look >= OUTPUT_LOOKS) return file;
+      await this.sleep(OUTPUT_LOOK_GAP_MS);
+    }
   }
 
   private async lastStopReason(id: string): Promise<string | undefined> {

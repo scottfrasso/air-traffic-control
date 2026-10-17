@@ -26,9 +26,9 @@ test("broken YAML is a ConfigError, not a crash", () => {
   assert.throws(() => parseCiConfig("commands: [\n"), ConfigError);
 });
 
-test("review budgets default to 200/500/50 cents and override only what's given", () => {
-  assert.deepEqual(parseReviewConfig(null).budgets, { classifier: 200, reviewer: 500, verifier: 50 });
-  assert.deepEqual(parseReviewConfig("budgets:\n  reviewer: 900\n").budgets, { classifier: 200, reviewer: 900, verifier: 50 });
+test("review budgets default to 50/200/30 cents (Haiku triage, Sonnet review) and override only what's given", () => {
+  assert.deepEqual(parseReviewConfig(null).budgets, { classifier: 50, reviewer: 200, verifier: 30 });
+  assert.deepEqual(parseReviewConfig("budgets:\n  reviewer: 900\n").budgets, { classifier: 50, reviewer: 900, verifier: 30 });
 });
 
 test("owners: one glob per line; blanks and comments ignored", () => {

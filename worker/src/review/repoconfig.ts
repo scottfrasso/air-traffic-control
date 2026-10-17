@@ -54,7 +54,7 @@ export interface ReviewConfig {
   depth?: "quick" | "standard" | "deep";
 }
 
-export const DEFAULT_BUDGETS = { classifier: 200, reviewer: 500, verifier: 50 } as const;
+export const DEFAULT_BUDGETS = { classifier: 50, reviewer: 200, verifier: 30 } as const;
 /** A repo can raise budgets up to these (US cents per session), never past them (review of PR #50). */
 export const MAX_BUDGETS = { classifier: 500, reviewer: 2000, verifier: 200 } as const;
 

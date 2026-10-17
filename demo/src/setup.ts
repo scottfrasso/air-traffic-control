@@ -3,7 +3,7 @@
  *
  * Reads the repo-root .env, then, idempotently:
  *   1. finds the account (CLOUDFLARE_ACCOUNT_ID, or the token's only account)
- *   2. creates the queues agentmesh-push-events and agentmesh-push-events-dlq if missing
+ *   2. creates the queues agentmesh-review-push-events and agentmesh-review-push-events-dlq if missing
  *   3. creates the Artifacts namespace agentmesh if missing
  *   4. writes CF_ACCOUNT_ID and PUSH_QUEUE_ID into worker/wrangler.jsonc
  *   5. deploys the Worker with its secrets (CF_API_TOKEN, and ANTHROPIC_API_KEY if .env has it) via `wrangler deploy --secrets-file`
@@ -23,7 +23,7 @@ setDefaultResultOrder("ipv4first");
 const DRY = process.argv.includes("--dry-run");
 const ENV_FILE = resolve(ROOT, ".env");
 const WRANGLER = resolve(ROOT, "worker/wrangler.jsonc");
-const QUEUES = ["agentmesh-push-events", "agentmesh-push-events-dlq"];
+const QUEUES = ["agentmesh-review-push-events", "agentmesh-review-push-events-dlq"];
 const NAMESPACE = "agentmesh";
 
 const readEnv = (): Record<string, string> => {
@@ -184,7 +184,7 @@ async function main() {
       return;
     }
     if (exit.code !== 0) throw new Error(`wrangler deploy failed (exit ${exit.code})`);
-    const url = /https:\/\/agentmesh\.[a-z0-9-]+\.workers\.dev/.exec(out)?.[0];
+    const url = /https:\/\/agentmesh-review\.[a-z0-9-]+\.workers\.dev/.exec(out)?.[0];
     if (url) setEnv("AGENTMESH_URL", url);
     const target = process.env.AGENTMESH_URL || readEnv().AGENTMESH_URL; // what pnpm e2e:review will use
     if (!url || target !== url)

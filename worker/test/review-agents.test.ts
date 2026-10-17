@@ -23,7 +23,7 @@ function api(routes: Record<string, (call: Call) => unknown>) {
 }
 
 const ids: Record<Role, string> = { classifier: "agent_c", correctness: "agent_k", security: "agent_s", tests: "agent_t", verifier: "agent_v" };
-const client = (fetchImpl: typeof fetch) => new ManagedAgentsClient({ apiKey: "sk-test", agentIds: ids, environmentId: "env_1", fetch: fetchImpl });
+const client = (fetchImpl: typeof fetch) => new ManagedAgentsClient({ apiKey: "sk-test", agentIds: ids, environmentId: "env_1", fetch: fetchImpl, sleep: async () => undefined });
 
 test("upload posts the file as multipart and returns its id", async () => {
   const a = api({ "POST https://api.anthropic.com/v1/files": () => ({ id: "file_7" }) });
@@ -47,8 +47,8 @@ test("start creates a session for the role's agent with a budget in cents and th
   assert.equal(body.environment_id, "env_1");
   assert.deepEqual(body.budget, { type: "limit", max_list_cost: { amount: "500", currency: "USD" } });
   assert.deepEqual(body.resources, [
-    { type: "file", file_id: "file_1", mount_path: "/mnt/session/uploads/repo.tar" },
-    { type: "file", file_id: "file_2", mount_path: "/mnt/session/uploads/diff.patch" },
+    { type: "file", file_id: "file_1", mount_path: "/repo.tar" },
+    { type: "file", file_id: "file_2", mount_path: "/diff.patch" },
   ]);
   assert.deepEqual(body.initial_events, [{ type: "user.message", content: [{ type: "text", text: "review" }] }]);
 });
@@ -122,4 +122,20 @@ test("poll downloads only the file the role must write, and refuses one too big 
   const r = (await client(a.fetchImpl).poll("s", "review.json")) as { status: string; error?: string };
   assert.equal(r.status, "errored");
   assert.match(r.error ?? "", /too large/);
+});
+
+test("poll waits out the outputs' indexing lag, and never takes a mounted input of the same name", async () => {
+  let lists = 0;
+  const a = api({
+    "GET https://api.anthropic.com/v1/sessions/s/events": () => ({ data: [] }),
+    "GET https://api.anthropic.com/v1/sessions/s": () => ({ id: "s", status: "idle", stop_reason: { type: "end_turn" } }),
+    // Live API (spike, 10-17): right after idle the output isn't listed yet; mounted inputs are listed with downloadable: false.
+    "GET https://api.anthropic.com/v1/files?scope_id=s": () => ({
+      data: [{ id: "in", filename: "review.json", downloadable: false }, ...(++lists >= 3 ? [{ id: "out", filename: "review.json", downloadable: true }] : [])],
+    }),
+    "GET https://api.anthropic.com/v1/files/out/content": () => '{"findings":[]}',
+    "GET https://api.anthropic.com/v1/files/in/content": () => "an input",
+  });
+  assert.deepEqual(await client(a.fetchImpl).poll("s", "review.json"), { status: "done", outputs: { "review.json": '{"findings":[]}' } });
+  assert.equal(lists, 3);
 });

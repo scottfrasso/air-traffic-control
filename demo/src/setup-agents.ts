@@ -26,12 +26,12 @@ export interface AgentSpec {
   tools: Array<{ type: string }>;
 }
 
-/** The five agents. Triage is cheap and fast; finding and verifying bugs gets the most capable model. */
+/** The five agents. Triage runs on Haiku; reviewing and verifying on Sonnet (cost: Opus is not worth it on small changes yet). */
 export function agentPlan(): AgentSpec[] {
   return ROLES.map((role) => ({
     role,
     name: `atc-${role}`,
-    model: role === "classifier" ? "claude-sonnet-5-5" : "claude-opus-5-5",
+    model: role === "classifier" ? "claude-haiku-5-5" : "claude-sonnet-5-5",
     system: `${SYSTEM[role]}\n\nWrite exactly one file: /mnt/session/outputs/${OUTPUT[role]}. Then stop.`,
     tools: [{ type: "agent_toolset_20260401" }],
   }));
@@ -40,7 +40,7 @@ export function agentPlan(): AgentSpec[] {
 /** One sandbox environment for every session: package registries only, so tests can install; no repo host. */
 export const ENVIRONMENT = {
   name: "atc-review",
-  config: { networking: { type: "limited", allowed_hosts: [] as string[], allow_package_managers: true } },
+  config: { type: "cloud", networking: { type: "limited", allowed_hosts: [] as string[], allow_package_managers: true } },
 };
 
 const envFile = () => process.env.ATC_ENV_FILE ?? resolve(ROOT, ".env");
@@ -66,7 +66,13 @@ async function call<T>(key: string, method: string, path: string, body?: unknown
   return JSON.parse(text) as T;
 }
 
-type Listed = { id: string; name: string; system?: string; model?: string };
+export type Listed = { id: string; name: string; system?: string; model?: string | { id: string } };
+
+/** The API lists `model` as an object ({ id, effort, speed }); compare by id, so an unchanged agent isn't re-versioned. */
+export function needsUpdate(found: Listed, spec: AgentSpec): boolean {
+  const model = typeof found.model === "string" ? found.model : found.model?.id;
+  return found.system !== spec.system || model !== spec.model;
+}
 
 async function main() {
   const dry = process.argv.includes("--dry-run");
@@ -89,7 +95,7 @@ async function main() {
     if (!found) {
       ids[a.role] = (await call<{ id: string }>(key, "POST", "/v1/agents", body)).id;
       console.log(`created ${a.name}`);
-    } else if (found.system !== a.system || found.model !== a.model) {
+    } else if (needsUpdate(found, a)) {
       ids[a.role] = (await call<{ id: string }>(key, "POST", `/v1/agents/${found.id}`, body)).id;
       console.log(`updated ${a.name} (new version)`);
     } else {
