@@ -57,3 +57,17 @@ API references: `docs/cf-api-notes.md` (Workers/DO/Workflows/Containers/MCP/Queu
 - **MCP:** `McpAgent` is deprecated. We'll use the stateless `createMcpHandler` (agents 0.28 + `@modelcontextprotocol/server@2.0.0`).
 - **No namespace-wide push source:** `POST event_subscriptions` with `artifacts.repo` and no `repo_name` → `Validation error: Required at "source.repo_name"`.
   `--source artifacts` + `pushed` → `Unrecognized event types`. So it's one subscription per fork, created by the Worker.
+
+## Managed Agents, as seen live (2026-10-17)
+
+- `POST /v1/environments` needs `config.type: "cloud"` next to `networking`.
+- `GET /v1/agents` lists `model` as an object (`{ id, effort, speed }`), not the string sent on create.
+- Session file resources: `mount_path` is relative to `/mnt/session/uploads` (`/diff.patch` → `/mnt/session/uploads/diff.patch`).
+- Session outputs appear in `GET /v1/files?scope_id=<session>` 1-3 s after the session goes idle; the same listing
+  also has the mounted inputs, with `downloadable: false`.
+- Budgets are integer US cents as a string (`"50"` = $0.50); at the cap a session goes idle with `stop_reason: budget_reached`.
+- An Admin API key (`sk-ant-admin…`) is refused by Managed Agents; it needs a regular API key.
+- Cost seen: a Haiku classifier session about 1 cent; a full e2e run (classifier, three Sonnet reviewers, verifiers,
+  twice) $0.34.
+- Three reviewers report the same bug unless told their lanes; prompts now name what isn't theirs, and findings are
+  merged across reviewers before verification (`dedupeAcross`).

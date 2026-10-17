@@ -2,13 +2,19 @@
 
 _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudflare (ADR-0027)._
 
-## Blocked
+## Live (2026-10-17)
 
-- **Live runs need two tokens.** `CLOUDFLARE_API_TOKEN` expired on 2026-10-15 at 21:59 UTC (deploys,
-  `pnpm setup:cloudflare`, `pnpm e2e:review`); and an Anthropic API key with Managed Agents access
-  (`ANTHROPIC_API_KEY`, for `pnpm setup:agents` and the review sessions). Everything below is tested with fakes.
+- Deployed as a separate Worker, **https://agentmesh-review.scottfrasso.workers.dev** (`agentmesh-review`, own queues
+  `agentmesh-review-push-events` + DLQ); the ATC Worker `agentmesh` is untouched.
+- Agents: classifier on Haiku 5.5, correctness / security / tests / verifier on Sonnet 5.5. Default budgets 50 / 200 / 30 cents.
+- `pnpm e2e:review` **passes** against real Managed Agents: both planted bugs found, verified and blocking; after the
+  fix the follow-up review is clean and merge waits for a person (high risk, 2 approvals). About 4 minutes and
+  **$0.34** a run (14 sessions); the first run, before cross-reviewer dedupe, was $0.81 (33 sessions).
+- **No Cloudflare Access yet.** A temporary `ADMIN_SECRET` (Worker secret, in `.env`) mints personal tokens via
+  `POST /api/admin/tokens`; they can't approve, so nobody can approve a merge in the UI until Access is set up
+  (`handover/access-setup-prompt.md`). Remove the bootstrap then.
 
-## Done (tested locally; not yet deployed)
+## Done
 
 - **PR lifecycle** (`worker/src/review/store.ts`): draft → ready → merged / closed; a push to a draft moves its head and
   runs nothing; ready starts one review run per head; a push to a ready PR cancels the run and starts a new one; a
@@ -31,18 +37,16 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
   Chromium against a mock API (desktop and phone width).
 - **Setup**: `pnpm setup:agents` (Managed Agent definitions + sandbox environment; `--dry-run` tested),
   `pnpm setup:cloudflare` (queues, namespace, deploy with `CF_API_TOKEN` and `ANTHROPIC_API_KEY`), and the live
-  end-to-end script `pnpm e2e:review` (two planted bugs must be found, verified, blocked, fixed and merged; written,
-  not run).
+  end-to-end script `pnpm e2e:review` (two planted bugs must be found, verified, blocked, fixed; passes live).
 - A fresh whole-branch review (draft PR #50) found 3 critical and 9 important issues; all fixed, each with a test that failed first.
-- Tests: `pnpm test` (worker 150, demo 4), strict TypeScript in both packages.
+- Tests: `pnpm test` (worker 156, demo 6), strict TypeScript in both packages.
 
 ## Next
 
-1. New `CLOUDFLARE_API_TOKEN` and an `ANTHROPIC_API_KEY`; `pnpm setup:agents`; deploy (the first deploy may need a
-   Durable Object deletion migration for the removed `Coordinator`).
-2. Spikes from ADR-0027: concurrent-session cap, session runtime, the Files API and agent/environment list
-   endpoints, how reliably agents write their output file; then `pnpm e2e:review`.
-3. Cloudflare Access in front of the Worker; first real repo.
+1. Cloudflare Access in front of the Worker (pages only; `/api` and `/mcp` bypass), then drop the admin bootstrap.
+2. Dedupe still lets some through (same bug, different lines or wording); measure on more PRs before tuning.
+3. Spikes left: the concurrent-session cap and session runtime limits (not hit at 14 sessions a run).
+4. First real repo.
 4. Later specs: per-repo permissions, comment threads between people, notifications, an eval set of known-buggy and
    known-clean PRs (noise measurement), a code browser.
 
