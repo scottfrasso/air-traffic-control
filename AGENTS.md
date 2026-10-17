@@ -45,4 +45,7 @@ History: this repo started as Air Traffic Control, a hackathon entry submitted o
 - Never print or commit secrets. `CLOUDFLARE_API_TOKEN` lives in `.env` (gitignored).
 - Only touch resources this project creates (all prefixed `agentmesh`).
 - Keep `PROGRESS.md` (done / next / blocked) and `DECISIONS.md` current.
+- Every decision, trade-off or invariant goes in an ADR (`docs/adr/`, indexed in `DECISIONS.md`): a new one, or an amendment.
+- Keep the diary (`docs/diary/YYYY-MM-DD.md`): what we built, what surprised us, numbers (cost, time, counts). It's raw
+  material for a blog post, so no secrets or personal details.
 - Commit after each verified milestone.
