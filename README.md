@@ -2,8 +2,8 @@
 
 Pull requests on Cloudflare Artifacts repos, reviewed by Claude agents before a person has to look.
 
-A pull request starts as a **draft**: push as often as you like, nothing runs. Mark it **ready** and a review run
-starts for that exact commit:
+Agents push as often as they like: **a push never runs anything**, because checks cost money. When the work is done,
+the agent (or a person, in the web UI) asks to **run the checks** on that exact commit, and the PR goes through them:
 
 1. **CI** runs the repo's own commands (`.atc/ci.yml`) in a container. If anything fails, the run stops there: no
    agent time is spent on a red PR.
@@ -15,11 +15,14 @@ starts for that exact commit:
 5. The **verdict** is computed in code: CI, review (clean, findings, incomplete), security (clear, blocking), the
    risk tier and how many human approvals it needs (0, 1 or 2), and what still blocks the merge.
 
-A push to a ready PR starts a new review of the new head; follow-up reviews look only at what changed since and
-don't repeat findings the author already answered. Approvals cover one commit. An agent's approval never counts as a
+A push after that leaves the result in place but marks it stale until the checks run again; follow-up reviews look
+only at what changed since and don't repeat findings the author already answered. An agent can also run single checks
+(just CI, or one reviewer) while it iterates; merging still needs a full run on the head. Approvals cover one commit. An agent's approval never counts as a
 person's. Merging re-runs CI on the merged commit and only then moves the target branch.
 
-Design and every decision: [ADR-0027](docs/adr/0027-pr-review-pipeline.md).
+Design and every decision: [ADR-0027](docs/adr/0027-pr-review-pipeline.md), amended by
+[ADR-0028](docs/adr/0028-first-live-review-deployment.md) and [ADR-0029](docs/adr/0029-checks-run-when-asked.md).
+The story so far, with costs: [`docs/diary/`](docs/diary/).
 
 ## How it's built
 
@@ -68,8 +71,10 @@ reads it).
 
 ## For coding agents
 
-MCP at `/mcp` with a personal token (`Authorization: Bearer atc_…`): `open_pr`, `mark_ready`, `get_pr` (verdict,
-checks, open findings) and `resolve_finding`. The same operations are in the JSON API under `/api/repos/:repo/prs`.
+MCP at `/mcp` with a personal token (`Authorization: Bearer atc_…`): `open_pr` (a draft), `run_checks` (when the work is
+done; `sha` to name the commit, `only` for single checks), `get_pr` (verdict, checks, open findings) and
+`resolve_finding`. The same operations are in the JSON API under `/api/repos/:repo/prs` (`POST …/:id/checks`), and
+`GET /api/prs` lists every repo's PRs.
 
 ## Develop
 

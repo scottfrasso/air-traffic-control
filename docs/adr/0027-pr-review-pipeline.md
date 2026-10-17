@@ -1,6 +1,7 @@
 # ADR-0027: Pull requests and an agent review pipeline replace Air Traffic Control
 
-- Status: Accepted. Amended by ADR-0028 (models, budgets, reviewer lanes and dedupe, token bootstrap).
+- Status: Accepted. Amended by ADR-0028 (models, budgets, reviewer lanes and dedupe, token bootstrap) and ADR-0029
+  (checks run only when asked, not on push or ready; the UI).
 - Date: 2026-10-17.
 - Supersedes the ATC runtime ADRs (0005–0008, 0011–0015, 0018–0021, 0023, 0024, 0026); amends 0009, 0010 and 0025.
 

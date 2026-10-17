@@ -7,7 +7,11 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
 - Deployed as a separate Worker, **https://agentmesh-review.scottfrasso.workers.dev** (`agentmesh-review`, own queues
   `agentmesh-review-push-events` + DLQ); the ATC Worker `agentmesh` is untouched.
 - Agents: classifier on Haiku 5.5, correctness / security / tests / verifier on Sonnet 5.5. Default budgets 50 / 200 / 30 cents.
-- `pnpm e2e:review` **passes** against real Managed Agents: both planted bugs found, verified and blocking; after the
+- **Checks run only when asked** (ADR-0029): a push runs nothing; `run_checks` (MCP, `POST …/checks`, the UI) runs
+  them on the named head, or single checks (`only`); results go stale when the head moves.
+- **New web UI**: a dashboard of PRs by whose turn it is, and a PR page built around the check track (CI, triage,
+  review, verification, approvals, merge), with diffs and inline findings, check logs and activity.
+- `pnpm e2e:review` **passes** against real Managed Agents (5 runs today, $2.37 in all; the last $0.31): both planted bugs found, verified and blocking; after the
   fix the follow-up review is clean and merge waits for a person (high risk, 2 approvals). About 4 minutes and
   **$0.34** a run (14 sessions); the first run, before cross-reviewer dedupe, was $0.81 (33 sessions).
 - **No Cloudflare Access yet.** A temporary `ADMIN_SECRET` (Worker secret, in `.env`) mints personal tokens via
@@ -39,7 +43,7 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
   `pnpm setup:cloudflare` (queues, namespace, deploy with `CF_API_TOKEN` and `ANTHROPIC_API_KEY`), and the live
   end-to-end script `pnpm e2e:review` (two planted bugs must be found, verified, blocked, fixed; passes live).
 - A fresh whole-branch review (draft PR #50) found 3 critical and 9 important issues; all fixed, each with a test that failed first.
-- Tests: `pnpm test` (worker 156, demo 6), strict TypeScript in both packages.
+- Tests: `pnpm test` (worker 168, demo 6), strict TypeScript in both packages.
 
 ## Next
 
