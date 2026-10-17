@@ -65,24 +65,25 @@ export interface Finding extends RawFinding {
 
 export type ResolutionKind = "wrong" | "intentional" | "wontfix";
 
-export interface Approval {
+// Type aliases, not interfaces, for anything read straight from SQLite (they must satisfy SqlStorage's row type).
+export type Approval = {
   pr: number;
   sha: string;
   by: string;
   at: number;
-}
+};
 
 export type StepStatus = "pending" | "running" | "passed" | "failed" | "errored" | "skipped";
 
 /** One CI command's result, or one pipeline step (classifier, a reviewer, verification). */
-export interface CheckRow {
+export type CheckRow = {
   run: number;
   name: string;
   kind: "ci" | "step";
   status: StepStatus;
   log: string;
   ms: number;
-}
+};
 
 export interface Verdict {
   ci: "pass" | "fail" | "none" | "pending";
