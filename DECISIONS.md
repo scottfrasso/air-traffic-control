@@ -33,9 +33,10 @@ the raw spike findings (milestone 1).
 | [0024](docs/adr/0024-storage-bounds-and-columns.md) | Bounded Coordinator storage; columns instead of parsed strings | Superseded by 0027 |
 | [0025](docs/adr/0025-one-command-deploy.md) | One-command deploy: pnpm setup:cloudflare | Accepted, amended by 0027 |
 | [0026](docs/adr/0026-competing-attempts.md) | Competing attempts at one task: compare, STAND DOWN, pick | Superseded by 0027 |
-| [0027](docs/adr/0027-pr-review-pipeline.md) | Pull requests and an agent review pipeline replace Air Traffic Control | Accepted, amended by 0028 and 0029 |
+| [0027](docs/adr/0027-pr-review-pipeline.md) | Pull requests and an agent review pipeline replace Air Traffic Control | Accepted, amended by 0028, 0029 and 0030 |
 | [0028](docs/adr/0028-first-live-review-deployment.md) | First live deployment: separate Worker, Haiku/Sonnet, reviewer lanes and dedupe, temporary token bootstrap | Accepted |
-| [0029](docs/adr/0029-checks-run-when-asked.md) | Checks run only when asked (run_checks, single checks, stale verdicts); a UI built around the check track | Accepted |
+| [0029](docs/adr/0029-checks-run-when-asked.md) | Checks run only when asked (run_checks, single checks, stale verdicts); a UI built around the check track | Accepted, amended by 0030 |
+| [0030](docs/adr/0030-security-review-hardening.md) | Hardening after the security and quality reviews: protected main, CSRF, minApprovals, findings rules, cost caps, CI uids | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 

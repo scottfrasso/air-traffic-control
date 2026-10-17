@@ -18,10 +18,12 @@ the agent (or a person, in the web UI) asks to **run the checks** on that exact 
 A push after that leaves the result in place but marks it stale until the checks run again; follow-up reviews look
 only at what changed since and don't repeat findings the author already answered. An agent can also run single checks
 (just CI, or one reviewer) while it iterates; merging still needs a full run on the head. Approvals cover one commit. An agent's approval never counts as a
-person's. Merging re-runs CI on the merged commit and only then moves the target branch.
+person's. Every change needs at least one person unless the repo opts out. Merging re-runs CI on the merged commit and
+only then moves the target branch, and `main` moves only that way: a direct push to it is put back.
 
 Design and every decision: [ADR-0027](docs/adr/0027-pr-review-pipeline.md), amended by
-[ADR-0028](docs/adr/0028-first-live-review-deployment.md) and [ADR-0029](docs/adr/0029-checks-run-when-asked.md).
+[ADR-0028](docs/adr/0028-first-live-review-deployment.md), [ADR-0029](docs/adr/0029-checks-run-when-asked.md) and
+[ADR-0030](docs/adr/0030-security-review-hardening.md).
 The story so far, with costs: [`docs/diary/`](docs/diary/).
 
 ## How it's built
@@ -65,7 +67,8 @@ commands:
     timeout: 600
 ```
 
-Optional: `.atc/review.yml` (session budgets in US cents: `classifier`, `reviewer`, `verifier`), `.atc/owners`
+Optional: `.atc/review.yml` on main (session budgets in US cents: `classifier`, `reviewer`, `verifier`; and
+`minApprovals: 0` to let a low-risk change merge without a person), `.atc/owners`
 (globs of paths that always need a person), and `REVIEW.md` (what failure looks like in this repo; every reviewer
 reads it).
 

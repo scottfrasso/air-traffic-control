@@ -9,6 +9,9 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
 - Agents: classifier on Haiku 5.5, correctness / security / tests / verifier on Sonnet 5.5. Default budgets 50 / 200 / 30 cents.
 - **Checks run only when asked** (ADR-0029): a push runs nothing; `run_checks` (MCP, `POST …/checks`, the UI) runs
   them on the named head, or single checks (`only`); results go stale when the head moves.
+- **Security and quality reviews fixed** (ADR-0030): main moves only by a merge (a direct push is put back, by event
+  or within 2 minutes by alarm), CSRF protection, at least one person per change by default, security always reviews,
+  findings can't be downgraded or hidden, per-repo run caps, per-job CI users, expiring Access-only tokens.
 - **New web UI**: a dashboard of PRs by whose turn it is, and a PR page built around the check track (CI, triage,
   review, verification, approvals, merge), with diffs and inline findings, check logs and activity.
 - `pnpm e2e:review` **passes** against real Managed Agents (5 runs today, $2.37 in all; the last $0.31): both planted bugs found, verified and blocking; after the
@@ -43,7 +46,7 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
   `pnpm setup:cloudflare` (queues, namespace, deploy with `CF_API_TOKEN` and `ANTHROPIC_API_KEY`), and the live
   end-to-end script `pnpm e2e:review` (two planted bugs must be found, verified, blocked, fixed; passes live).
 - A fresh whole-branch review (draft PR #50) found 3 critical and 9 important issues; all fixed, each with a test that failed first.
-- Tests: `pnpm test` (worker 168, demo 6), strict TypeScript in both packages.
+- Tests: `pnpm test` (worker 220, demo 6), strict TypeScript in both packages, tests and container script included.
 
 ## Next
 
