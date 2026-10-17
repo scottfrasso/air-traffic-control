@@ -17,7 +17,8 @@ test("every API call the UI makes matches a route the API serves", () => {
   for (const c of calls) assert.ok(ROUTE_TABLE.some((r) => r.method === c.method && r.pattern.test(c.path)), `${c.method} ${c.path} has no API route`);
 });
 
-test("the UI covers the PR flow: ready, draft, approve (with the head it shows), resolve, merge", () => {
-  for (const path of ["/ready`", "/draft`", "/approve`", "/resolve`", "/merge`", "/diff`"]) assert.ok(html.includes(path), `no call ending in ${path}`);
+test("the UI covers the PR flow: run checks (on the head it shows), draft, approve (the head it shows), resolve, merge, close", () => {
+  for (const path of ["/checks`", "/draft`", "/approve`", "/resolve`", "/merge`", "/diff`", "/close`", "/api/prs`"]) assert.ok(html.includes(path), `no call ending in ${path}`);
+  assert.match(html, /checks`,\s*\{\s*sha:\s*view\.pr\.head/);
   assert.match(html, /approve`,\s*\{\s*sha:\s*view\.pr\.head\s*\}/);
 });

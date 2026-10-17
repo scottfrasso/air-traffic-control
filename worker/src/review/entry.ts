@@ -35,7 +35,7 @@ export async function handle(request: Request, env: ReviewWorkerEnv, ctx: Execut
   if (url.pathname === "/health") return Response.json({ ok: true });
   if (request.method === "POST" && url.pathname === "/api/admin/tokens") return mintToken(request, env);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/repos/")))
-    return new Response(ui, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" } });
+    return new Response(ui, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'" } });
   const directory = env.DIRECTORY.getByName("directory");
   const person = await personFromRequest(request, env, directory);
   if (!person) return unauthorized();
