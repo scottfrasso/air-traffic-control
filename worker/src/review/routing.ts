@@ -7,5 +7,5 @@ export async function routeReviewPush(env: { REPOS: DurableObjectNamespace<RepoS
   const repo = event.source.repoName;
   const store = env.REPOS.getByName(repo);
   await store.init(repo);
-  await store.onPush(event.payload.ref, event.payload.after);
+  await store.onPush(event.payload.ref, event.payload.after, event.payload.before);
 }

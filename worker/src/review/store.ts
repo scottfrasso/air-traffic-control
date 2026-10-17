@@ -152,6 +152,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const [head, base] = await Promise.all([this.headOf(input.source), this.headOf(target)]);
     if (!head) throw new Error(`branch ${input.source} not found in ${this.repo}`);
     if (!base) throw new Error(`branch ${target} not found in ${this.repo}`);
+    if (target === PROTECTED_BRANCH && !this.meta(PROTECTED_KEY)) this.setMeta(PROTECTED_KEY, base);
     const intent = Object.fromEntries(Object.keys(EMPTY_INTENT).map((k) => {
       const v = (input.intent as Record<string, unknown> | undefined)?.[k];
       return [k, typeof v === "string" ? v.slice(0, MAX_INTENT) : ""];
@@ -242,9 +243,9 @@ export class RepoStore extends DurableObject<StoreEnv> {
   // ── lifecycle ────────────────────────────────────────────────────────
 
   /** A push to any branch of this repo (from the queue). Open PRs on that branch move to the new head. */
-  async onPush(ref: string, eventSha: string): Promise<void> {
+  async onPush(ref: string, eventSha: string, before?: string): Promise<void> {
     const branch = ref.replace(/^refs\/heads\//, "");
-    if (branch === PROTECTED_BRANCH) return this.guardProtected(eventSha);
+    if (branch === PROTECTED_BRANCH) return this.guardProtected(eventSha, before);
     const prs = this.sql.exec<PrRow>("SELECT * FROM prs WHERE source = ? AND state IN ('draft', 'ready')", branch).toArray();
     if (!prs.length) return;
     // Events can arrive late, twice or out of order: the branch's live head decides, not the event (review of PR #50).
@@ -265,16 +266,18 @@ export class RepoStore extends DurableObject<StoreEnv> {
   /**
    * main moves only by a merge. Artifacts can't refuse a push to a branch, so a push to main that didn't come from a
    * merge is put back to the last merged commit, right after it lands (security review, 10-17: any token holder could
-   * otherwise push past review). The first push of main, when the repo is created, sets the starting point.
+   * otherwise push past review). The starting point is main's first push, or main's head when a PR into it is opened.
+   * If the creating push's event was missed (it can come before the repo's subscription is live; seen 10-17), the
+   * first event seen trusts where main was *before* it, not the push itself.
    */
-  private async guardProtected(eventSha: string): Promise<void> {
+  private async guardProtected(eventSha: string, before?: string): Promise<void> {
     const live = await this.headOf(PROTECTED_BRANCH);
     if (!live) return;
-    const known = this.meta(PROTECTED_KEY);
+    let known = this.meta(PROTECTED_KEY);
     if (!known) {
-      this.setMeta(PROTECTED_KEY, live);
-      this.log("branch.protected", null, { branch: PROTECTED_BRANCH, sha: live });
-      return;
+      known = before && !/^0+$/.test(before) ? before : live;
+      this.setMeta(PROTECTED_KEY, known);
+      this.log("branch.protected", null, { branch: PROTECTED_BRANCH, sha: known });
     }
     if (live === known || this.meta("merging")) return; // a merge in progress records its own push when it lands
     const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);

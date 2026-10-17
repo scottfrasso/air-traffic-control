@@ -596,3 +596,20 @@ test("a merge moves main's protected commit, so the merge's own push isn't put b
   await s.co.onPush("refs/heads/main", sha);
   assert.equal(s.checkerCalls.some((c) => c.mode === "restore"), false);
 });
+
+test("if main's first push event was missed, the first one seen trusts where main was before it, not the push itself", async () => {
+  const s = store();
+  await s.init();
+  s.heads.set("main", "evil1");
+  await s.co.onPush("refs/heads/main", "evil1", "m0"); // m0 -> evil1, and we never saw m0 arrive
+  const restore = s.checkerCalls.find((c) => c.mode === "restore");
+  assert.deepEqual(restore && [restore.sha, restore.current], ["m0", "evil1"]);
+});
+
+test("opening a PR into main records main's head, so a later direct push to main is put back", async () => {
+  const { s } = await withPr(); // opened while main is at m0; no main push event ever seen
+  s.heads.set("main", "evil1");
+  await s.co.onPush("refs/heads/main", "evil1", "m0x");
+  const restore = s.checkerCalls.find((c) => c.mode === "restore");
+  assert.deepEqual(restore && [restore.sha, restore.current], ["m0", "evil1"]);
+});
