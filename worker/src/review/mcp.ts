@@ -29,7 +29,7 @@ export function reviewTools(env: McpEnv, person: Person) {
       };
     },
     resolve_finding: async (a: { repo: string; pr: number; finding: number; kind: "wrong" | "intentional" | "wontfix"; reason: string }) =>
-      repo(a.repo).resolveFinding(a.pr, a.finding, person.email, a.kind, a.reason),
+      repo(a.repo).resolveFinding(a.pr, a.finding, person.email, a.kind, a.reason, "token"), // MCP is always an agent's token
   };
 }
 
@@ -53,7 +53,7 @@ function server(env: McpEnv, person: Person) {
     inputSchema: z.object({ repo, pr }),
   }, async (a) => text(await t.get_pr(a)));
   s.registerTool("resolve_finding", {
-    description: "Answer a finding you won't fix: wrong (it isn't a bug), intentional, or wontfix, with a reason. It won't be raised again for the same file and class.",
+    description: "Answer a nit or pre-existing finding you won't fix: wrong, intentional, or wontfix, with a reason. Important findings can't be resolved here: fix them with a push, or ask a person to resolve them in the web UI.",
     inputSchema: z.object({ repo, pr, finding: z.number().int().positive(), kind: z.enum(["wrong", "intentional", "wontfix"]), reason: z.string().min(1) }),
   }, async (a) => text(await t.resolve_finding(a)));
   return s;

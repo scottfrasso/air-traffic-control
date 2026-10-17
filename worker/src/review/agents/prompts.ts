@@ -75,7 +75,9 @@ export function reviewerMessage(role: Reviewer, pr: Pr, ctx: { ciSummary: string
   return [
     `PR${pr.id}: ${pr.title} (${pr.source} → ${pr.target}). Review depth: ${ctx.depth}.`,
     `CI: ${ctx.ciSummary}.`,
-    ctx.since ? `This is a follow-up review: diff.patch holds only the changes since ${ctx.since}, the last commit reviewed. Review those.` : `diff.patch holds the whole change.`,
+    ctx.since
+      ? `This is a follow-up review: /mnt/session/uploads/since.patch holds the changes since ${ctx.since}, the last commit reviewed. Focus on those; diff.patch holds the whole change for context.`
+      : `diff.patch holds the whole change.`,
     mine.length
       ? `Open findings from earlier reviews. Re-report each one that still applies (same file and class) and leave out the ones that are fixed:\n${mine.map((f) => `- [${f.severity}] ${f.class} in ${f.file}:${f.line}: ${f.title}`).join("\n")}`
       : "",

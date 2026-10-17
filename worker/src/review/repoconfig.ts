@@ -22,7 +22,7 @@ export const DEFAULT_TIMEOUT_S = 300;
 export const MAX_TIMEOUT_S = 900;
 
 const ci = z.object({
-  commands: z.array(z.object({ name: z.string().min(1), run: z.string().min(1), timeout: z.number().positive().optional() })),
+  commands: z.array(z.object({ name: z.string().min(1), run: z.string().min(1), timeout: z.number().positive().optional() })).min(1, "lists no commands (remove the file for no CI)"),
 });
 
 function yaml(text: string, file: string): unknown {
@@ -55,6 +55,8 @@ export interface ReviewConfig {
 }
 
 export const DEFAULT_BUDGETS = { classifier: 200, reviewer: 500, verifier: 50 } as const;
+/** A repo can raise budgets up to these (US cents per session), never past them (review of PR #50). */
+export const MAX_BUDGETS = { classifier: 500, reviewer: 2000, verifier: 200 } as const;
 
 const review = z.object({
   budgets: z.object({ classifier: z.number().positive(), reviewer: z.number().positive(), verifier: z.number().positive() }).partial().optional(),
@@ -63,7 +65,9 @@ const review = z.object({
 
 export function parseReviewConfig(text: string | null): ReviewConfig {
   const r = text === null ? {} : check(review, yaml(text, ".atc/review.yml") ?? {}, ".atc/review.yml");
-  return { budgets: { ...DEFAULT_BUDGETS, ...(r.budgets ?? {}) }, ...(r.depth ? { depth: r.depth } : {}) };
+  const b = { ...DEFAULT_BUDGETS, ...(r.budgets ?? {}) };
+  const budgets = { classifier: Math.min(b.classifier, MAX_BUDGETS.classifier), reviewer: Math.min(b.reviewer, MAX_BUDGETS.reviewer), verifier: Math.min(b.verifier, MAX_BUDGETS.verifier) };
+  return { budgets, ...(r.depth ? { depth: r.depth } : {}) };
 }
 
 export function parseOwners(text: string | null): string[] {

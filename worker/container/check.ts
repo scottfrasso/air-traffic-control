@@ -6,7 +6,7 @@
 //   ci        run the repo's CI commands at a commit, each a check, bounded per command
 //   diff      the PR's whole change for the web UI
 //   merge     merge a PR branch onto its target, run CI on the result, push the target only if CI passes
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -149,11 +149,14 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
   const sub = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "";
   if (dir === repoDir && WRITES.has(sub) && !gitLockHeld()) return withGitLock(() => git(args, opts));
   // No automatic gc: it would rewrite the shared repo while another check reads it.
-  const auth = ["-c", "gc.auto=0", ...(opts.token ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.token}`] : [])];
+  const auth = ["-c", "gc.auto=0"];
+  // The token goes through git's environment, never its argv: /proc/<pid>/cmdline is readable by every user in the
+  // container, /proc/<pid>/environ only by this one (CI commands run as another user; review of PR #50).
+  const env = opts.token ? { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${opts.token}` } : process.env;
   try {
     return {
       ok: true,
-      out: execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
+      out: execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
     };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
@@ -180,35 +183,76 @@ const fileAt = (sha: string, path: string): string | null => {
 
 const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
 
-/** The change of `sha` against `base` (three-dot, like a code host), or against `since` for a follow-up review. */
+const diffOf = (range: string[]) => {
+  const d = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", ...range]).out);
+  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", ...range]).out.split("\n").filter(Boolean) };
+};
+
+/**
+ * The PR's whole change (three-dot against `base`, like a code host): risk and the hard rules are always judged on
+ * all of it, never on a follow-up's delta (review of PR #50). With `since`, also the delta since the last reviewed
+ * commit, which follow-up reviewers focus on.
+ */
 function changes(i: { repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }) {
-  fetchBranch(i.repo, i.target);
+  const targetHead = fetchBranch(i.repo, i.target);
   fetchBranch(i.repo, i.branch);
   if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
-  const range = i.since ? [i.since, i.sha] : i.base ? [`${i.base}...${i.sha}`] : [`${i.sha}^`, i.sha];
-  const diff = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", ...range]).out);
-  const changedPaths = git(["diff", "--name-only", ...range]).out.split("\n").filter(Boolean);
-  return { diff: diff ? `${diff}\n` : "", changedPaths };
+  const whole = diffOf(i.base ? [`${i.base}...${i.sha}`] : [`${i.sha}^`, i.sha]);
+  const delta = i.since && git(["cat-file", "-e", `${i.since}^{commit}`], { allowFail: true }).ok ? diffOf([i.since, i.sha]) : null;
+  return { targetHead, diff: whole.diff, changedPaths: whole.paths, ...(delta ? { sinceDiff: delta.diff, sinceChangedPaths: delta.paths } : {}) };
 }
 
 function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
-  const { diff, changedPaths } = changes(i);
+  const { targetHead, ...change } = changes(i);
   const tarGz = timed("archive", () => execFileSync("git", ["archive", "--format=tar.gz", i.sha], { cwd: dir, maxBuffer: SNAPSHOT_MAX_BYTES * 2 }));
   if (tarGz.byteLength > SNAPSHOT_MAX_BYTES) throw new Error(`repository archive is ${Math.round(tarGz.byteLength / 1e6)} MB, over the ${SNAPSHOT_MAX_BYTES / 1e6} MB limit`);
   return {
-    mode: "snapshot", sha: i.sha, diff, changedPaths, tarGzBase64: tarGz.toString("base64"),
-    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(i.sha, ".atc/review.yml"), owners: fileAt(i.sha, ".atc/owners"), reviewMd: fileAt(i.sha, "REVIEW.md") },
+    mode: "snapshot", sha: i.sha, ...change, tarGzBase64: tarGz.toString("base64"),
+    // CI is the PR's own (it may change its tests). Review guidance, budgets and owners come from the target: a PR
+    // must not rewrite the rules it is reviewed by (review of PR #50).
+    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(targetHead, ".atc/review.yml"), owners: fileAt(targetHead, ".atc/owners"), reviewMd: fileAt(targetHead, "REVIEW.md") },
     timings,
   };
 }
 
+/** The unprivileged user CI commands run as when the container runs as root (Dockerfile: useradd ci). */
+const CI_UID = 10001;
+const asCi = typeof process.getuid === "function" && process.getuid() === 0 ? { uid: CI_UID, gid: CI_UID } : {};
+
+/**
+ * One CI command in its own process group, as the ci user when we're root, with a minimal environment (no tokens, no
+ * CHECK_INPUT). When it exits or times out, its whole group is killed, so nothing it started in the background
+ * outlives it to tamper with the shared repo or later runs (review of PR #50).
+ */
+function runCommand(c: CiCommand, cwd: string, home: string): Promise<{ status: number | null; timedOut: boolean; out: string; error?: Error }> {
+  return new Promise((resolve) => {
+    let out = "";
+    let timedOut = false;
+    const killGroup = (pid: number | undefined) => { if (pid) try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ } };
+    const child = spawn("sh", ["-c", `exec 2>&1\n${c.run}`], {
+      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" }, detached: true, stdio: ["ignore", "pipe", "pipe"], ...asCi,
+    });
+    child.stdout.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
+    child.stderr.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
+    const timer = setTimeout(() => { timedOut = true; killGroup(child.pid); }, c.timeoutSeconds * 1000);
+    child.on("error", (error) => { clearTimeout(timer); resolve({ status: null, timedOut, out, error }); });
+    // "exit", not "close": a background child holding the pipe open must not keep us waiting.
+    child.on("exit", (status) => {
+      clearTimeout(timer);
+      killGroup(child.pid);
+      setTimeout(() => resolve({ status, timedOut, out }), 50); // let the last output arrive
+    });
+  });
+}
+
 /** Run CI commands in a fresh worktree at `sha`, in order; the first failure stops the rest (shown as skipped). */
-function runCi(sha: string, commands: CiCommand[]): CiCheck[] {
+async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
   const wt = mkdtempSync(join(WORK, "ci-"));
   const home = mkdtempSync(join(WORK, "ci-home-"));
   const out: CiCheck[] = [];
   try {
     git(["worktree", "add", "-q", "--detach", wt, sha]);
+    if ("uid" in asCi) execFileSync("chown", ["-R", `${CI_UID}:${CI_UID}`, wt, home]);
     let stopped = false;
     for (const c of commands) {
       if (stopped) {
@@ -217,15 +261,10 @@ function runCi(sha: string, commands: CiCommand[]): CiCheck[] {
       }
       progress(`ci ${c.name}`);
       const t = Date.now();
-      // Only a minimal environment: the container's own variables (tokens, CHECK_INPUT) never reach repo code.
-      const r = spawnSync("sh", ["-c", `exec 2>&1\n${c.run}`], {
-        cwd: wt, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" },
-        encoding: "utf8", timeout: c.timeoutSeconds * 1000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024,
-      });
+      const r = await runCommand(c, wt, home);
       const ms = Date.now() - t;
-      const timedOut = (r.error as { code?: string } | undefined)?.code === "ETIMEDOUT" || r.signal === "SIGKILL";
-      const tail = (r.stdout ?? "").slice(-7800);
-      if (timedOut) out.push({ name: c.name, status: "errored", log: `${tail}\n[timed out after ${c.timeoutSeconds} s]`, ms });
+      const tail = r.out.slice(-7800);
+      if (r.timedOut) out.push({ name: c.name, status: "errored", log: `${tail}\n[timed out after ${c.timeoutSeconds} s]`, ms });
       else if (r.error) out.push({ name: c.name, status: "errored", log: `could not run: ${r.error.message}`, ms });
       else out.push({ name: c.name, status: r.status === 0 ? "passed" : "failed", log: r.status === 0 ? tail : `${tail}\n[exit ${r.status}]`, ms });
       stopped = out.at(-1)!.status !== "passed";
@@ -237,21 +276,21 @@ function runCi(sha: string, commands: CiCommand[]): CiCheck[] {
   return out;
 }
 
-function ci(i: Extract<Input, { mode: "ci" }>) {
+async function ci(i: Extract<Input, { mode: "ci" }>) {
   fetchBranch(i.repo, i.branch);
   if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
-  return { mode: "ci", checks: runCi(i.sha, i.commands), timings };
+  return { mode: "ci", checks: await runCi(i.sha, i.commands), timings };
 }
 
 /** Merge queue for a PR: source onto the target's current head, CI on that exact commit, then a fast-forward push. */
-function merge(i: Extract<Input, { mode: "merge" }>) {
+async function merge(i: Extract<Input, { mode: "merge" }>) {
   const target = fetchBranch(i.repo, i.target);
   const source = fetchBranch(i.repo, i.source);
   if (source !== i.expectedSource) return { mode: "merge", merged: false, retry: true, reason: `${i.source} moved to ${source.slice(0, 7)} since it was reviewed (${i.expectedSource.slice(0, 7)})` };
   if (target !== i.expectedTarget) return { mode: "merge", merged: false, retry: true, reason: `${i.target} moved to ${target.slice(0, 7)}; merge again onto the new head`, targetHead: target };
   const onto = ontoBase(source, target, i.message);
   if ("conflicts" in onto) return { mode: "merge", merged: false, reason: `merge conflict with ${i.target} in ${onto.conflicts.join(", ")}`, conflicts: onto.conflicts };
-  const checks = runCi(onto.sha, i.commands);
+  const checks = await runCi(onto.sha, i.commands);
   if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
   const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
   if (!push.ok) return { mode: "merge", merged: false, retry: true, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); retry`, checks };
@@ -289,15 +328,18 @@ const LOW_SPEED = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10"
 const PUSH_TIMEOUT_MS = 60_000;
 const FETCH_TIMEOUT_MS = 60_000;
 
-function run(): unknown {
+async function run(): Promise<unknown> {
   if (input.mode === "snapshot") return snapshot(input);
-  if (input.mode === "diff") return { mode: "diff", ...changes(input), timings };
+  if (input.mode === "diff") {
+    const { diff, changedPaths } = changes(input);
+    return { mode: "diff", diff, changedPaths, timings };
+  }
   if (input.mode === "ci") return ci(input);
   return merge(input);
 }
 
 try {
-  const result = run() as { timings?: unknown[] };
+  const result = (await run()) as { timings?: unknown[] };
   // Wall time of the whole check, including waits for locks and cached results (steps alone miss those; review of #36).
   if (Array.isArray(result.timings)) result.timings.push({ step: "total", ms: Date.now() - startedAt });
   console.log(`@@RESULT ${JSON.stringify(result)}`);

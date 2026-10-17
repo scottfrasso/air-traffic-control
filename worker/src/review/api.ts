@@ -1,7 +1,7 @@
 import { repoRef } from "../artifacts";
 import { createPushSubscription } from "../subscriptions";
 import type { Directory } from "./directory";
-import type { Person } from "./identity";
+import type { Caller } from "./identity";
 import type { RepoStore } from "./store";
 import type { ResolutionKind } from "./types";
 
@@ -38,7 +38,7 @@ async function body<T>(request: Request): Promise<T> {
   }
 }
 
-type Ctx = { env: ApiEnv; person: Person; request: Request; params: string[]; directory: DurableObjectStub<Directory> };
+type Ctx = { env: ApiEnv; person: Caller; request: Request; params: string[]; directory: DurableObjectStub<Directory> };
 type Route = [method: string, pattern: RegExp, handler: (c: Ctx) => Promise<Response>];
 
 const store = (c: Ctx) => c.env.REPOS.getByName(c.params[0]!);
@@ -122,8 +122,8 @@ const routes: Route[] = [
     async (c) => {
       const { sha } = await body<{ sha?: unknown }>(c.request);
       if (typeof sha !== "string" || !sha) throw new HttpError(400, "sha (the commit you reviewed) is required");
-      const r = await store(c).approve(prId(c), c.person.email, sha);
-      return r.ok ? json(r) : json({ error: r.error }, 409);
+      const r = await store(c).approve(prId(c), c.person.email, sha, c.person.via);
+      return r.ok ? json(r) : json({ error: r.error }, c.person.via === "access" ? 409 : 403);
     },
   ],
   [
@@ -133,7 +133,7 @@ const routes: Route[] = [
       const b = await body<{ kind?: unknown; reason?: unknown }>(c.request);
       if (!KINDS.includes(b.kind as ResolutionKind)) throw new HttpError(400, "kind must be wrong, intentional or wontfix");
       if (typeof b.reason !== "string" || !b.reason.trim()) throw new HttpError(400, "reason is required");
-      const r = await store(c).resolveFinding(prId(c), Number(c.params[2]), c.person.email, b.kind as ResolutionKind, b.reason);
+      const r = await store(c).resolveFinding(prId(c), Number(c.params[2]), c.person.email, b.kind as ResolutionKind, b.reason, c.person.via);
       return r.ok ? json(r) : json({ error: r.error }, 409);
     },
   ],
@@ -162,7 +162,7 @@ const routes: Route[] = [
 export const ROUTE_TABLE = routes.map(([method, pattern]) => ({ method, pattern }));
 
 /** `/api/...` for a known person. Repo routes 404 for repos that aren't registered here. */
-export async function handleApi(request: Request, env: ApiEnv, person: Person, directory: DurableObjectStub<Directory>): Promise<Response> {
+export async function handleApi(request: Request, env: ApiEnv, person: Caller, directory: DurableObjectStub<Directory>): Promise<Response> {
   const path = new URL(request.url).pathname;
   for (const [method, pattern, handler] of routes) {
     const m = pattern.exec(path);

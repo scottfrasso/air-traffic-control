@@ -44,3 +44,11 @@ test("globs: ** crosses directories, * and ? don't", () => {
   assert.equal(matchesGlob("src/ab.ts", "src/?.ts"), false);
   assert.equal(matchesGlob("src/a.ts.bak", "src/*.ts"), false);
 });
+
+test("a .atc/ci.yml that lists no commands is a ConfigError (not 'pending' forever)", () => {
+  assert.throws(() => parseCiConfig("commands: []\n"), (e: unknown) => e instanceof ConfigError && /no commands/.test(e.message));
+});
+
+test("budgets are capped server-side: a repo can't give a session an unbounded budget", () => {
+  assert.deepEqual(parseReviewConfig("budgets:\n  classifier: 100000\n  reviewer: 999999\n  verifier: 5000\n").budgets, { classifier: 500, reviewer: 2000, verifier: 200 });
+});

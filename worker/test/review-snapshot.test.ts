@@ -39,3 +39,12 @@ test("container run limits: CI and merge get their commands' time plus slack, ca
   assert.equal(runTimeoutSeconds({ mode: "ci", repo: { name: "", remote: "", token: "" }, branch: "b", sha: "s", commands: Array.from({ length: 10 }, (_, i) => ({ name: `${i}`, run: "x", timeoutSeconds: 900 })) }), 3600);
   assert.equal(runTimeoutSeconds({ mode: "snapshot", repo: { name: "", remote: "", token: "" }, branch: "b", target: "main", sha: "s", base: null }), 240);
 });
+
+test("on a follow-up, the since-diff is uploaded as since.patch next to the whole change", async () => {
+  const agents = new FakeAgentClient();
+  const run = async () => JSON.stringify({ mode: "snapshot", diff: "+whole\n", changedPaths: ["a", "b"], sinceDiff: "+delta\n", sinceChangedPaths: ["b"], tarGzBase64: "", config: { ci: null, review: null, owners: null, reviewMd: null } });
+  const snap = await buildSnapshot({ run, ref: { name: "s", remote: "r", token: "t" }, agents, pr: PR, sha: "h2", since: "h1" });
+  assert.equal(agents.uploads.get(snap.fileIds["since.patch"]!)!.data, "+delta\n");
+  assert.equal(agents.uploads.get(snap.fileIds["diff.patch"]!)!.data, "+whole\n");
+  assert.deepEqual(snap.changedPaths, ["a", "b"]);
+});

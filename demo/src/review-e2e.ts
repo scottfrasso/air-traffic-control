@@ -8,7 +8,8 @@
  *   2. Branch "discounts" plants two bugs that CI doesn't catch: an off-by-one (untested) and a shell injection.
  *   3. Open a draft PR, mark it ready. CI passes, the agents run.
  *   4. Both bugs must come back as verified important findings, and merge must be refused.
- *   5. Push the fix. The new run must be clean; approve if the tier asks for it; merge; main moves.
+ *   5. Push the fix. The new run must be clean. A token can't approve; if the tier needs a person, merge must wait
+ *      for one (the script prints the link), else it merges.
  */
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -121,11 +122,16 @@ test("discountedTotal discounts every line", () => {
   const v2 = await settled(repo, pr.id, head2);
   say("system", `after the fix: CI ${v2.verdict.ci}, review ${v2.verdict.review}, security ${v2.verdict.security}; blockers: ${v2.verdict.blockers.join("; ")}`);
   check(v2.verdict.review === "clean" && v2.verdict.security !== "blocking", "the follow-up review is clean");
+  // An approval made with a token doesn't count (agents use tokens): this script can't approve, a person must.
+  check((await api("POST", `/api/repos/${repo}/prs/${pr.id}/approve`, { sha: head2 })).status === 403, "an approval over the API token is refused");
   if (v2.verdict.requiredApprovals > v2.verdict.approvals) {
-    check((await api("POST", `/api/repos/${repo}/prs/${pr.id}/approve`, { sha: head2 })).status === 200, `approved ${head2.slice(0, 7)} as the author`);
+    const blocked = await api<{ blockers?: string[] }>("POST", `/api/repos/${repo}/prs/${pr.id}/merge`);
+    check(blocked.status === 409 && (blocked.body.blockers ?? []).some((b) => /approval/.test(b)), `merge waits for a person: ${(blocked.body.blockers ?? []).join("; ")}`);
+    say("system", `a person must approve ${head2.slice(0, 7)} in the web UI: ${config.workerUrl}/repos/${repo}/prs/${pr.id}`);
+  } else {
+    const merged = await api<{ ok: boolean; sha: string; blockers?: string[] }>("POST", `/api/repos/${repo}/prs/${pr.id}/merge`);
+    check(merged.status === 200 && merged.body.ok, `merged without a person (low risk, nothing needs one): ${merged.body.sha ?? (merged.body.blockers ?? []).join("; ")}`);
   }
-  const merged = await api<{ ok: boolean; sha: string; blockers?: string[] }>("POST", `/api/repos/${repo}/prs/${pr.id}/merge`);
-  check(merged.status === 200 && merged.body.ok, `merged: ${merged.body.sha ?? (merged.body.blockers ?? []).join("; ")}`);
 } catch (err) {
   failed = true;
   say("fail", (err as Error).message);

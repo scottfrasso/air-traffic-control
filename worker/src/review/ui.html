@@ -236,6 +236,7 @@ async function prPage(repo, id) {
     h("p", { class: "dim" }, h("span", { class: "pill" }, pr.state), ` ${pr.source} → ${pr.target} · ${pr.author} · head ${short(pr.head)}`),
     h("div", { class: "row" },
       pr.state === "draft" ? act("Ready for review", `/api/repos/${enc(repo)}/prs/${pr.id}/ready`, "primary") : null,
+      pr.state === "ready" && !view.run ? act("Start review", `/api/repos/${enc(repo)}/prs/${pr.id}/ready`, "primary") : null,
       pr.state === "ready" ? act("Back to draft", `/api/repos/${enc(repo)}/prs/${pr.id}/draft`) : null,
       pr.state === "ready" ? h("button", { onclick: async () => { try { await api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/approve`, { sha: view.pr.head }); refresh(); } catch (e) { msg.textContent = e.message; } } }, `Approve ${short(pr.head)}`) : null,
       pr.state === "ready" ? h("button", { class: "primary", disabled: !view.verdict.mergeable, title: view.verdict.blockers.join("; "), onclick: async () => {

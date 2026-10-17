@@ -26,7 +26,7 @@ class UnconfiguredAgents implements AgentClient {
   async start(): Promise<string> {
     throw new Error(this.why);
   }
-  async poll() {
+  async poll(_id: string, _output: string) {
     return { status: "errored" as const, outputs: {}, error: this.why };
   }
   async interrupt(): Promise<void> {}

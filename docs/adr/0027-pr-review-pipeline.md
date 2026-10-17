@@ -19,33 +19,48 @@ the problem to solve; reviewing each change well, and knowing when a person must
   draft cancels it. Every write from a run goes through the store, which refuses it once the run isn't current, so a
   cancelled run's late results never land on a newer head.
 - **Stages** (`review/orchestrate.ts`, plain orchestration over injected dependencies, each call a durable step):
-  1. snapshot in the checker container (git archive, diff, changed paths, `.atc/*` and `REVIEW.md` at head),
-     uploaded once to the Managed Agents Files API;
+  1. snapshot in the checker container (git archive and the PR's whole diff and changed paths; on follow-ups also
+     `since.patch`, the delta since the last reviewed commit), uploaded once to the Managed Agents Files API. CI
+     config comes from the PR head; `REVIEW.md`, `.atc/review.yml` and `.atc/owners` come from the **target** branch,
+     so a PR can't rewrite the rules or budgets it is reviewed by;
   2. **CI gate**: the repo's `.atc/ci.yml` commands in the container, each a check with its own timeout and a minimal
      environment (no container variables, no tokens); any failure ends the run before any agent runs; no config is
      shown as "not configured" and needs a person;
-  3. **classifier** session → risk tier, needs-human, which reviewers, depth; hard rules raise it afterwards
-     (`.atc/ci.yml`, `.atc/review.yml`, `.atc/owners`, `REVIEW.md`, owner globs always need a person); a failed
-     classifier means all reviewers and a person;
-  4. **reviewers** in parallel (correctness, security, tests), each writing `review.json`;
-  5. **verification**: one verifier session per important finding, three independent votes, posted at ≥ 2 real;
-     nits (≤ 5 per reviewer) and pre-existing findings go up unverified and never block; a verifier that fails
-     doesn't hide the finding (posted "[unverified]", review incomplete).
+  3. **classifier** session → risk tier, needs-human, which reviewers, depth, always judged on the **whole** change;
+     hard rules raise it afterwards (`.atc/ci.yml`, `.atc/review.yml`, `.atc/owners`, `REVIEW.md`, owner globs
+     always need a person); a follow-up's classification never drops below the previous run's; a failed classifier
+     means all reviewers and a person;
+  4. **reviewers** in parallel: the classifier's pick, plus correctness on any change, plus every reviewer that
+     still has open findings; each writes `review.json`;
+  5. **verification**: one verifier session per important finding (at most 5 per reviewer; the rest go up
+     "[unverified]" and still block), exactly three votes, posted at ≥ 2 real; nits (≤ 5 per reviewer) and
+     pre-existing findings go up unverified and never block; a verifier that fails doesn't hide the finding
+     (posted "[unverified]", review incomplete).
+  Any unexpected failure interrupts the live sessions and finishes the run (CI errored if CI hadn't run, else an
+  errored `pipeline` step), so a PR is never "in progress" forever; a Workflow that fails to start leaves no run
+  behind and Ready starts it again. Push events are applied by the branch's live head, never the event's sha.
 - **Agents are Claude Managed Agents** behind an `AgentClient` interface (`ManagedAgentsClient` over fetch;
   `FakeAgentClient` in tests). Definitions (`atc-classifier`, `atc-correctness`, `atc-security`, `atc-tests`,
   `atc-verifier`) are created by `pnpm setup:agents`; the sandbox environment allows package registries only.
   **No repo credential ever enters a sandbox**: sessions get read-only file resources. Prompts treat repo and PR
   content as data. Every session has a budget (US cents: classifier 200, reviewer 500, verifier 50; per repo in
-  `.atc/review.yml`). A session that fails, hits its budget, times out or writes invalid output errors its step.
+  `.atc/review.yml`, capped at 500/2000/200). Only the role's output file is downloaded, at most 256 KB. Polling backs
+  off from 10 s to one a minute. A session that fails, hits its budget, times out or writes invalid output errors its
+  step.
   Without the Anthropic configuration, every agent step errors: CI still gates, and a person must approve.
 - **Verdict and merge policy are code, not a model** (`review/policy.ts`): CI pass/fail/none; review clean,
   findings, incomplete; security clear/blocking; tier low/medium/high → 0/1/2 human approvals, needs-human raises
-  to ≥ 1. Approvals are per commit (a push makes them stale); an agent never approves; the author counts as one
-  approver by approving the commit; high risk needs someone other than the author. Merge only when ready, CI green,
+  to ≥ 1. Approvals are per commit (a push makes them stale); an agent never approves: an approval must come from a
+  Cloudflare Access sign-in, never an API token (tokens are what agents use); the author counts as one approver by
+  approving the commit; high risk needs someone other than the author. Resolving an important finding also needs an
+  Access sign-in, so an agent can't dismiss its own finding. Merge only when ready, CI green,
   no open important or security finding, enough current approvals, and not incomplete unless a person approved.
 - **Convergence**: a finding the author resolved (wrong, intentional, won't fix, with a reason) isn't raised again
   for the same file and class; from the second run reviewers see only the diff since the last reviewed commit plus
   the open findings, which they re-report if still real (others become fixed); after three runs no new nits.
+- **CI isolation**: CI commands run in their own process group (killed when they finish), with a minimal environment,
+  and as an unprivileged `ci` user when the container runs as root; git gets its token through its environment,
+  never its argv.
 - **Merge** in the container: the PR head onto the target's current head, the PR's CI on that exact commit, a
   fast-forward push only if it passes; one retry if the target moved; one merge at a time per repo.
 - **Identity**: Cloudflare Access in front of the UI (a verified email on every request), personal API tokens
@@ -66,3 +81,5 @@ the problem to solve; reviewing each change well, and knowing when a person must
   bound, so the first deploy may need a Durable Object deletion migration.
 - Review cost is bounded per session by budgets; a PR with many important findings pays one verifier session each.
 - No per-repo permissions, notifications, comment threads between people or evals yet (later specs).
+- No branch protection yet: anyone with git credentials (an agent included) can push straight to a target branch,
+  so until that slice lands the merge gate is advisory for direct pushes.

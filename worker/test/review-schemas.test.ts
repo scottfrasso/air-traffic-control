@@ -36,6 +36,12 @@ test("JSON wrapped in a ```json fence is accepted (models do that)", () => {
 });
 
 test("verifier votes parse, one per finding index", () => {
-  assert.deepEqual(parseVotes(JSON.stringify({ votes: [{ findingIndex: 0, real: true, reason: "reproduced" }] })), [{ findingIndex: 0, real: true, reason: "reproduced" }]);
-  assert.throws(() => parseVotes(JSON.stringify({ votes: [{ findingIndex: 0, real: "yes", reason: "" }] })), InvalidOutput);
+  const three = [true, false, true].map((real, i) => ({ findingIndex: 0, real, reason: `look ${i}` }));
+  assert.deepEqual(parseVotes(JSON.stringify({ votes: three })), three);
+  assert.throws(() => parseVotes(JSON.stringify({ votes: [...three.slice(1), { findingIndex: 0, real: "yes", reason: "" }] })), InvalidOutput);
+});
+
+test("a verifier must cast exactly three votes; fewer is invalid output (the finding then goes up unverified)", () => {
+  assert.throws(() => parseVotes(JSON.stringify({ votes: [] })), InvalidOutput);
+  assert.throws(() => parseVotes(JSON.stringify({ votes: [{ findingIndex: 0, real: false, reason: "x" }] })), InvalidOutput);
 });

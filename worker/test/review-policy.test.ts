@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyHardRules, computeVerdict, countApprovals, filterNew, mergeGate, requiredApprovals, tallyVotes, type VerdictInput } from "../src/review/policy";
+import { applyHardRules, atLeast, computeVerdict, countApprovals, filterNew, mergeGate, requiredApprovals, tallyVotes, type VerdictInput } from "../src/review/policy";
 import type { Approval, Classification, Finding, RawFinding } from "../src/review/types";
 
 const cls = (over: Partial<Classification> = {}): Classification => ({ tier: "low", needsHuman: false, humanReasons: [], reviewers: ["correctness"], depth: "standard", ...over });
@@ -132,4 +132,12 @@ test("while the review runs, the PR isn't mergeable", () => {
 
 test("a draft PR's only blocker is being a draft (its review hasn't started, it isn't 'in progress')", () => {
   assert.deepEqual(computeVerdict(input({ state: "draft", ci: "pending", reviewDone: false, classification: null })).blockers, ["PR is a draft"]);
+});
+
+test("a follow-up run's classification never drops below the previous one", () => {
+  const prev = cls({ tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"] });
+  const next = cls({ tier: "low", needsHuman: false, humanReasons: [], reviewers: ["tests"] });
+  assert.deepEqual(atLeast(prev, next), { ...next, tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"] });
+  assert.deepEqual(atLeast(null, next), next);
+  assert.equal(atLeast(cls({ tier: "low" }), cls({ tier: "medium" })).tier, "medium");
 });

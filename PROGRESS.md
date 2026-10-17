@@ -33,7 +33,8 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
   `pnpm setup:cloudflare` (queues, namespace, deploy with `CF_API_TOKEN` and `ANTHROPIC_API_KEY`), and the live
   end-to-end script `pnpm e2e:review` (two planted bugs must be found, verified, blocked, fixed and merged; written,
   not run).
-- Tests: `pnpm test` (worker 125, demo 4), strict TypeScript in both packages.
+- A fresh whole-branch review (draft PR #50) found 3 critical and 9 important issues; all fixed, each with a test that failed first.
+- Tests: `pnpm test` (worker 150, demo 4), strict TypeScript in both packages.
 
 ## Next
 
@@ -47,7 +48,8 @@ _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudfl
 
 ## Stubbed, simplified, or open
 
-- Every signed-in person can read and push every repo (no per-repo permissions yet).
+- Every signed-in person can read and push every repo (no per-repo permissions yet), and there is no branch protection:
+  a direct push to a target branch bypasses the merge gate until that slice lands.
 - An agent and the person whose token it uses are one identity: the person is accountable for what the agent does.
 - The classifier and reviewers are prompts plus Managed Agents defaults; nothing is tuned on real PRs yet.
 - One verifier session gives three votes; three separate sessions would be more independent (and cost 3×).

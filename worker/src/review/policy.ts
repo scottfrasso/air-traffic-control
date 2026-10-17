@@ -1,5 +1,5 @@
 import { matchesGlob } from "./repoconfig";
-import type { Approval, Classification, Finding, PrState, RawFinding, Tier, Verdict } from "./types";
+import { REVIEWERS, type Approval, type Classification, type Finding, type PrState, type RawFinding, type Reviewer, type Tier, type Verdict } from "./types";
 
 /**
  * The merge policy, as pure functions (spec: "Verdict and merge policy"). Models classify and find; this code
@@ -18,6 +18,32 @@ export function applyHardRules(c: Classification, changedPaths: string[], owners
   }
   const added = reasons.length > c.humanReasons.length;
   return { ...c, needsHuman: c.needsHuman || added, humanReasons: [...new Set(reasons)] };
+}
+
+const TIER_RANK: Record<Tier, number> = { low: 0, medium: 1, high: 2 };
+
+/**
+ * A follow-up run's classification never drops below the PR's previous one: a small push after a risky change must
+ * not make the risky change need fewer people (review of PR #50).
+ */
+export function atLeast(prev: Classification | null, next: Classification): Classification {
+  if (!prev) return next;
+  return {
+    ...next,
+    tier: TIER_RANK[prev.tier] > TIER_RANK[next.tier] ? prev.tier : next.tier,
+    needsHuman: prev.needsHuman || next.needsHuman,
+    humanReasons: [...new Set([...prev.humanReasons, ...next.humanReasons])],
+  };
+}
+
+/**
+ * The reviewers that actually run: the classifier's pick, plus correctness on any change (a model must not be able
+ * to talk the pipeline out of reviewing code at all), plus every reviewer that still has open findings (only a
+ * reviewer that runs again can see that its finding was fixed).
+ */
+export function effectiveReviewers(picked: Reviewer[], openFindingsBy: Reviewer[], hasChanges: boolean): Reviewer[] {
+  const set = new Set<Reviewer>([...picked, ...openFindingsBy, ...(hasChanges ? (["correctness"] as const) : [])]);
+  return REVIEWERS.filter((r) => set.has(r));
 }
 
 const BY_TIER: Record<Tier, number> = { low: 0, medium: 1, high: 2 };

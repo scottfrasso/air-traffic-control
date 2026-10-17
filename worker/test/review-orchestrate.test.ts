@@ -11,7 +11,7 @@ const PR: Pr = {
 const finding = (over: Partial<RawFinding> = {}): RawFinding => ({ file: "src/cart.ts", line: 4, severity: "important", class: "off-by-one", title: "skips last item", evidence: "i < n - 1", ...over });
 const ok = (name: string, body: unknown) => ({ status: "done" as const, outputs: { [name]: JSON.stringify(body) } });
 
-function harness(opts: { ci?: string | null; reviewYml?: string; owners?: string; runNumber?: number; open?: Finding[]; resolved?: Array<{ file: string; class: string }> } = {}) {
+function harness(opts: { ci?: string | null; reviewYml?: string; owners?: string; runNumber?: number; open?: Finding[]; resolved?: Array<{ file: string; class: string }>; previous?: Classification } = {}) {
   const recorded = {
     checks: [] as CheckRow[],
     steps: new Map<string, { status: StepStatus; detail: string }>(),
@@ -26,7 +26,7 @@ function harness(opts: { ci?: string | null; reviewYml?: string; owners?: string
   const snapshotCalls: Array<{ base: string | null; sha: string; since: string | null }> = [];
   const deps: ReviewDeps = {
     store: {
-      runContext: async () => ({ current, pr: PR, runNumber: opts.runNumber ?? 1, lastReviewedSha: (opts.runNumber ?? 1) > 1 ? "h0" : null, resolved: opts.resolved ?? [], open: opts.open ?? [] }),
+      runContext: async () => ({ current, pr: PR, runNumber: opts.runNumber ?? 1, lastReviewedSha: (opts.runNumber ?? 1) > 1 ? "h0" : null, resolved: opts.resolved ?? [], open: opts.open ?? [], previousClassification: opts.previous ?? null }),
       recordCheck: async (_run, c) => (current ? (recorded.checks.push(c), true) : false),
       recordStep: async (_run, name, status, detail = "") => (current ? (recorded.steps.set(name, { status, detail }), true) : false),
       recordClassification: async (_run, c) => (current ? ((recorded.classification = c), true) : false),
@@ -77,12 +77,13 @@ test("no .atc/ci.yml: CI is recorded as not configured and the agents still run"
   assert.deepEqual(h.agents.started.map((s) => s.role), ["classifier", "correctness"]);
 });
 
-test("the classifier decides which reviewers run", async () => {
+test("the classifier adds reviewers (correctness always runs on a change); tests isn't picked here, so it doesn't run", async () => {
   const h = harness();
   h.agents.script("classifier", () => classify(["security"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
   h.agents.script("security", () => ok("review.json", { findings: [] }));
   assert.deepEqual(await h.run(), { outcome: "done" });
-  assert.deepEqual(h.agents.started.map((s) => s.role), ["classifier", "security"]);
+  assert.deepEqual(h.agents.started.map((s) => s.role).sort(), ["classifier", "correctness", "security"]);
   assert.equal(h.recorded.steps.get("security")?.status, "passed");
   assert.equal(h.recorded.finished, "done");
 });
@@ -185,9 +186,10 @@ test("a finding the author resolved isn't posted again", async () => {
 test("budgets from .atc/review.yml are applied to each session", async () => {
   const h = harness({ reviewYml: "budgets:\n  classifier: 120\n  reviewer: 900\n" });
   h.agents.script("classifier", () => classify(["security"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
   h.agents.script("security", () => ok("review.json", { findings: [] }));
   await h.run();
-  assert.deepEqual(h.agents.started.map((s) => [s.role, s.budgetCents]), [["classifier", 120], ["security", 900]]);
+  assert.deepEqual(h.agents.started.map((s) => [s.role, s.budgetCents]).sort(), [["classifier", 120], ["correctness", 900], ["security", 900]]);
 });
 
 test("a verifier that errors doesn't hide the finding: it's posted unverified and verification is errored", async () => {
@@ -209,4 +211,96 @@ test("every session gets the snapshot files and no credential in its message", a
     assert.deepEqual(s.files.map((f) => f.name).sort(), ["diff.patch", "pr.json", "repo.tar"]);
     assert.doesNotMatch(s.message, /token|bearer/i);
   }
+});
+
+test("a classifier that picks no reviewers still gets correctness on a code change", async () => {
+  const h = harness();
+  h.agents.script("classifier", () => classify([]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  await h.run();
+  assert.deepEqual(h.agents.started.map((s) => s.role), ["classifier", "correctness"]);
+});
+
+test("a reviewer with open findings always runs again, whatever the classifier picks", async () => {
+  const open: Finding = { ...finding({ file: "src/report.js", class: "shell-injection" }), id: 3, pr: 1, reviewer: "security", sha: "h0", run: 1, status: "open" };
+  const h = harness({ runNumber: 2, open: [open] });
+  h.agents.script("classifier", () => classify(["correctness"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  h.agents.script("security", () => ok("review.json", { findings: [] }));
+  await h.run();
+  assert.deepEqual(h.agents.started.map((s) => s.role).sort(), ["classifier", "correctness", "security"]);
+});
+
+test("a follow-up run keeps the risk of the PR: a high, needs-a-person PR stays so after a small push", async () => {
+  const h = harness({ runNumber: 2, previous: { tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"], reviewers: ["correctness"], depth: "standard" } });
+  h.agents.script("classifier", () => classify(["correctness"], { tier: "low" }));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  await h.run();
+  assert.deepEqual([h.recorded.classification?.tier, h.recorded.classification?.needsHuman], ["high", true]);
+});
+
+test("follow-up reviewers are told about since.patch; the classifier sees every changed path", async () => {
+  const h = harness({ runNumber: 2 });
+  h.agents.script("classifier", () => classify(["correctness"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  await h.run();
+  assert.match(h.agents.started.find((s) => s.role === "correctness")!.message, /since\.patch/);
+  assert.match(h.agents.started.find((s) => s.role === "classifier")!.message, /src\/cart\.ts/);
+});
+
+test("a snapshot that fails ends the run as CI errored (never 'in progress' forever)", async () => {
+  const h = harness();
+  h.deps.snapshot = async () => { throw new Error("repository archive is 40 MB, over the 25 MB limit"); };
+  assert.deepEqual(await h.run(), { outcome: "failed" });
+  assert.deepEqual(h.recorded.checks.map((c) => [c.name, c.status]), [["ci", "errored"]]);
+  assert.match(h.recorded.checks[0]!.log, /couldn't run.*25 MB/);
+  assert.equal(h.recorded.finished, "ci_failed");
+});
+
+test("an unexpected error after CI: live sessions are interrupted, the pipeline step errors, the review is incomplete", async () => {
+  const h = harness();
+  h.agents.script("classifier", () => classify(["correctness", "security"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  h.agents.script("security", () => new Promise(() => undefined)); // still running
+  const real = h.deps.store.recordFindings;
+  h.deps.store.recordFindings = async () => { throw new Error("storage exploded"); };
+  assert.deepEqual(await h.run(), { outcome: "failed" });
+  h.deps.store.recordFindings = real;
+  assert.equal(h.recorded.steps.get("pipeline")?.status, "errored");
+  assert.match(h.recorded.steps.get("pipeline")!.detail, /storage exploded/);
+  assert.equal(h.recorded.finished, "done");
+  assert.ok(h.agents.interrupted.length >= 1);
+});
+
+test("a poll that throws (API 5xx) errors that session only", async () => {
+  const h = harness();
+  h.agents.script("classifier", () => classify(["correctness", "tests"]));
+  h.agents.script("correctness", () => { throw new Error("Managed Agents GET /v1/sessions/x → 503: overloaded"); });
+  h.agents.script("tests", () => ok("review.json", { findings: [] }));
+  assert.deepEqual(await h.run(), { outcome: "done" });
+  assert.match(h.recorded.steps.get("correctness")!.detail, /503/);
+  assert.equal(h.recorded.steps.get("tests")?.status, "passed");
+});
+
+test("at most 5 important findings per reviewer are verified; the rest go up unverified (they still block)", async () => {
+  const h = harness();
+  h.agents.script("classifier", () => classify(["correctness"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: Array.from({ length: 8 }, (_, i) => finding({ class: `bug-${i}`, line: i + 1 })) }));
+  h.agents.script("verifier", () => votes(true, true, true));
+  await h.run();
+  assert.equal(h.agents.started.filter((s) => s.role === "verifier").length, 5);
+  assert.equal(h.recorded.findings.length, 8);
+  assert.equal(h.recorded.findings.filter((f) => f.title.startsWith("[unverified] ")).length, 3);
+});
+
+test("polling backs off: 10 s, then doubling, at most 60 s between polls", async () => {
+  const h = harness();
+  const sleeps: number[] = [];
+  h.deps.sleep = async (_n, ms) => void sleeps.push(ms);
+  h.deps.limits = undefined;
+  h.agents.runningPolls = 5;
+  h.agents.script("classifier", () => classify(["correctness"]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  await h.run();
+  assert.deepEqual(sleeps.slice(0, 5), [10_000, 20_000, 40_000, 60_000, 60_000]);
 });

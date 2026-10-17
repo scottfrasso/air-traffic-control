@@ -8,6 +8,25 @@ import { routeReviewPush } from "../src/review/routing";
 import { sqlStorage } from "./harness/sql";
 import { store } from "./harness/store";
 
+const TEAM = "acme.cloudflareaccess.com";
+const AUD = "aud-1";
+
+/** A Cloudflare Access stand-in: signs JWTs for an email and serves its key at the team's certs URL. */
+async function access() {
+  const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  const kid = `k-${crypto.randomUUID()}`;
+  const jwk = { ...(await crypto.subtle.exportKey("jwk", publicKey)), kid, alg: "RS256" };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) =>
+    String(url) === `https://${TEAM}/cdn-cgi/access/certs` ? new Response(JSON.stringify({ keys: [jwk] })) : real(url, init)) as typeof fetch;
+  const b64 = (x: string | ArrayBuffer) => Buffer.from(typeof x === "string" ? x : new Uint8Array(x)).toString("base64url");
+  return async (email: string) => {
+    const head = b64(JSON.stringify({ alg: "RS256", kid }));
+    const body = b64(JSON.stringify({ aud: [AUD], email, exp: Math.floor(Date.now() / 1000) + 600, iss: `https://${TEAM}` }));
+    return `${head}.${body}.${b64(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, new TextEncoder().encode(`${head}.${body}`)))}`;
+  };
+}
+
 async function app() {
   const s = store("shop");
   await s.init();
@@ -15,7 +34,10 @@ async function app() {
   const directory = new Directory({ storage: { sql: sqlStorage(new DatabaseSync(":memory:")) } } as never, {});
   await directory.addRepo("shop", "ann@x", null);
   const created: string[] = [];
+  const signJwt = await access();
   const env = {
+    ACCESS_TEAM_DOMAIN: TEAM,
+    ACCESS_AUD: AUD,
     REPOS: { getByName: (name: string) => (name === "shop" ? s.co : { init: async () => undefined }) },
     DIRECTORY: { getByName: () => directory },
     ARTIFACTS: {
@@ -29,7 +51,12 @@ async function app() {
     const res = await handle(new Request(`https://atc.example${path}`, { method, headers: { authorization: `Bearer ${as}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }), env as never, {} as never);
     return { status: res.status, body: (await res.json().catch(() => null)) as Record<string, unknown> };
   };
-  return { s, env, directory, created, call, token, bobToken };
+  /** The same call, signed in through Access as `email` (a person at the web UI). */
+  const asPerson = async (email: string, method: string, path: string, body?: unknown) => {
+    const res = await handle(new Request(`https://atc.example${path}`, { method, headers: { "cf-access-jwt-assertion": await signJwt(email), "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }), env as never, {} as never);
+    return { status: res.status, body: (await res.json().catch(() => null)) as Record<string, unknown> };
+  };
+  return { s, env, directory, created, call, asPerson, token, bobToken };
 }
 
 test("the API needs a person: no token, no access", async () => {
@@ -40,7 +67,8 @@ test("the API needs a person: no token, no access", async () => {
 
 test("GET /api/me names the token's person", async () => {
   const a = await app();
-  assert.deepEqual((await a.call("GET", "/api/me")).body, { email: "ann@x", name: "ann" });
+  assert.deepEqual((await a.call("GET", "/api/me")).body, { email: "ann@x", name: "ann", via: "token" });
+  assert.deepEqual((await a.asPerson("ann@x", "GET", "/api/me")).body, { email: "ann@x", name: "ann", via: "access" });
 });
 
 test("creating a repo creates it in Artifacts and lists it; a second time is a 409", async () => {
@@ -79,10 +107,12 @@ test("a PR's lifecycle over HTTP: ready starts a run; approve needs the current 
   const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
   assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/ready`)).status, 200);
   assert.equal(a.s.runs.length, 1);
-  const stale = await a.call("POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "old" }, a.bobToken);
+  const viaToken = await a.call("POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" }, a.bobToken);
+  assert.equal(viaToken.status, 403); // a token could be an agent's
+  const stale = await a.asPerson("bob@x", "POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "old" });
   assert.equal(stale.status, 409);
   assert.match(String(stale.body.error), /review the current head/);
-  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" }, a.bobToken)).status, 200);
+  assert.equal((await a.asPerson("bob@x", "POST", `/api/repos/shop/prs/${pr.id}/approve`, { sha: "f1" })).status, 200);
   const view = (await a.call("GET", `/api/repos/shop/prs/${pr.id}`)).body as { approvals: Array<{ by: string }> };
   assert.deepEqual(view.approvals.map((x) => x.by), ["bob@x"]);
   const merge = await a.call("POST", `/api/repos/shop/prs/${pr.id}/merge`);

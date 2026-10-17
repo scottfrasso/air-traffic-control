@@ -68,9 +68,9 @@ test("poll: running while the session runs; done with the files it wrote to outp
     "GET https://api.anthropic.com/v1/files/f9/content": () => '{"findings":[]}',
   });
   const c = client(a.fetchImpl);
-  assert.equal(await c.poll("sess_1"), "running");
+  assert.equal(await c.poll("sess_1", "review.json"), "running");
   status = "idle";
-  assert.deepEqual(await c.poll("sess_1"), { status: "done", outputs: { "review.json": '{"findings":[]}' } });
+  assert.deepEqual(await c.poll("sess_1", "review.json"), { status: "done", outputs: { "review.json": '{"findings":[]}' } });
 });
 
 test("poll: a session that hit its budget reports budget; a terminated one errored", async () => {
@@ -78,8 +78,8 @@ test("poll: a session that hit its budget reports budget; a terminated one error
     "GET https://api.anthropic.com/v1/sessions/b": () => ({ id: "b", status: "idle", stop_reason: { type: "budget_reached" } }),
     "GET https://api.anthropic.com/v1/sessions/t": () => ({ id: "t", status: "terminated" }),
   });
-  assert.deepEqual(await client(a.fetchImpl).poll("b"), { status: "budget", outputs: {}, error: "budget reached" });
-  assert.equal(((await client(a.fetchImpl).poll("t")) as { status: string }).status, "errored");
+  assert.deepEqual(await client(a.fetchImpl).poll("b", "review.json"), { status: "budget", outputs: {}, error: "budget reached" });
+  assert.equal(((await client(a.fetchImpl).poll("t", "review.json")) as { status: string }).status, "errored");
 });
 
 test("poll: when the session object has no stop_reason, it's read from the last status_idle event", async () => {
@@ -87,7 +87,7 @@ test("poll: when the session object has no stop_reason, it's read from the last 
     "GET https://api.anthropic.com/v1/sessions/s/events": () => ({ data: [{ type: "session.status_idle", stop_reason: { type: "budget_reached" } }] }),
     "GET https://api.anthropic.com/v1/sessions/s": () => ({ id: "s", status: "idle" }),
   });
-  assert.equal(((await client(a.fetchImpl).poll("s")) as { status: string }).status, "budget");
+  assert.equal(((await client(a.fetchImpl).poll("s", "review.json")) as { status: string }).status, "budget");
 });
 
 test("an API error on create throws with the API's message", async () => {
@@ -105,4 +105,21 @@ test("the fake runs the script for the role, records what it started, and errors
   assert.equal(((await f.poll(u)) as { status: string }).status, "errored");
   await f.interrupt(s);
   assert.deepEqual([f.started.map((x) => x.role), f.interrupted], [["security", "tests"], [s]]);
+});
+
+test("poll downloads only the file the role must write, and refuses one too big to carry", async () => {
+  let big = false;
+  const a = api({
+    "GET https://api.anthropic.com/v1/sessions/s/events": () => ({ data: [] }),
+    "GET https://api.anthropic.com/v1/sessions/s": () => ({ id: "s", status: "idle", stop_reason: { type: "end_turn" } }),
+    "GET https://api.anthropic.com/v1/files?scope_id=s": () => ({ data: [{ id: "f1", filename: "review.json" }, { id: "f2", filename: "dump.bin" }] }),
+    "GET https://api.anthropic.com/v1/files/f1/content": () => (big ? "x".repeat(300 * 1024) : '{"findings":[]}'),
+    "GET https://api.anthropic.com/v1/files/f2/content": () => "should never be downloaded",
+  });
+  assert.deepEqual(await client(a.fetchImpl).poll("s", "review.json"), { status: "done", outputs: { "review.json": '{"findings":[]}' } });
+  assert.equal(a.calls.some((c) => c.url.endsWith("/files/f2/content")), false);
+  big = true;
+  const r = (await client(a.fetchImpl).poll("s", "review.json")) as { status: string; error?: string };
+  assert.equal(r.status, "errored");
+  assert.match(r.error ?? "", /too large/);
 });

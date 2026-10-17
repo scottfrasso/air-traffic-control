@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { repoRef } from "../artifacts";
+import type { Via } from "./identity";
 import { computeVerdict } from "./policy";
 import { ConfigError, parseCiConfig } from "./repoconfig";
 import { REPO_SCHEMA } from "./schema";
-import type { Approval, CheckRow, Classification, Finding, Intent, Pr, PrState, RawFinding, ResolutionKind, Reviewer, StepStatus, Verdict } from "./types";
+import { REVIEWERS, type Approval, type CheckRow, type Classification, type Finding, type Intent, type Pr, type PrState, type RawFinding, type ResolutionKind, type Reviewer, type StepStatus, type Verdict } from "./types";
 
 /** What a RepoStore needs from the Worker's bindings (the generated Env has more). */
 export interface StoreEnv {
@@ -183,11 +184,24 @@ export class RepoStore extends DurableObject<StoreEnv> {
   // ── lifecycle ────────────────────────────────────────────────────────
 
   /** A push to any branch of this repo (from the queue). Open PRs on that branch move to the new head. */
-  async onPush(ref: string, sha: string): Promise<void> {
+  async onPush(ref: string, eventSha: string): Promise<void> {
     const branch = ref.replace(/^refs\/heads\//, "");
     const prs = this.sql.exec<PrRow>("SELECT * FROM prs WHERE source = ? AND state IN ('draft', 'ready')", branch).toArray();
+    if (!prs.length) return;
+    // Events can arrive late, twice or out of order: the branch's live head decides, not the event (review of PR #50).
+    // A deleted branch has no head: leave its PR as it is (its merge will refuse).
+    const sha = (await this.headOf(branch)) ?? null;
+    if (!sha) {
+      this.log("push.branch_missing", null, { branch, eventSha });
+      return;
+    }
     for (const p of prs) {
-      if (p.head === sha) continue; // a redelivered event
+      // A redelivered event changes nothing, unless the run it should have started never did (start failed).
+      if (p.head === sha && !(p.state === "ready" && !p.current_run)) continue;
+      if (p.head === sha) {
+        await this.startRun(p.id);
+        continue;
+      }
       this.sql.exec("UPDATE prs SET head = ? WHERE id = ?", sha, p.id);
       this.log("pr.pushed", p.id, { sha });
       if (p.state === "ready") {
@@ -236,6 +250,9 @@ export class RepoStore extends DurableObject<StoreEnv> {
       await this.env.REVIEW_RUN.create({ id: instance, params: { repo: this.repo, pr: id, sha: p.head, run } });
     } catch (err) {
       if (!isDuplicateInstance((err as Error).message)) {
+        // Leave nothing half-started: no run that will never report. Ready (or the queue's retry) starts it again.
+        this.sql.exec("DELETE FROM runs WHERE id = ?", run);
+        this.sql.exec("UPDATE prs SET current_run = NULL WHERE id = ? AND current_run = ?", id, run);
         this.log("run.start_failed", id, { run, error: (err as Error).message.slice(0, 300) });
         throw err;
       }
@@ -259,8 +276,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
     }
   }
 
-  async approve(id: number, by: string, sha: string): Promise<{ ok: boolean; error?: string }> {
+  async approve(id: number, by: string, sha: string, via: Via): Promise<{ ok: boolean; error?: string }> {
     const p = this.mustPr(id);
+    // Agents act with API tokens, and an agent's approval never counts as a person's (spec; review of PR #50).
+    if (via !== "access") return { ok: false, error: "approve in the web UI, signed in through Cloudflare Access: an approval made with an API token could be an agent's" };
     if (p.state !== "ready") return { ok: false, error: `PR${id} is ${p.state}` };
     if (!sha || sha !== p.head) return { ok: false, error: `PR${id} is at ${p.head.slice(0, 7)}, not ${(sha || "(none)").slice(0, 7)}: review the current head` };
     this.sql.exec("INSERT OR IGNORE INTO approvals(pr, sha, by, at) VALUES (?, ?, ?, ?)", id, sha, by, Date.now());
@@ -268,9 +287,11 @@ export class RepoStore extends DurableObject<StoreEnv> {
     return { ok: true };
   }
 
-  async resolveFinding(id: number, findingId: number, by: string, kind: ResolutionKind, reason: string): Promise<{ ok: boolean; error?: string }> {
+  async resolveFinding(id: number, findingId: number, by: string, kind: ResolutionKind, reason: string, via: Via): Promise<{ ok: boolean; error?: string }> {
     const f = this.sql.exec<FindingRow>("SELECT * FROM findings WHERE id = ? AND pr = ?", findingId, id).toArray()[0];
     if (!f) return { ok: false, error: `no finding ${findingId} on PR${id}` };
+    // A resolved important finding stops blocking: only a person may decide that, not the agent that has to fix it.
+    if (f.severity === "important" && via !== "access") return { ok: false, error: "an important finding can only be resolved by a person in the web UI (signed in through Cloudflare Access); fix it with a push instead" };
     if (f.status !== "open") return { ok: false, error: `finding ${findingId} is ${f.status}` };
     if (!reason.trim()) return { ok: false, error: "a reason is required" };
     this.sql.exec("UPDATE findings SET status = 'resolved', res_kind = ?, res_reason = ?, res_by = ? WHERE id = ?", kind, reason.trim().slice(0, 500), by, findingId);
@@ -291,7 +312,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     return this.row(r.pr)?.current_run === run ? r : null;
   }
 
-  async runContext(run: number): Promise<{ current: boolean; pr: Pr; runNumber: number; lastReviewedSha: string | null; resolved: Array<{ file: string; class: string }>; open: Finding[] }> {
+  async runContext(run: number): Promise<{ current: boolean; pr: Pr; runNumber: number; lastReviewedSha: string | null; resolved: Array<{ file: string; class: string }>; open: Finding[]; previousClassification: Classification | null }> {
     const r = this.runRow(run);
     if (!r) throw new Error(`no run ${run}`);
     const findings = this.findings(r.pr);
@@ -302,6 +323,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
       lastReviewedSha: r.since_sha,
       resolved: findings.filter((f) => f.status === "resolved").map((f) => ({ file: f.file, class: f.class })),
       open: findings.filter((f) => f.status === "open"),
+      previousClassification: (() => {
+        const prev = this.sql.exec<{ classification: string | null }>("SELECT classification FROM runs WHERE pr = ? AND id < ? AND status = 'done' AND classification IS NOT NULL ORDER BY id DESC LIMIT 1", r.pr, run).toArray()[0];
+        return prev?.classification ? (JSON.parse(prev.classification) as Classification) : null;
+      })(),
     };
   }
 
@@ -422,7 +447,15 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const r = this.current(run);
     if (!r) return false;
     this.sql.exec("UPDATE runs SET status = ?, finished_at = ? WHERE id = ?", outcome, Date.now(), run);
-    if (outcome === "done") this.sql.exec("UPDATE findings SET status = 'fixed' WHERE pr = ? AND status = 'open' AND run < ?", r.pr, run);
+    if (outcome === "done") {
+      // Only a reviewer that ran and passed in this run can tell its earlier findings are gone (review of PR #50).
+      const passed = this.sql
+        .exec<{ name: string }>("SELECT name FROM checks WHERE run = ? AND kind = 'step' AND status = 'passed'", run)
+        .toArray()
+        .map((c) => c.name)
+        .filter((n) => (REVIEWERS as readonly string[]).includes(n));
+      for (const reviewer of passed) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ?", r.pr, reviewer, run);
+    }
     this.log("run.finished", r.pr, { run, outcome });
     return true;
   }

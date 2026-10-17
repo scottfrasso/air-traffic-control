@@ -10,6 +10,10 @@ export interface Person {
   name: string;
 }
 
+/** How the caller proved who they are. Agents use tokens; only Access sign-ins can approve (spec: an agent never approves). */
+export type Via = "access" | "token";
+export type Caller = Person & { via: Via };
+
 export const TOKEN_PREFIX = "atc_";
 
 export async function hashToken(token: string): Promise<string> {
@@ -73,11 +77,14 @@ export async function personFromRequest(
   env: IdentityEnv,
   directory: Pick<Directory, "personForToken" | "ensurePerson">,
   fetchImpl: typeof fetch = fetch,
-): Promise<Person | null> {
+): Promise<Caller | null> {
   const auth = request.headers.get("authorization") ?? "";
-  if (auth.startsWith(`Bearer ${TOKEN_PREFIX}`)) return directory.personForToken(await hashToken(auth.slice(7).trim()));
+  if (auth.startsWith(`Bearer ${TOKEN_PREFIX}`)) {
+    const p = await directory.personForToken(await hashToken(auth.slice(7).trim()));
+    return p ? { ...p, via: "token" } : null;
+  }
   const jwt = request.headers.get("cf-access-jwt-assertion") ?? /(?:^|;\s*)CF_Authorization=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
   if (!jwt || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;
   const email = await verifyAccessJwt(jwt, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD }, fetchImpl);
-  return email ? directory.ensurePerson(email) : null;
+  return email ? { ...(await directory.ensurePerson(email)), via: "access" } : null;
 }

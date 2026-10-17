@@ -34,7 +34,7 @@ export class FakeAgentClient implements AgentClient {
     return id;
   }
 
-  async poll(id: string): Promise<"running" | SessionResult> {
+  async poll(id: string, _output?: string): Promise<"running" | SessionResult> {
     const s = this.sessions.get(id);
     if (!s) return { status: "errored", outputs: {}, error: `no session ${id}` };
     if (s.polls++ < this.runningPolls) return "running";

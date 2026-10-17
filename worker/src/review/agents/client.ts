@@ -30,13 +30,16 @@ export interface AgentClient {
   /** Upload a file once; any number of sessions can mount it. Returns the file id. */
   upload(name: string, data: Uint8Array | string): Promise<string>;
   start(spec: SessionSpec): Promise<string>;
-  poll(id: string): Promise<"running" | SessionResult>;
+  /** `output`: the one file the role must write; only it is downloaded (and capped). */
+  poll(id: string, output: string): Promise<"running" | SessionResult>;
   interrupt(id: string): Promise<void>;
 }
 
 const BASE = "https://api.anthropic.com";
 const AGENTS_BETA = "managed-agents-2026-04-01";
 const FILES_BETA = "files-api-2025-04-14";
+/** An output file bigger than this is refused: it must fit in a Workflow step result (1 MiB) with room to spare. */
+export const MAX_OUTPUT_BYTES = 256 * 1024;
 
 export class ManagedAgentsClient implements AgentClient {
   private readonly fetch: typeof fetch;
@@ -87,7 +90,7 @@ export class ManagedAgentsClient implements AgentClient {
     return session.id;
   }
 
-  async poll(id: string): Promise<"running" | SessionResult> {
+  async poll(id: string, output: string): Promise<"running" | SessionResult> {
     const s = await this.call<{ status: string; stop_reason?: { type?: string } }>("GET", `/v1/sessions/${id}`);
     if (s.status === "running" || s.status === "rescheduling") return "running";
     if (s.status === "terminated") return { status: "errored", outputs: {}, error: "session terminated" };
@@ -95,19 +98,17 @@ export class ManagedAgentsClient implements AgentClient {
     const stop = s.stop_reason?.type ?? (await this.lastStopReason(id));
     if (stop === "budget_reached") return { status: "budget", outputs: {}, error: "budget reached" };
     if (stop === "requires_action") return { status: "errored", outputs: {}, error: "the agent asked for approval of a tool call" };
-    return { status: "done", outputs: await this.outputs(id) };
+    const list = await this.call<{ data: Array<{ id: string; filename: string }> }>("GET", `/v1/files?scope_id=${encodeURIComponent(id)}`);
+    const file = list.data.filter((f) => f.filename.split("/").pop() === output).at(-1);
+    if (!file) return { status: "done", outputs: {} }; // the step reports the missing file as invalid output
+    const text = await this.call<string>("GET", `/v1/files/${file.id}/content`);
+    if (new TextEncoder().encode(text).byteLength > MAX_OUTPUT_BYTES) return { status: "errored", outputs: {}, error: `${output} is too large (over ${MAX_OUTPUT_BYTES / 1024} KB)` };
+    return { status: "done", outputs: { [output]: text } };
   }
 
   private async lastStopReason(id: string): Promise<string | undefined> {
     const ev = await this.call<{ data: Array<{ type: string; stop_reason?: { type?: string } }> }>("GET", `/v1/sessions/${id}/events?beta=true`);
     return ev.data.filter((e) => e.type === "session.status_idle").at(-1)?.stop_reason?.type;
-  }
-
-  private async outputs(id: string): Promise<Record<string, string>> {
-    const list = await this.call<{ data: Array<{ id: string; filename: string }> }>("GET", `/v1/files?scope_id=${encodeURIComponent(id)}`);
-    const out: Record<string, string> = {};
-    for (const f of list.data) out[f.filename.split("/").pop()!] = await this.call<string>("GET", `/v1/files/${f.id}/content`);
-    return out;
   }
 
   async interrupt(id: string): Promise<void> {

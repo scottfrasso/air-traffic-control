@@ -72,13 +72,13 @@ test("back to draft cancels the run; its late results are dropped", async () => 
 
 test("an approval must name the current head", async () => {
   const { s, pr } = await withPr({ ready: true });
-  assert.deepEqual(await s.co.approve(pr.id, "bob@x", "f0"), { ok: false, error: "PR1 is at f1, not f0: review the current head" });
-  assert.deepEqual(await s.co.approve(pr.id, "bob@x", "f1"), { ok: true });
+  assert.deepEqual(await s.co.approve(pr.id, "bob@x", "f0", "access"), { ok: false, error: "PR1 is at f1, not f0: review the current head" });
+  assert.deepEqual(await s.co.approve(pr.id, "bob@x", "f1", "access"), { ok: true });
 });
 
 test("an approval stops counting once the PR moves on", async () => {
   const { s, pr } = await withPr({ ready: true });
-  await s.co.approve(pr.id, "bob@x", "f1");
+  await s.co.approve(pr.id, "bob@x", "f1", "access");
   await s.push("fix", "f2");
   const v = (await s.co.getPr(pr.id)).verdict;
   assert.equal(v.approvals, 0);
@@ -100,8 +100,8 @@ test("findings: recorded open; resolving one needs a reason; resolved ones are l
   await s.co.recordFindings(1, "correctness", [{ file: "src/a.ts", line: 3, severity: "important", class: "off-by-one", title: "t", evidence: "e" }]);
   const [f] = (await s.co.getPr(pr.id)).findings;
   assert.equal(f!.status, "open");
-  assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", ""), { ok: false, error: "a reason is required" });
-  assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", "boundary is exclusive by design"), { ok: true });
+  assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", "", "access"), { ok: false, error: "a reason is required" });
+  assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", "boundary is exclusive by design", "access"), { ok: true });
   await s.push("fix", "f2");
   const ctx = await s.co.runContext(2);
   assert.deepEqual(ctx.resolved, [{ file: "src/a.ts", class: "off-by-one" }]);
@@ -120,6 +120,7 @@ test("a later run that doesn't re-report an open finding marks it fixed; one it 
   assert.equal(ctx.runNumber, 2);
   assert.equal(ctx.open.length, 2);
   await s.co.recordFindings(2, "correctness", [{ ...b, line: 10 }]);
+  await s.co.recordStep(2, "correctness", "passed");
   await s.co.finishRun(2, "done");
   const fs = (await s.co.getPr(pr.id)).findings;
   assert.deepEqual(fs.map((f) => [f.class, f.status, f.line]).sort(), [["bug-a", "fixed", 3], ["bug-b", "open", 10]]);
@@ -228,4 +229,74 @@ test("the PR's diff comes from the container once per head commit, then from the
   assert.equal((await s.co.getDiff(pr.id)).diff, "diff for f2\n");
   const call = s.checkerCalls.at(-1)!;
   assert.deepEqual([call.branch, call.target, call.base, (call.repo as { token: string }).token], ["fix", "main", "m0", "read-token"]);
+});
+
+test("a later run marks fixed only the findings of reviewers that ran and passed in it", async () => {
+  const { s, pr } = await withPr({ ready: true });
+  const sec = { file: "src/r.js", line: 1, severity: "important" as const, class: "injection", title: "s", evidence: "e" };
+  const cor = { file: "src/c.js", line: 2, severity: "important" as const, class: "off-by-one", title: "c", evidence: "e" };
+  await s.co.recordFindings(1, "security", [sec]);
+  await s.co.recordFindings(1, "correctness", [cor]);
+  await s.co.finishRun(1, "done");
+  await s.push("fix", "f2");
+  await s.co.recordStep(2, "correctness", "passed"); // security didn't run (or errored) in run 2
+  await s.co.finishRun(2, "done");
+  const byClass = Object.fromEntries((await s.co.getPr(pr.id)).findings.map((f) => [f.class, f.status]));
+  assert.deepEqual(byClass, { injection: "open", "off-by-one": "fixed" });
+});
+
+test("runContext hands the next run the classification of the last finished one", async () => {
+  const { s } = await withPr({ ready: true });
+  await s.co.recordClassification(1, { tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"], reviewers: ["correctness"], depth: "deep" });
+  await s.co.finishRun(1, "done");
+  await s.push("fix", "f2");
+  assert.equal((await s.co.runContext(2)).previousClassification?.tier, "high");
+});
+
+test("an approval made with an API token doesn't count: agents use tokens, and an agent never approves", async () => {
+  const { s, pr } = await withPr({ ready: true });
+  const r = await s.co.approve(pr.id, "ann@x", "f1", "token");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /signed in through Cloudflare Access/);
+  assert.equal((await s.co.getPr(pr.id)).approvals.length, 0);
+});
+
+test("an important finding can't be resolved with an API token (an agent can't dismiss its own finding); a nit can", async () => {
+  const { s, pr } = await withPr({ ready: true });
+  await s.co.recordFindings(1, "security", [{ file: "a", line: 1, severity: "important", class: "injection", title: "t", evidence: "e" }, { file: "b", line: 1, severity: "nit", class: "naming", title: "n", evidence: "e" }]);
+  const [imp, nit] = (await s.co.getPr(pr.id)).findings;
+  const refused = await s.co.resolveFinding(pr.id, imp!.id, "ann@x", "wrong", "not reachable", "token");
+  assert.equal(refused.ok, false);
+  assert.match(refused.error ?? "", /a person in the web UI/);
+  assert.deepEqual(await s.co.resolveFinding(pr.id, nit!.id, "ann@x", "wontfix", "naming is fine", "token"), { ok: true });
+  assert.deepEqual(await s.co.resolveFinding(pr.id, imp!.id, "ann@x", "wrong", "not reachable", "access"), { ok: true });
+});
+
+test("if the review Workflow can't be started, nothing is left half-started: ready again starts it", async () => {
+  const s = store();
+  await s.init();
+  s.heads.set("fix", "f1");
+  const pr = await s.co.openPr({ title: "x", author: "ann@x", source: "fix" });
+  const create = (s as unknown as { co: { env: { REVIEW_RUN: { create: (o: unknown) => Promise<unknown> } } } }).co.env.REVIEW_RUN.create;
+  (s.co as unknown as { env: { REVIEW_RUN: { create: unknown } } }).env.REVIEW_RUN.create = async () => { throw new Error("workflows unavailable"); };
+  await assert.rejects(s.co.markReady(pr.id, "ann@x"), /workflows unavailable/);
+  assert.equal((await s.co.getPr(pr.id)).run, null);
+  assert.equal(s.q("SELECT 1 FROM runs").length, 0);
+  (s.co as unknown as { env: { REVIEW_RUN: { create: unknown } } }).env.REVIEW_RUN.create = create;
+  const { run } = await s.co.markReady(pr.id, "ann@x"); // the PR is ready but has no run: start one
+  assert.equal(s.runs.length, 1);
+  assert.equal((await s.co.getPr(pr.id)).run?.id, run);
+});
+
+test("a late or reordered push event can't move a PR back to an older commit; a branch delete is ignored", async () => {
+  const { s, pr } = await withPr({ ready: true });
+  await s.push("fix", "f2");
+  const runs = s.runs.length;
+  await s.co.onPush("refs/heads/fix", "f1"); // a redelivered older event; the branch is still at f2
+  assert.equal((await s.co.getPr(pr.id)).pr.head, "f2");
+  assert.equal(s.runs.length, runs);
+  s.heads.delete("fix");
+  await s.co.onPush("refs/heads/fix", "0".repeat(40));
+  assert.equal((await s.co.getPr(pr.id)).pr.head, "f2");
+  assert.equal(s.runs.length, runs);
 });

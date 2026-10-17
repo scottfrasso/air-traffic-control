@@ -25,7 +25,7 @@ const finding = z.object({
 });
 
 const review = z.object({ findings: z.array(finding) });
-const votes = z.object({ votes: z.array(z.object({ findingIndex: z.number().int().nonnegative(), real: z.boolean(), reason: z.string() })) });
+const votes = z.object({ votes: z.array(z.object({ findingIndex: z.number().int().nonnegative(), real: z.boolean(), reason: z.string() })).length(3, "exactly three votes") });
 
 /** Models often wrap JSON in a ```json fence: take what's inside. */
 function json(text: string): unknown {
