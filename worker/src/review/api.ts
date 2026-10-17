@@ -158,6 +158,9 @@ const routes: Route[] = [
   ["DELETE", /^\/api\/tokens\/(\d+)$/, async (c) => (await c.directory.revokeToken(c.person.email, Number(c.params[0])), json({ ok: true }))],
 ];
 
+/** The method and path of every route (the web UI's test checks its calls against this). */
+export const ROUTE_TABLE = routes.map(([method, pattern]) => ({ method, pattern }));
+
 /** `/api/...` for a known person. Repo routes 404 for repos that aren't registered here. */
 export async function handleApi(request: Request, env: ApiEnv, person: Person, directory: DurableObjectStub<Directory>): Promise<Response> {
   const path = new URL(request.url).pathname;
