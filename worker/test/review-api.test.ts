@@ -184,3 +184,40 @@ test("the admin secret mints a personal token for an email (an ordinary token: i
 async function hashOf(token: string) {
   return (await import("../src/review/identity")).hashToken(token);
 }
+
+test("run checks over HTTP: the whole gauntlet, or single checks; the wrong commit or an unknown check is refused", async () => {
+  const a = await app();
+  const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { sha: "f0" })).status, 409);
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { only: ["lint"] })).status, 400);
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { only: "security" })).status, 400);
+  const r = await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { sha: "f1", only: ["security"] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(a.s.runs.map((x) => x.params.only), [["security"]]);
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`)).status, 200);
+  assert.deepEqual(a.s.runs.map((x) => x.params.only ?? "all"), [["security"], "all"]);
+});
+
+test("GET /api/prs lists every repo's PRs for the dashboard, newest activity first, with a compact verdict", async () => {
+  const a = await app();
+  const one = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  await a.call("POST", `/api/repos/shop/prs/${one.id}/checks`);
+  const r = await a.call("GET", "/api/prs");
+  assert.equal(r.status, 200);
+  const prs = r.body.prs as Array<{ repo: string; pr: { id: number; title: string; state: string }; verdict: { checks: string; blockers: string[] }; findings: { important: number; nit: number }; steps: Array<{ name: string; status: string }>; updatedAt: number }>;
+  assert.equal(prs.length, 1);
+  assert.deepEqual([prs[0]!.repo, prs[0]!.pr.title, prs[0]!.pr.state, prs[0]!.verdict.checks], ["shop", "Fix cart", "ready", "running"]);
+  assert.deepEqual(prs[0]!.findings, { important: 0, nit: 0 });
+  assert.ok(prs[0]!.updatedAt > 0);
+});
+
+test("MCP run_checks runs the gauntlet on the head, or single checks, as the token's person", async () => {
+  const a = await app();
+  const tools = reviewTools(a.env as never, { email: "ann@x", name: "ann" });
+  const opened = (await tools.open_pr({ repo: "shop", title: "Fix cart", source: "fix" })) as { id: number };
+  await tools.run_checks({ repo: "shop", pr: opened.id, only: ["ci"] });
+  await tools.run_checks({ repo: "shop", pr: opened.id, sha: "f1" });
+  assert.deepEqual(a.s.runs.map((x) => x.params.only ?? "all"), [["ci"], "all"]);
+  const view = (await tools.get_pr({ repo: "shop", pr: opened.id })) as { verdict: { checks: string } };
+  assert.equal(view.verdict.checks, "running");
+});

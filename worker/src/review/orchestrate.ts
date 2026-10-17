@@ -4,7 +4,7 @@ import { applyHardRules, atLeast, dedupeAcross, effectiveReviewers, filterNew, t
 import { ConfigError, parseCiConfig, parseOwners, parseReviewConfig, type CiCommand } from "./repoconfig";
 import { InvalidOutput, parseClassification, parseReview, parseVotes } from "./schemas";
 import type { RepoStore } from "./store";
-import { REVIEWERS, type Classification, type Pr, type RawFinding, type Reviewer, type StepStatus } from "./types";
+import { REVIEWERS, type CheckName, type Classification, type Pr, type RawFinding, type Reviewer, type StepStatus } from "./types";
 
 /**
  * One review run for one (PR, head commit), as plain orchestration over injected dependencies: the ReviewRun
@@ -48,8 +48,10 @@ const CURRENT_EVERY = 6;
 
 class Cancelled extends Error {}
 
-export async function runReview(deps: ReviewDeps, params: { repo: string; pr: number; sha: string; run: number }): Promise<Outcome> {
+export async function runReview(deps: ReviewDeps, params: { repo: string; pr: number; sha: string; run: number; only?: CheckName[] }): Promise<Outcome> {
   const { run } = params;
+  /** Single checks: only these run, and no classifier. Absent: the whole gauntlet. */
+  const only = params.only?.length ? params.only : null;
   const limits = deps.limits ?? DEFAULT_LIMITS;
   const live = new Set<string>(); // sessions started and not yet finished
   let cancelled = false;
@@ -79,8 +81,9 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
     // ── CI gate ──
     let ciSummary: string;
     let commands: CiCommand[] | null;
+    const ciWanted = !only || only.includes("ci");
     try {
-      commands = parseCiConfig(snap.config.ci);
+      commands = ciWanted ? parseCiConfig(snap.config.ci) : null;
     } catch (err) {
       if (!(err instanceof ConfigError)) throw err;
       await write(deps.store.recordCheck(run, { run, name: "ci config", kind: "ci", status: "failed", log: err.message, ms: 0 }));
@@ -88,7 +91,10 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
       await write(deps.store.finishRun(run, "ci_failed"));
       return { outcome: "ci_failed" };
     }
-    if (commands === null) {
+    if (!ciWanted) {
+      ciRecorded = true; // not asked for: no CI result at all (the verdict shows the run as partial)
+      ciSummary = "not run (single checks)";
+    } else if (commands === null) {
       await write(deps.store.recordCheck(run, { run, name: "ci", kind: "ci", status: "skipped", log: "no CI configured", ms: 0 }));
       ciRecorded = true;
       ciSummary = "no CI configured";
@@ -139,23 +145,27 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
       role, message, budgetCents, files: [...files, ...extra], title: `${params.repo} PR${params.pr} ${role}`,
     });
 
-    // ── classifier ──
-    const c = await session("classifier", spec("classifier", classifierMessage(ctx.pr, ciSummary, snap.changedPaths), budgets.classifier));
+    // ── classifier (not for single checks: the caller chose the reviewers) ──
     let classification: Classification;
-    let classifierStatus: StepStatus = "passed";
-    let classifierDetail = "";
-    try {
-      if (c.status !== "done") throw new Error(failure(c));
-      classification = parseClassification(c.outputs[OUTPUT.classifier] ?? "");
-    } catch (err) {
-      classifierStatus = "errored";
-      classifierDetail = err instanceof InvalidOutput ? `invalid ${OUTPUT.classifier}: ${err.message}` : (err as Error).message;
-      classification = { tier: "medium", needsHuman: true, humanReasons: [`classifier failed: ${classifierDetail.slice(0, 120)}`], reviewers: [...REVIEWERS], depth: "standard" };
+    if (only) {
+      classification = { tier: "medium", needsHuman: false, humanReasons: [], reviewers: REVIEWERS.filter((r) => only.includes(r)), depth: "standard" };
+    } else {
+      const c = await session("classifier", spec("classifier", classifierMessage(ctx.pr, ciSummary, snap.changedPaths), budgets.classifier));
+      let classifierStatus: StepStatus = "passed";
+      let classifierDetail = "";
+      try {
+        if (c.status !== "done") throw new Error(failure(c));
+        classification = parseClassification(c.outputs[OUTPUT.classifier] ?? "");
+      } catch (err) {
+        classifierStatus = "errored";
+        classifierDetail = err instanceof InvalidOutput ? `invalid ${OUTPUT.classifier}: ${err.message}` : (err as Error).message;
+        classification = { tier: "medium", needsHuman: true, humanReasons: [`classifier failed: ${classifierDetail.slice(0, 120)}`], reviewers: [...REVIEWERS], depth: "standard" };
+      }
+      await write(deps.store.recordStep(run, "classifier", classifierStatus, classifierDetail));
+      classification = atLeast(ctx.previousClassification, applyHardRules(classification, snap.changedPaths, parseOwners(snap.config.owners)));
+      classification = { ...classification, reviewers: effectiveReviewers(classification.reviewers, ctx.open.map((f) => f.reviewer), snap.changedPaths.length > 0) };
+      await write(deps.store.recordClassification(run, classification));
     }
-    await write(deps.store.recordStep(run, "classifier", classifierStatus, classifierDetail));
-    classification = atLeast(ctx.previousClassification, applyHardRules(classification, snap.changedPaths, parseOwners(snap.config.owners)));
-    classification = { ...classification, reviewers: effectiveReviewers(classification.reviewers, ctx.open.map((f) => f.reviewer), snap.changedPaths.length > 0) };
-    await write(deps.store.recordClassification(run, classification));
 
     // ── reviewers, in parallel; then one finding per bug across them; then each verifies its own important ones ──
     const review = async (role: Reviewer): Promise<RawFinding[] | null> => {

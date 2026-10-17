@@ -3,8 +3,8 @@ import { repoRef } from "../artifacts";
 import type { Via } from "./identity";
 import { computeVerdict } from "./policy";
 import { ConfigError, parseCiConfig } from "./repoconfig";
-import { REPO_SCHEMA } from "./schema";
-import { REVIEWERS, type Approval, type CheckRow, type Classification, type Finding, type Intent, type Pr, type PrState, type RawFinding, type ResolutionKind, type Reviewer, type StepStatus, type Verdict } from "./types";
+import { REPO_MIGRATIONS, REPO_SCHEMA } from "./schema";
+import { CHECK_NAMES, REVIEWERS, type Approval, type CheckName, type CheckRow, type Classification, type Finding, type Intent, type Pr, type PrState, type RawFinding, type ResolutionKind, type Reviewer, type StepStatus, type Verdict } from "./types";
 
 /** What a RepoStore needs from the Worker's bindings (the generated Env has more). */
 export interface StoreEnv {
@@ -18,6 +18,8 @@ export interface ReviewRunParams {
   pr: number;
   sha: string;
   run: number;
+  /** Single checks: run only these (no classifier). Absent: the whole gauntlet. */
+  only?: CheckName[];
 }
 
 export type RunRow = {
@@ -30,6 +32,7 @@ export type RunRow = {
   classification: string | null;
   ci_config: string | null;
   instance: string;
+  scope: string | null;
   started_at: number;
   finished_at: number | null;
 };
@@ -45,6 +48,15 @@ export interface PrView {
   verdict: Verdict;
   /** Flat JSON (RPC typing turns `unknown` into `never`). */
   events: Array<{ id: number; at: number; kind: string; detail: EventDetail }>;
+}
+
+export interface PrSummary {
+  pr: Pr;
+  verdict: Verdict;
+  run: { number: number; sha: string; status: RunRow["status"]; startedAt: number; finishedAt: number | null } | null;
+  findings: { important: number; nit: number };
+  steps: Array<{ name: string; kind: CheckRow["kind"]; status: CheckRow["status"] }>;
+  updatedAt: number;
 }
 
 type PrRow = Omit<Pr, "intent" | "createdAt" | "currentRun"> & { intent: string; created_at: number; current_run: number | null };
@@ -68,6 +80,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(REPO_SCHEMA);
+    for (const m of REPO_MIGRATIONS) {
+      const has = this.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${m.table}')`).toArray().some((c) => c.name === m.column);
+      if (!has) this.sql.exec(m.ddl);
+    }
   }
 
   private meta(key: string): string | null {
@@ -133,6 +149,25 @@ export class RepoStore extends DurableObject<StoreEnv> {
     return rows.toArray().map((r) => this.toPr(r));
   }
 
+  /** Every PR with what a dashboard row shows: the verdict, finding counts, step statuses, and last activity. */
+  async listSummaries(limit = 50): Promise<PrSummary[]> {
+    const ids = this.sql.exec<{ id: number }>("SELECT id FROM prs ORDER BY id DESC LIMIT ?", limit).toArray();
+    const out: PrSummary[] = [];
+    for (const { id } of ids) {
+      const v = await this.getPr(id);
+      const open = v.findings.filter((f) => f.status === "open");
+      out.push({
+        pr: v.pr,
+        verdict: v.verdict,
+        run: v.run ? { number: v.run.number, sha: v.run.sha, status: v.run.status, startedAt: v.run.started_at, finishedAt: v.run.finished_at } : null,
+        findings: { important: open.filter((f) => f.severity === "important").length, nit: open.filter((f) => f.severity !== "important").length },
+        steps: v.checks.map((c) => ({ name: c.name, kind: c.kind, status: c.status })),
+        updatedAt: v.events[0]?.at ?? v.pr.createdAt,
+      });
+    }
+    return out;
+  }
+
   async getPr(id: number): Promise<PrView> {
     const r = this.mustPr(id);
     const pr = this.toPr(r);
@@ -167,6 +202,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
       approvals,
       head: pr.head,
       author: pr.author,
+      run: run ? { sha: run.sha, finished: run.status !== "running", only: run.scope ? (JSON.parse(run.scope) as CheckName[]) : null } : null,
     });
   }
 
@@ -196,28 +232,39 @@ export class RepoStore extends DurableObject<StoreEnv> {
       return;
     }
     for (const p of prs) {
-      // A redelivered event changes nothing, unless the run it should have started never did (start failed).
-      if (p.head === sha && !(p.state === "ready" && !p.current_run)) continue;
-      if (p.head === sha) {
-        await this.startRun(p.id);
-        continue;
-      }
+      if (p.head === sha) continue; // a redelivered or older event
+      // Pushes are free: nothing starts or stops. A run in progress finishes and shows as stale (spec: triggered checks).
       this.sql.exec("UPDATE prs SET head = ? WHERE id = ?", sha, p.id);
       this.log("pr.pushed", p.id, { sha });
-      if (p.state === "ready") {
-        await this.cancelRun(p.id, "a new push");
-        await this.startRun(p.id);
-      }
     }
   }
 
-  async markReady(id: number, by: string): Promise<{ run: number }> {
+  /**
+   * Run the checks (the gauntlet, or only some of it) on the PR's head: what an agent calls when its work is done.
+   * A draft becomes ready. The same request again for a head that's checking or checked is the same run, at no cost;
+   * a run still going on an older head is cancelled, since one run is in charge of a PR.
+   */
+  async runChecks(id: number, by: string, opts: { sha?: string; only?: CheckName[] } = {}): Promise<{ run: number }> {
     const p = this.mustPr(id);
-    if (p.state === "ready" && p.current_run) return { run: p.current_run };
     if (!OPEN_STATES.includes(p.state)) throw new Error(`PR${id} is ${p.state}`);
-    this.sql.exec("UPDATE prs SET state = 'ready' WHERE id = ?", id);
-    this.log("pr.ready", id, { by });
-    return { run: await this.startRun(id) };
+    if (opts.sha && opts.sha !== p.head) throw new Error(`PR${id} is at ${p.head}, not ${opts.sha}: push first, or name the head`);
+    for (const c of opts.only ?? []) if (!CHECK_NAMES.includes(c)) throw new Error(`unknown check ${c}: use ${CHECK_NAMES.join(", ")}`);
+    const only = opts.only?.length ? CHECK_NAMES.filter((c) => opts.only!.includes(c)) : null;
+    const scope = only ? JSON.stringify(only) : null;
+    const cur = p.current_run ? this.sql.exec<RunRow>("SELECT * FROM runs WHERE id = ?", p.current_run).toArray()[0] : undefined;
+    if (cur && cur.sha === p.head && cur.scope === scope && (cur.status === "running" || cur.status === "done")) return { run: cur.id };
+    if (p.state === "draft") {
+      this.sql.exec("UPDATE prs SET state = 'ready' WHERE id = ?", id);
+      this.log("pr.ready", id, { by });
+    }
+    await this.cancelRun(id, "checks requested again");
+    this.log("checks.requested", id, { by, sha: p.head, only: only ?? [] });
+    return { run: await this.startRun(id, only) };
+  }
+
+  /** The older name for runChecks (the whole gauntlet), kept for agents that call it. */
+  async markReady(id: number, by: string): Promise<{ run: number }> {
+    return this.runChecks(id, by);
   }
 
   async markDraft(id: number, by: string): Promise<void> {
@@ -236,18 +283,18 @@ export class RepoStore extends DurableObject<StoreEnv> {
     this.log("pr.closed", id, { by });
   }
 
-  private async startRun(id: number): Promise<number> {
+  private async startRun(id: number, only: CheckName[] | null = null): Promise<number> {
     const p = this.mustPr(id);
     const number = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM runs WHERE pr = ?", id).one().n + 1;
     const since = this.sql.exec<{ sha: string }>("SELECT sha FROM runs WHERE pr = ? AND status = 'done' ORDER BY id DESC LIMIT 1", id).toArray()[0]?.sha ?? null;
-    this.sql.exec("INSERT INTO runs(pr, sha, number, status, since_sha, instance, started_at) VALUES (?, ?, ?, 'running', ?, '', ?)", id, p.head, number, since, Date.now());
+    this.sql.exec("INSERT INTO runs(pr, sha, number, status, since_sha, instance, scope, started_at) VALUES (?, ?, ?, 'running', ?, '', ?, ?)", id, p.head, number, since, only ? JSON.stringify(only) : null, Date.now());
     const run = this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id;
     const instance = `${this.repo}-pr${id}-${p.head.slice(0, 12)}-r${run}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
     this.sql.exec("UPDATE runs SET instance = ? WHERE id = ?", instance, run);
     this.sql.exec("UPDATE prs SET current_run = ? WHERE id = ?", run, id);
     this.log("run.started", id, { run, sha: p.head, number });
     try {
-      await this.env.REVIEW_RUN.create({ id: instance, params: { repo: this.repo, pr: id, sha: p.head, run } });
+      await this.env.REVIEW_RUN.create({ id: instance, params: { repo: this.repo, pr: id, sha: p.head, run, ...(only ? { only } : {}) } });
     } catch (err) {
       if (!isDuplicateInstance((err as Error).message)) {
         // Leave nothing half-started: no run that will never report. Ready (or the queue's retry) starts it again.

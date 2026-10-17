@@ -6,9 +6,9 @@
  *
  *   1. Create a repo, push demo/review-sample as main (CI: node --test).
  *   2. Branch "discounts" plants two bugs that CI doesn't catch: an off-by-one (untested) and a shell injection.
- *   3. Open a draft PR, mark it ready. CI passes, the agents run.
+ *   3. Open a draft PR; the agent says it's done (run checks on its head). CI passes, the agents run.
  *   4. Both bugs must come back as verified important findings, and merge must be refused.
- *   5. Push the fix. The new run must be clean. A token can't approve; if the tier needs a person, merge must wait
+ *   5. Push the fix: a push runs nothing, so the verdict goes stale until checks are run again. The new run must be clean. A token can't approve; if the tier needs a person, merge must wait
  *      for one (the script prints the link), else it merges.
  */
 import { execFileSync } from "node:child_process";
@@ -19,7 +19,7 @@ import { config, need, ROOT } from "./lib/env.ts";
 import { say, sleep } from "./lib/log.ts";
 
 type Finding = { id: number; reviewer: string; severity: string; file: string; class: string; title: string; status: string };
-type View = { pr: { id: number; head: string; state: string }; verdict: { ci: string; review: string; security: string; mergeable: boolean; blockers: string[]; requiredApprovals: number; approvals: number }; findings: Finding[]; checks: Array<{ name: string; status: string; log: string }> };
+type View = { pr: { id: number; head: string; state: string }; verdict: { checks: string; checkedSha: string | null; ci: string; review: string; security: string; mergeable: boolean; blockers: string[]; requiredApprovals: number; approvals: number }; findings: Finding[]; checks: Array<{ name: string; status: string; log: string }> };
 
 const token = need("REVIEW_TOKEN");
 let failed = false;
@@ -43,7 +43,7 @@ async function settled(repo: string, id: number, sha: string, timeoutMs = 30 * 6
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const v = (await api<View>("GET", `/api/repos/${repo}/prs/${id}`)).body;
-    if (v.pr.head === sha && v.verdict.review !== "pending" && v.verdict.ci !== "pending") return v;
+    if (v.pr.head === sha && v.verdict.checkedSha === sha && v.verdict.checks !== "running") return v;
     if (Date.now() > deadline) throw new Error(`review of ${sha.slice(0, 7)} still pending after ${timeoutMs / 60_000} min`);
     await sleep(15_000);
   }
@@ -92,7 +92,7 @@ export function countMentionsFast(logFile, word) {
     intent: { what: "discountedTotal(); countMentionsFast() via grep", why: "checkout discounts; slow reports", testing: "existing tests", risk: "low", revert: "revert the commit" },
   })).body;
   check(pr.state === "draft", `PR${pr.id} opened as a draft`);
-  check((await api("POST", `/api/repos/${repo}/prs/${pr.id}/ready`)).status === 200, "marked ready");
+  check((await api("POST", `/api/repos/${repo}/prs/${pr.id}/checks`, { sha: head1 })).status === 200, "checks requested on the head (the draft becomes ready)");
 
   const v1 = await settled(repo, pr.id, head1);
   say("system", `verdict: CI ${v1.verdict.ci}, review ${v1.verdict.review}, security ${v1.verdict.security}; blockers: ${v1.verdict.blockers.join("; ")}`);
@@ -147,6 +147,15 @@ test("countMentionsFast agrees with countMentions, including no matches and rege
   git(["commit", "-q", "-m", "Fix the loop bound and cents rounding; grep without a shell, literal, 0 on no match; tests"]);
   git(["push", "-q", creds.remote, "HEAD:discounts"], { auth: creds.token });
   const head2 = git(["rev-parse", "HEAD"]);
+  // Pushes are free: nothing runs until the agent asks again, and the old result shows as stale meanwhile.
+  const pushedDeadline = Date.now() + 120_000;
+  let afterPush = (await api<View>("GET", `/api/repos/${repo}/prs/${pr.id}`)).body;
+  while (afterPush.pr.head !== head2 && Date.now() < pushedDeadline) {
+    await sleep(3_000);
+    afterPush = (await api<View>("GET", `/api/repos/${repo}/prs/${pr.id}`)).body;
+  }
+  check(afterPush.pr.head === head2 && afterPush.verdict.checks === "stale", `after the push, checks are stale (${afterPush.verdict.checks}) and nothing new ran`);
+  check((await api("POST", `/api/repos/${repo}/prs/${pr.id}/checks`, { sha: head2 })).status === 200, "checks requested on the fixed head");
 
   const v2 = await settled(repo, pr.id, head2);
   say("system", `after the fix: CI ${v2.verdict.ci}, review ${v2.verdict.review}, security ${v2.verdict.security}; blockers: ${v2.verdict.blockers.join("; ")}`);

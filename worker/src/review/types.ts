@@ -5,6 +5,9 @@ export type Tier = "low" | "medium" | "high";
 export type Severity = "important" | "nit" | "pre-existing";
 export type Reviewer = "correctness" | "security" | "tests";
 export const REVIEWERS: readonly Reviewer[] = ["correctness", "security", "tests"];
+/** What a caller can run on its own: CI, or one reviewer (spec: triggered checks). */
+export type CheckName = "ci" | Reviewer;
+export const CHECK_NAMES: readonly CheckName[] = ["ci", ...REVIEWERS];
 
 /** What the author says the PR does. An agent may draft it; the author owns it. */
 export interface Intent {
@@ -86,6 +89,10 @@ export type CheckRow = {
 };
 
 export interface Verdict {
+  /** Whether checks ran on the head: not yet, running, all done, only some (a partial run), or on an older commit. */
+  checks: "not_run" | "running" | "done" | "partial" | "stale";
+  /** The commit the current run checked (null before any run). */
+  checkedSha: string | null;
   ci: "pass" | "fail" | "none" | "pending";
   review: "clean" | "findings" | "incomplete" | "pending" | "skipped";
   security: "clear" | "blocking" | "pending" | "skipped";

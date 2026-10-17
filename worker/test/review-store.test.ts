@@ -51,15 +51,73 @@ test("marking ready twice doesn't start a second run", async () => {
   assert.equal(s.runs.length, 1);
 });
 
-test("a push to a ready PR cancels its run and starts one for the new head; the old run can't write", async () => {
+test("a push to a ready PR starts nothing: the running run goes on, and its result is stale for the new head", async () => {
   const { s, pr } = await withPr({ ready: true });
-  const old = s.runs[0]!.params.run;
   await s.push("fix", "f2");
+  assert.deepEqual([s.runs.length, s.terminated.length], [1, 0], "pushes are free: no new run, no cancel");
+  assert.equal(await s.co.recordCheck(1, { run: 1, name: "test", kind: "ci", status: "passed", log: "", ms: 1 }), true, "the run still writes");
+  await s.co.recordClassification(1, { tier: "low", needsHuman: false, humanReasons: [], reviewers: ["correctness"], depth: "standard" });
+  await s.co.recordStep(1, "correctness", "passed");
+  await s.co.finishRun(1, "done");
+  const v = (await s.co.getPr(pr.id)).verdict;
+  assert.deepEqual([v.checks, v.checkedSha, v.mergeable], ["stale", "f1", false]);
+  assert.ok(v.blockers.includes("checks ran on f1, the head is f2: run the checks again"), v.blockers.join("; "));
+});
+
+test("run checks on a draft marks it ready and runs the gauntlet on the head", async () => {
+  const { s, pr } = await withPr();
+  const { run } = await s.co.runChecks(pr.id, "ann@x");
+  assert.equal((await s.co.getPr(pr.id)).pr.state, "ready");
+  assert.deepEqual(s.runs.map((r) => r.params), [{ repo: "shop", pr: pr.id, sha: "f1", run }]);
+  assert.equal((await s.co.getPr(pr.id)).verdict.checks, "running");
+});
+
+test("run checks names the commit: anything but the head is refused", async () => {
+  const { s, pr } = await withPr();
+  await assert.rejects(s.co.runChecks(pr.id, "ann@x", { sha: "f0" }), /PR1 is at f1, not f0/);
+  assert.equal(s.runs.length, 0);
+});
+
+test("run checks twice on one head is one run; after a push it cancels the older run and starts one for the new head", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  assert.deepEqual(await s.co.runChecks(pr.id, "ann@x", { sha: "f1" }), a);
+  await s.push("fix", "f2");
+  const b = await s.co.runChecks(pr.id, "ann@x");
+  assert.notEqual(b.run, a.run);
   assert.deepEqual(s.terminated, ["shop-pr1-f1-r1"]);
-  assert.equal(s.runs.length, 2);
   assert.equal(s.runs[1]!.params.sha, "f2");
-  assert.equal(await s.co.recordCheck(old, { run: old, name: "lint", kind: "ci", status: "passed", log: "", ms: 1 }), false);
-  assert.equal(s.q("SELECT 1 FROM checks WHERE run = ?", old).length, 0);
+  assert.equal(await s.co.recordCheck(a.run, { run: a.run, name: "lint", kind: "ci", status: "passed", log: "", ms: 1 }), false, "the older run can't write");
+});
+
+test("single checks: a partial run carries what to run, and never makes a PR mergeable", async () => {
+  const { s, pr } = await withPr();
+  const { run } = await s.co.runChecks(pr.id, "ann@x", { only: ["ci", "security"] });
+  assert.deepEqual(s.runs[0]!.params, { repo: "shop", pr: pr.id, sha: "f1", run, only: ["ci", "security"] });
+  await s.co.recordCheck(run, { run, name: "test", kind: "ci", status: "passed", log: "", ms: 1 });
+  await s.co.recordStep(run, "security", "passed");
+  await s.co.finishRun(run, "done");
+  const v = (await s.co.getPr(pr.id)).verdict;
+  assert.deepEqual([v.checks, v.mergeable], ["partial", false]);
+  assert.ok(v.blockers.includes("only some checks ran (ci, security): run all the checks before merging"), v.blockers.join("; "));
+  // The full gauntlet on the same head is a new run, not the partial one again.
+  const full = await s.co.runChecks(pr.id, "ann@x");
+  assert.notEqual(full.run, run);
+});
+
+test("unknown single checks are refused", async () => {
+  const { s, pr } = await withPr();
+  await assert.rejects(s.co.runChecks(pr.id, "ann@x", { only: ["lint" as never] }), /unknown check lint/);
+});
+
+test("a ready PR whose checks haven't run says so", async () => {
+  const { s, pr } = await withPr({ ready: true });
+  await s.push("fix", "f2");
+  await s.co.markDraft(pr.id, "ann@x");
+  s.q("UPDATE prs SET state = 'ready' WHERE id = ?", pr.id);
+  const v = (await s.co.getPr(pr.id)).verdict;
+  assert.equal(v.checks, "not_run");
+  assert.ok(v.blockers.includes("checks haven't run on this commit"), v.blockers.join("; "));
 });
 
 test("back to draft cancels the run; its late results are dropped", async () => {
@@ -103,6 +161,7 @@ test("findings: recorded open; resolving one needs a reason; resolved ones are l
   assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", "", "access"), { ok: false, error: "a reason is required" });
   assert.deepEqual(await s.co.resolveFinding(pr.id, f!.id, "ann@x", "intentional", "boundary is exclusive by design", "access"), { ok: true });
   await s.push("fix", "f2");
+  await s.co.runChecks(pr.id, "ann@x");
   const ctx = await s.co.runContext(2);
   assert.deepEqual(ctx.resolved, [{ file: "src/a.ts", class: "off-by-one" }]);
   assert.equal(ctx.lastReviewedSha, null); // run 1 never finished
@@ -115,6 +174,7 @@ test("a later run that doesn't re-report an open finding marks it fixed; one it 
   await s.co.recordFindings(1, "correctness", [a, b]);
   await s.co.finishRun(1, "done");
   await s.push("fix", "f2");
+  await s.co.runChecks(pr.id, "ann@x");
   const ctx = await s.co.runContext(2);
   assert.equal(ctx.lastReviewedSha, "f1");
   assert.equal(ctx.runNumber, 2);
@@ -131,6 +191,7 @@ test("a CI-failed run doesn't mark anything fixed", async () => {
   await s.co.recordFindings(1, "correctness", [{ file: "a", line: 1, severity: "important", class: "c", title: "t", evidence: "e" }]);
   await s.co.finishRun(1, "done");
   await s.push("fix", "f2");
+  await s.co.runChecks(pr.id, "ann@x");
   await s.co.recordCheck(2, { run: 2, name: "test", kind: "ci", status: "failed", log: "1 failing", ms: 3 });
   await s.co.finishRun(2, "ci_failed");
   assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open");
@@ -239,6 +300,7 @@ test("a later run marks fixed only the findings of reviewers that ran and passed
   await s.co.recordFindings(1, "correctness", [cor]);
   await s.co.finishRun(1, "done");
   await s.push("fix", "f2");
+  await s.co.runChecks(pr.id, "ann@x");
   await s.co.recordStep(2, "correctness", "passed"); // security didn't run (or errored) in run 2
   await s.co.finishRun(2, "done");
   const byClass = Object.fromEntries((await s.co.getPr(pr.id)).findings.map((f) => [f.class, f.status]));
@@ -246,10 +308,11 @@ test("a later run marks fixed only the findings of reviewers that ran and passed
 });
 
 test("runContext hands the next run the classification of the last finished one", async () => {
-  const { s } = await withPr({ ready: true });
+  const { s, pr } = await withPr({ ready: true });
   await s.co.recordClassification(1, { tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"], reviewers: ["correctness"], depth: "deep" });
   await s.co.finishRun(1, "done");
   await s.push("fix", "f2");
+  await s.co.runChecks(pr.id, "ann@x");
   assert.equal((await s.co.runContext(2)).previousClassification?.tier, "high");
 });
 
@@ -292,6 +355,7 @@ test("a late or reordered push event can't move a PR back to an older commit; a 
   const { s, pr } = await withPr({ ready: true });
   await s.push("fix", "f2");
   const runs = s.runs.length;
+  assert.equal(runs, 1, "a push starts nothing");
   await s.co.onPush("refs/heads/fix", "f1"); // a redelivered older event; the branch is still at f2
   assert.equal((await s.co.getPr(pr.id)).pr.head, "f2");
   assert.equal(s.runs.length, runs);

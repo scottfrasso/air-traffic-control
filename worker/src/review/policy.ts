@@ -1,5 +1,5 @@
 import { matchesGlob } from "./repoconfig";
-import { REVIEWERS, type Approval, type Classification, type Finding, type PrState, type RawFinding, type Reviewer, type Tier, type Verdict } from "./types";
+import { REVIEWERS, type Approval, type CheckName, type Classification, type Finding, type PrState, type RawFinding, type Reviewer, type Tier, type Verdict } from "./types";
 
 /**
  * The merge policy, as pure functions (spec: "Verdict and merge policy"). Models classify and find; this code
@@ -94,6 +94,8 @@ export interface VerdictInput {
   approvals: Approval[];
   head: string;
   author: string;
+  /** The current run: the commit it checked, whether it's over, and what it ran (null: everything). None yet: null. */
+  run?: { sha: string; finished: boolean; only: CheckName[] | null } | null;
 }
 
 const blocking = (f: Finding) => f.status === "open" && f.severity === "important";
@@ -114,17 +116,24 @@ export function computeVerdict(i: VerdictInput): Verdict {
   const required = tier ? requiredApprovals(tier, needsHuman) : needsHuman ? 1 : 0;
   const counted = countApprovals(i.approvals, i.head, i.author, tier ?? "low");
 
+  const run = i.run === undefined ? { sha: i.head, finished: i.reviewDone || ciFailed, only: null } : i.run;
+  const checks: Verdict["checks"] = !run ? "not_run" : !run.finished ? "running" : run.sha !== i.head ? "stale" : run.only ? "partial" : "done";
+  const short = (sha: string) => sha.slice(0, 7);
+
   const blockers: string[] = [];
   if (i.state === "draft") blockers.push("PR is a draft");
   else if (i.state !== "ready") blockers.push(`PR is ${i.state}`);
+  if (i.state === "ready" && checks === "not_run") blockers.push("checks haven't run on this commit");
+  if (checks === "stale") blockers.push(`checks ran on ${short(run!.sha)}, the head is ${short(i.head)}: run the checks again`);
+  if (checks === "partial") blockers.push(`only some checks ran (${run!.only!.join(", ")}): run all the checks before merging`);
   if (ciFailed) blockers.push("CI failed");
-  if (i.state === "ready" && (i.ci === "pending" || review === "pending")) blockers.push("review in progress");
+  if (i.state === "ready" && checks !== "not_run" && (i.ci === "pending" || review === "pending")) blockers.push("review in progress");
   if (importantOpen.length) blockers.push(`${importantOpen.length} open important finding${importantOpen.length > 1 ? "s" : ""}`);
   if (securityOpen.length) blockers.push("open security finding");
   if (done && counted.count < required) blockers.push(`needs ${required} approval${required > 1 ? "s" : ""}, has ${counted.count}`);
   if (done && tier === "high" && required > 0 && counted.nonAuthor === 0) blockers.push("high risk: needs an approval from someone other than the author");
 
-  return { ci: i.ci, review, security, tier, requiredApprovals: required, approvals: counted.count, needsHuman, humanReasons, mergeable: blockers.length === 0, blockers };
+  return { checks, checkedSha: run?.sha ?? null, ci: i.ci, review, security, tier, requiredApprovals: required, approvals: counted.count, needsHuman, humanReasons, mergeable: blockers.length === 0, blockers };
 }
 
 export function mergeGate(v: Verdict): { ok: boolean; blockers: string[] } {

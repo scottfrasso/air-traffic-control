@@ -51,7 +51,7 @@ function harness(opts: { ci?: string | null; reviewYml?: string; owners?: string
     deps, agents, recorded, ciCalls, snapshotCalls,
     setCi: (r: typeof ciResult) => void (ciResult = r),
     cancel: () => void (current = false),
-    run: () => runReview(deps, { repo: "shop", pr: 1, sha: "h1", run: 1 }),
+    run: (only?: Array<"ci" | Reviewer>) => runReview(deps, { repo: "shop", pr: 1, sha: "h1", run: 1, ...(only ? { only } : {}) }),
   };
 }
 
@@ -321,4 +321,31 @@ test("the same bug from three reviewers is verified once and posted once, by the
   assert.equal(h.agents.started.filter((s) => s.role === "verifier").length, 2, "one verifier per bug, not per report");
   assert.deepEqual(h.recorded.findings.map((f) => [f.reviewer, f.class]).sort(), [["correctness", "off-by-one"], ["security", "command-injection"]]);
   assert.equal(h.recorded.steps.get("tests")?.status, "passed", "a reviewer whose findings were all duplicates still passed");
+});
+
+test("single checks: only security runs it alone, with no CI and no classifier", async () => {
+  const h = harness();
+  h.agents.script("security", () => ok("review.json", { findings: [] }));
+  assert.deepEqual(await h.run(["security"]), { outcome: "done" });
+  assert.deepEqual(h.agents.started.map((s) => s.role), ["security"]);
+  assert.equal(h.ciCalls.length, 0);
+  assert.equal(h.recorded.checks.length, 0, "CI wasn't asked for, so there's no CI result at all");
+  assert.equal(h.recorded.classification, null);
+  assert.equal(h.recorded.steps.get("security")?.status, "passed");
+  assert.equal(h.recorded.finished, "done");
+});
+
+test("single checks: only ci runs CI and no agent", async () => {
+  const h = harness();
+  assert.deepEqual(await h.run(["ci"]), { outcome: "done" });
+  assert.equal(h.ciCalls.length, 1);
+  assert.equal(h.agents.started.length, 0);
+  assert.deepEqual(h.recorded.checks.map((c) => [c.name, c.status]), [["test", "passed"]]);
+});
+
+test("single checks: red CI still stops the reviewers that were asked for", async () => {
+  const h = harness();
+  h.setCi([{ name: "test", status: "failed", log: "1 failing", ms: 4 }]);
+  assert.deepEqual(await h.run(["ci", "tests"]), { outcome: "ci_failed" });
+  assert.equal(h.agents.started.length, 0);
 });

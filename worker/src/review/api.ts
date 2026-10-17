@@ -3,7 +3,7 @@ import { createPushSubscription } from "../subscriptions";
 import type { Directory } from "./directory";
 import type { Caller } from "./identity";
 import type { RepoStore } from "./store";
-import type { ResolutionKind } from "./types";
+import { CHECK_NAMES, type CheckName, type ResolutionKind } from "./types";
 
 export interface ApiEnv {
   REPOS: DurableObjectNamespace<RepoStore>;
@@ -49,7 +49,8 @@ function mapError(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
   const m = (err as Error).message ?? String(err);
   if (/^no PR\d+|^no run /.test(m)) return new HttpError(404, m);
-  if (/already has an open PR|is (merged|closed|draft)$/.test(m)) return new HttpError(409, m);
+  if (/already has an open PR|is (merged|closed|draft)$|push first, or name the head/.test(m)) return new HttpError(409, m);
+  if (/^unknown check /.test(m)) return new HttpError(400, m);
   if (/branch .* not found|can't merge .* into itself/.test(m)) return new HttpError(400, m);
   return new HttpError(500, m);
 }
@@ -93,6 +94,16 @@ const routes: Route[] = [
     },
   ],
 
+  [
+    "GET",
+    /^\/api\/prs$/,
+    async (c) => {
+      // The dashboard: every repo's PRs, newest activity first.
+      const repos = await c.directory.listRepos();
+      const all = await Promise.all(repos.map(async (r) => (await c.env.REPOS.getByName(r.name).listSummaries()).map((s) => ({ repo: r.name, ...s }))));
+      return json({ prs: all.flat().sort((a, b) => b.updatedAt - a.updatedAt) });
+    },
+  ],
   ["GET", /^\/api\/repos\/([^/]+)\/prs$/, async (c) => {
     const state = new URL(c.request.url).searchParams.get("state");
     if (state && !["draft", "ready", "merged", "closed"].includes(state)) throw new HttpError(400, "state must be draft, ready, merged or closed");
@@ -113,6 +124,18 @@ const routes: Route[] = [
   ],
   ["GET", /^\/api\/repos\/([^/]+)\/prs\/(\d+)$/, async (c) => json(await store(c).getPr(prId(c)))],
   ["GET", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, async (c) => json(await store(c).getDiff(prId(c)))],
+  [
+    "POST",
+    /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/checks$/,
+    async (c) => {
+      // What an agent calls when its work is done: the gauntlet on the head (or the named commit), or single checks.
+      const b = await body<{ sha?: unknown; only?: unknown }>(c.request);
+      if (b.sha !== undefined && typeof b.sha !== "string") throw new HttpError(400, "sha must be a commit");
+      if (b.only !== undefined && (!Array.isArray(b.only) || b.only.some((x) => !CHECK_NAMES.includes(x as CheckName))))
+        throw new HttpError(400, `only must be a list of: ${CHECK_NAMES.join(", ")}`);
+      return json(await store(c).runChecks(prId(c), c.person.email, { ...(b.sha ? { sha: b.sha as string } : {}), ...(b.only ? { only: b.only as CheckName[] } : {}) }));
+    },
+  ],
   ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/ready$/, async (c) => json(await store(c).markReady(prId(c), c.person.email))],
   ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/draft$/, async (c) => (await store(c).markDraft(prId(c), c.person.email), json({ ok: true }))],
   ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/close$/, async (c) => (await store(c).closePr(prId(c), c.person.email), json({ ok: true }))],

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Directory } from "./directory";
 import type { Person } from "./identity";
 import type { RepoStore } from "./store";
+import { CHECK_NAMES, type CheckName } from "./types";
 
 export interface McpEnv {
   REPOS: DurableObjectNamespace<RepoStore>;
@@ -19,11 +20,13 @@ export function reviewTools(env: McpEnv, person: Person) {
   return {
     open_pr: async (a: { repo: string; title: string; source: string; target?: string; intent?: Record<string, string> }) =>
       repo(a.repo).openPr({ title: a.title, author: person.email, source: a.source, ...(a.target ? { target: a.target } : {}), ...(a.intent ? { intent: a.intent } : {}) }),
+    run_checks: async (a: { repo: string; pr: number; sha?: string; only?: CheckName[] }) =>
+      repo(a.repo).runChecks(a.pr, person.email, { ...(a.sha ? { sha: a.sha } : {}), ...(a.only ? { only: a.only } : {}) }),
     mark_ready: async (a: { repo: string; pr: number }) => repo(a.repo).markReady(a.pr, person.email),
     get_pr: async (a: { repo: string; pr: number }) => {
       const v = await repo(a.repo).getPr(a.pr);
       return {
-        id: v.pr.id, title: v.pr.title, state: v.pr.state, head: v.pr.head, verdict: v.verdict,
+        id: v.pr.id, title: v.pr.title, state: v.pr.state, head: v.pr.head, verdict: v.verdict, // verdict.checks: not_run | running | done | partial | stale
         checks: v.checks.map((c) => ({ name: c.name, kind: c.kind, status: c.status, log: c.status === "passed" ? undefined : c.log.slice(-2000) })),
         openFindings: v.findings.filter((f) => f.status === "open").map((f) => ({ id: f.id, reviewer: f.reviewer, severity: f.severity, file: f.file, line: f.line, class: f.class, title: f.title, evidence: f.evidence, suggestion: f.suggestion })),
       };
@@ -41,11 +44,15 @@ function server(env: McpEnv, person: Person) {
   const repo = z.string().describe("Repository name");
   const pr = z.number().int().positive().describe("PR number");
   s.registerTool("open_pr", {
-    description: "Open a draft pull request for a pushed branch. Nothing runs while it's a draft: push as often as you like, then call mark_ready. Fill in the intent (what, why, testing, risk, revert): the reviewers read it.",
+    description: "Open a draft pull request for a pushed branch. Pushes never run anything: push as often as you like, then call run_checks when the work is done. Fill in the intent (what, why, testing, risk, revert): the reviewers read it.",
     inputSchema: z.object({ repo, title: z.string().min(1), source: z.string().describe("Branch with your work"), target: z.string().optional().describe("Branch to merge into (default main)"), intent: z.object({ what: z.string(), why: z.string(), testing: z.string(), risk: z.string(), revert: z.string() }).partial().optional() }),
   }, async (a) => text(await t.open_pr(a)));
+  s.registerTool("run_checks", {
+    description: "Your work is done: run the checks on the PR's head (CI, then risk triage, then the review agents, then verification). They cost money, so call this once you're done, not after every push; pushes never run anything. Pass sha to make sure it's the commit you mean. Pass only (e.g. [\"ci\"] or [\"security\"]) to run single checks while you iterate; merging still needs a full run on the head. Then poll get_pr until verdict.checks is done.",
+    inputSchema: z.object({ repo, pr, sha: z.string().optional().describe("The commit you're done with (must be the head)"), only: z.array(z.enum(CHECK_NAMES as [CheckName, ...CheckName[]])).optional().describe("Run only these checks") }),
+  }, async (a) => text(await t.run_checks(a)));
   s.registerTool("mark_ready", {
-    description: "Mark a PR ready: CI runs, then (if green) the review agents. Every later push starts a new review of the new head. Poll get_pr until the verdict's review isn't pending.",
+    description: "Older name for run_checks with no options: runs all the checks on the head.",
     inputSchema: z.object({ repo, pr }),
   }, async (a) => text(await t.mark_ready(a)));
   s.registerTool("get_pr", {

@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS prs(
   created_at INTEGER NOT NULL,
   current_run INTEGER);                -- the run in charge; record calls from any other run are dropped
 
--- One review run per (PR, head) started by "ready" or by a push to a ready PR.
+-- One review run per trigger (run checks, or ready): for one head commit, all checks or some.
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pr INTEGER NOT NULL, sha TEXT NOT NULL,
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS runs(
   classification TEXT,                 -- JSON Classification
   ci_config TEXT,                      -- the head's .atc/ci.yml (merge re-runs it on the merged commit)
   instance TEXT NOT NULL,              -- Workflow instance id
+  scope TEXT,                          -- JSON CheckName[] for a partial run (single checks); NULL: everything
   started_at INTEGER NOT NULL, finished_at INTEGER);
 
 -- CI commands (kind ci) and pipeline steps (kind step: classifier, each reviewer, verification).
@@ -46,3 +47,8 @@ CREATE TABLE IF NOT EXISTS diffs(sha TEXT NOT NULL, base TEXT NOT NULL, diff TEX
 
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, pr INTEGER, kind TEXT NOT NULL, detail TEXT NOT NULL);
 `;
+
+/** Columns added after a store was first created: added in place, once. */
+export const REPO_MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
+  { table: "runs", column: "scope", ddl: "ALTER TABLE runs ADD COLUMN scope TEXT" },
+];
