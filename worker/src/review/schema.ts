@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS runs(
   status TEXT NOT NULL,                -- running | done | ci_failed | cancelled
   since_sha TEXT,                      -- head of the last finished run (reviewers see the diff since)
   classification TEXT,                 -- JSON Classification
+  ci_config TEXT,                      -- the head's .atc/ci.yml (merge re-runs it on the merged commit)
   instance TEXT NOT NULL,              -- Workflow instance id
   started_at INTEGER NOT NULL, finished_at INTEGER);
 

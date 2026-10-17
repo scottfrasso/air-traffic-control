@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { repoRef } from "../artifacts";
 import { computeVerdict } from "./policy";
+import { ConfigError, parseCiConfig } from "./repoconfig";
 import { REPO_SCHEMA } from "./schema";
 import type { Approval, CheckRow, Classification, Finding, Intent, Pr, PrState, RawFinding, ResolutionKind, Reviewer, StepStatus, Verdict } from "./types";
 
@@ -7,6 +9,7 @@ import type { Approval, CheckRow, Classification, Finding, Intent, Pr, PrState, 
 export interface StoreEnv {
   ARTIFACTS: Env["ARTIFACTS"];
   REVIEW_RUN: Workflow<ReviewRunParams>;
+  CHECKER: Env["CHECKER"];
 }
 
 export interface ReviewRunParams {
@@ -24,6 +27,7 @@ export type RunRow = {
   status: "running" | "done" | "ci_failed" | "cancelled";
   since_sha: string | null;
   classification: string | null;
+  ci_config: string | null;
   instance: string;
   started_at: number;
   finished_at: number | null;
@@ -335,6 +339,63 @@ export class RepoStore extends DurableObject<StoreEnv> {
     }
     if (found.length) this.log("run.findings", r.pr, { run, reviewer, count: found.length });
     return true;
+  }
+
+  async recordCiConfig(run: number, text: string | null): Promise<boolean> {
+    if (!this.current(run)) return false;
+    this.sql.exec("UPDATE runs SET ci_config = ? WHERE id = ?", text, run);
+    return true;
+  }
+
+  // ── merge ────────────────────────────────────────────────────────────
+
+  /**
+   * Merge a mergeable PR: in the container, put its head onto the target's current head, run the PR's CI on that
+   * exact commit, and fast-forward the target only if CI passes. If the target moved meanwhile, try once more on
+   * its new head. One merge at a time per repo.
+   */
+  async merge(id: number, by: string): Promise<{ ok: true; sha: string } | { ok: false; blockers: string[] }> {
+    const view = await this.getPr(id);
+    if (!view.verdict.mergeable) return { ok: false, blockers: view.verdict.blockers };
+    const lock = Number(this.meta("merging") ?? 0);
+    if (lock > Date.now() - 30 * 60_000) return { ok: false, blockers: ["another merge is in progress; try again shortly"] };
+    this.sql.exec("INSERT INTO meta(key, value) VALUES ('merging', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(Date.now()));
+    try {
+      const pr = view.pr;
+      let commands: Array<{ name: string; run: string; timeoutSeconds: number }> = [];
+      try {
+        commands = parseCiConfig(view.run?.ci_config ?? null) ?? [];
+      } catch (err) {
+        if (!(err instanceof ConfigError)) throw err;
+        return { ok: false, blockers: [err.message] };
+      }
+      const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 1800);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const target = await this.headOf(pr.target);
+        if (!target) return { ok: false, blockers: [`branch ${pr.target} not found`] };
+        const res = JSON.parse(
+          await this.env.CHECKER.getByName(`review-${this.repo}`).run({
+            mode: "merge", repo: ref, source: pr.source, target: pr.target, expectedSource: pr.head, expectedTarget: target, message: `Merge PR${id}: ${pr.title}`, commands,
+          }),
+        ) as { error?: string; merged?: boolean; sha?: string; retry?: boolean; targetHead?: string; reason?: string; checks?: Array<{ name: string; status: string; log: string; ms: number }> };
+        if (res.error) return { ok: false, blockers: [`merge failed: ${res.error}`] };
+        if (res.merged && res.sha) {
+          this.sql.exec("UPDATE prs SET state = 'merged' WHERE id = ?", id);
+          this.log("pr.merged", id, { by, sha: res.sha, head: pr.head, onto: target });
+          return { ok: true, sha: res.sha };
+        }
+        if (res.retry && res.targetHead && attempt === 0) continue; // the target moved: once more on its new head
+        const failed = (res.checks ?? []).filter((c) => c.status !== "passed");
+        if (failed.length && pr.currentRun)
+          for (const c of res.checks ?? [])
+            this.sql.exec("INSERT OR REPLACE INTO checks(run, name, kind, status, log, ms) VALUES (?, ?, 'ci', ?, ?, ?)", pr.currentRun, `merge: ${c.name}`, c.status, c.log.slice(-8000), c.ms);
+        this.log("pr.merge_refused", id, { by, reason: res.reason ?? "merge refused" });
+        return { ok: false, blockers: [res.reason ?? "merge refused"] };
+      }
+      return { ok: false, blockers: [`${pr.target} keeps moving; try again`] };
+    } finally {
+      this.sql.exec("DELETE FROM meta WHERE key = 'merging'");
+    }
   }
 
   /** The run is over. After a full review, open findings from earlier runs that weren't re-reported are fixed. */

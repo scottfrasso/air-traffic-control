@@ -32,16 +32,17 @@ function harness(opts: { ci?: string | null; reviewYml?: string; owners?: string
       recordClassification: async (_run, c) => (current ? ((recorded.classification = c), true) : false),
       recordFindings: async (_run, reviewer, fs) => (current ? (recorded.findings.push(...fs.map((f) => ({ ...f, reviewer }))), true) : false),
       finishRun: async (_run, outcome) => (current ? ((recorded.finished = outcome), true) : false),
+      recordCiConfig: async () => current,
     },
-    snapshot: async (base, sha, since): Promise<Snapshot> => {
-      snapshotCalls.push({ base, sha, since });
+    snapshot: async (pr, sha, since): Promise<Snapshot> => {
+      snapshotCalls.push({ base: pr.base, sha, since });
       const fileIds = { "repo.tar": await agents.upload("repo.tar", "TAR"), "diff.patch": await agents.upload("diff.patch", "+fix"), "pr.json": await agents.upload("pr.json", "{}") };
       return {
         fileIds, changedPaths: ["src/cart.ts"],
         config: { ci: opts.ci === undefined ? "commands:\n  - name: test\n    run: pnpm test\n" : opts.ci, review: opts.reviewYml ?? null, owners: opts.owners ?? null, reviewMd: "Watch money rounding." },
       };
     },
-    ci: async (commands, sha) => (ciCalls.push({ commands, sha }), ciResult),
+    ci: async (_pr, commands, sha) => (ciCalls.push({ commands, sha }), ciResult),
     agents,
     step: (_name, fn) => fn(),
     sleep: async () => undefined,

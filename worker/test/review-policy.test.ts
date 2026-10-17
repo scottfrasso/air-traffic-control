@@ -129,3 +129,7 @@ test("while the review runs, the PR isn't mergeable", () => {
   assert.equal(v.review, "pending");
   assert.ok(v.blockers.includes("review in progress"));
 });
+
+test("a draft PR's only blocker is being a draft (its review hasn't started, it isn't 'in progress')", () => {
+  assert.deepEqual(computeVerdict(input({ state: "draft", ci: "pending", reviewDone: false, classification: null })).blockers, ["PR is a draft"]);
+});

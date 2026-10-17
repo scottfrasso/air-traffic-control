@@ -4,7 +4,7 @@ import { applyHardRules, filterNew, tallyVotes } from "./policy";
 import { ConfigError, parseCiConfig, parseOwners, parseReviewConfig, type CiCommand } from "./repoconfig";
 import { InvalidOutput, parseClassification, parseReview, parseVotes } from "./schemas";
 import type { RepoStore } from "./store";
-import { REVIEWERS, type Classification, type RawFinding, type Reviewer, type StepStatus } from "./types";
+import { REVIEWERS, type Classification, type Pr, type RawFinding, type Reviewer, type StepStatus } from "./types";
 
 /**
  * One review run for one (PR, head commit), as plain orchestration over injected dependencies: the ReviewRun
@@ -22,13 +22,13 @@ export interface Snapshot {
   config: { ci: string | null; review: string | null; owners: string | null; reviewMd: string | null };
 }
 
-export type CiResult = { name: string; status: "passed" | "failed" | "errored"; log: string; ms: number };
+export type CiResult = { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number };
 
 export interface ReviewDeps {
-  store: Pick<RepoStore, "runContext" | "recordCheck" | "recordStep" | "recordClassification" | "recordFindings" | "finishRun">;
-  /** Build the snapshot of `sha` (diff against `base`, or against `since` on a follow-up run) and upload it. */
-  snapshot(base: string | null, sha: string, since: string | null): Promise<Snapshot>;
-  ci(commands: CiCommand[], sha: string): Promise<CiResult[]>;
+  store: Pick<RepoStore, "runContext" | "recordCheck" | "recordStep" | "recordClassification" | "recordFindings" | "recordCiConfig" | "finishRun">;
+  /** Build the snapshot of `sha` (diff against the PR's base, or against `since` on a follow-up run) and upload it. */
+  snapshot(pr: Pr, sha: string, since: string | null): Promise<Snapshot>;
+  ci(pr: Pr, commands: CiCommand[], sha: string): Promise<CiResult[]>;
   agents: AgentClient;
   /** A durable step in production (Workflow step.do); runs `fn` right away in tests. */
   step<T>(name: string, fn: () => Promise<T>): Promise<T>;
@@ -66,7 +66,8 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
   try {
     const ctx = await deps.step("context", () => deps.store.runContext(run));
     if (!ctx.current) return { outcome: "cancelled" };
-    const snap = await deps.step("snapshot", () => deps.snapshot(ctx.pr.base, params.sha, ctx.lastReviewedSha));
+    const snap = await deps.step("snapshot", () => deps.snapshot(ctx.pr, params.sha, ctx.lastReviewedSha));
+    await write(deps.store.recordCiConfig(run, snap.config.ci));
     const files = Object.entries(snap.fileIds).map(([name, fileId]) => ({ name, fileId }));
     const budgets = safe(() => parseReviewConfig(snap.config.review).budgets, parseReviewConfig(null).budgets);
 
@@ -86,7 +87,7 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
       ciSummary = "no CI configured";
     } else {
       const cmds = commands;
-      const results = await deps.step("ci", () => deps.ci(cmds, params.sha));
+      const results = await deps.step("ci", () => deps.ci(ctx.pr, cmds, params.sha));
       for (const r of results) await write(deps.store.recordCheck(run, { run, name: r.name, kind: "ci", status: r.status, log: r.log, ms: r.ms }));
       if (results.some((r) => r.status !== "passed")) {
         await write(deps.store.finishRun(run, "ci_failed"));

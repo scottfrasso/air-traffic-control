@@ -159,3 +159,61 @@ test("listPrs filters by state", async () => {
   assert.deepEqual((await s.co.listPrs("draft")).map((p) => p.title), ["other"]);
   assert.equal((await s.co.listPrs()).length, 2);
 });
+
+/** A ready PR whose run finished clean on green CI (low tier): mergeable. */
+async function mergeablePr() {
+  const { s, pr } = await withPr({ ready: true });
+  await s.co.recordCiConfig(1, "commands:\n  - name: test\n    run: pnpm test\n");
+  await s.co.recordCheck(1, { run: 1, name: "test", kind: "ci", status: "passed", log: "", ms: 1 });
+  await s.co.recordClassification(1, { tier: "low", needsHuman: false, humanReasons: [], reviewers: ["correctness"], depth: "standard" });
+  await s.co.recordStep(1, "correctness", "passed");
+  await s.co.finishRun(1, "done");
+  return { s, pr };
+}
+
+test("merge is refused with the verdict's blockers", async () => {
+  const { s, pr } = await withPr();
+  assert.deepEqual(await s.co.merge(pr.id, "ann@x"), { ok: false, blockers: ["PR is a draft"] });
+  assert.equal(s.checkerCalls.length, 0);
+});
+
+test("merge runs the PR's CI on the merged commit in the container, then marks the PR merged", async () => {
+  const { s, pr } = await mergeablePr();
+  const r = await s.co.merge(pr.id, "ann@x");
+  assert.deepEqual(r, { ok: true, sha: "merged-f1" });
+  const call = s.checkerCalls[0]!;
+  assert.deepEqual([call.mode, call.source, call.target, call.expectedSource, call.expectedTarget], ["merge", "fix", "main", "f1", "m0"]);
+  assert.deepEqual(call.commands, [{ name: "test", run: "pnpm test", timeoutSeconds: 300 }]);
+  assert.deepEqual((call.repo as { token: string }).token, "write-token");
+  assert.equal((await s.co.getPr(pr.id)).pr.state, "merged");
+});
+
+test("merge onto a target that moved meanwhile retries once on the new head", async () => {
+  const { s, pr } = await mergeablePr();
+  let calls = 0;
+  s.checker = async (input) => {
+    if (calls++ === 0) {
+      s.heads.set("main", "m1");
+      return { mode: "merge", merged: false, retry: true, reason: "main moved to m1", targetHead: "m1" }; // as container/check.ts answers
+    }
+    return { mode: "merge", merged: true, sha: `merged-onto-${String(input.expectedTarget)}`, checks: [] };
+  };
+  assert.deepEqual(await s.co.merge(pr.id, "ann@x"), { ok: true, sha: "merged-onto-m1" });
+});
+
+test("CI failing on the merged commit leaves the PR open and shows the failure", async () => {
+  const { s, pr } = await mergeablePr();
+  s.checker = async () => ({ mode: "merge", merged: false, reason: "CI failed on the merged commit", checks: [{ name: "test", status: "failed", log: "2 failing", ms: 9 }] });
+  const r = await s.co.merge(pr.id, "ann@x");
+  assert.deepEqual(r, { ok: false, blockers: ["CI failed on the merged commit"] });
+  const view = await s.co.getPr(pr.id);
+  assert.equal(view.pr.state, "ready");
+  assert.equal(view.verdict.ci, "fail");
+  assert.ok(view.checks.some((c) => c.name === "merge: test" && c.status === "failed"));
+});
+
+test("a merge conflict with the target is refused with the files", async () => {
+  const { s, pr } = await mergeablePr();
+  s.checker = async () => ({ mode: "merge", merged: false, reason: "merge conflict with main in src/a.ts", conflicts: ["src/a.ts"] });
+  assert.deepEqual(await s.co.merge(pr.id, "ann@x"), { ok: false, blockers: ["merge conflict with main in src/a.ts"] });
+});

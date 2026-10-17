@@ -38,6 +38,8 @@ export function store(repo = "shop") {
     ARTIFACTS: {
       get: async (_repo: string) => ({
         log: async ({ ref }: { ref: string }) => (heads.has(ref) ? [{ hash: heads.get(ref)! }] : []),
+        createToken: async (scope: string) => ({ plaintext: `${scope}-token` }),
+        info: async () => ({ remote: `https://artifacts.example/${repo}` }),
         [Symbol.dispose]: () => undefined,
       }),
     },
@@ -59,5 +61,5 @@ export function store(repo = "shop") {
     },
   };
   self.co = new RepoStore(ctx as never, env as never);
-  return { ...self, init: () => self.co.init(repo) };
+  return Object.assign(self, { init: () => self.co.init(repo) });
 }

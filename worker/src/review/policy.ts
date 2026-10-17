@@ -92,7 +92,7 @@ export function computeVerdict(i: VerdictInput): Verdict {
   if (i.state === "draft") blockers.push("PR is a draft");
   else if (i.state !== "ready") blockers.push(`PR is ${i.state}`);
   if (ciFailed) blockers.push("CI failed");
-  if (i.ci === "pending" || review === "pending") blockers.push("review in progress");
+  if (i.state === "ready" && (i.ci === "pending" || review === "pending")) blockers.push("review in progress");
   if (importantOpen.length) blockers.push(`${importantOpen.length} open important finding${importantOpen.length > 1 ? "s" : ""}`);
   if (securityOpen.length) blockers.push("open security finding");
   if (done && counted.count < required) blockers.push(`needs ${required} approval${required > 1 ? "s" : ""}, has ${counted.count}`);
