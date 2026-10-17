@@ -104,18 +104,47 @@ export function countMentionsFast(logFile, word) {
   const refused = await api<{ blockers: string[] }>("POST", `/api/repos/${repo}/prs/${pr.id}/merge`);
   check(refused.status === 409, `merge refused: ${(refused.body.blockers ?? []).join("; ")}`);
 
-  writeFileSync(join(work, "src/cart.js"), readFileSync(join(work, "src/cart.js"), "utf8").replace("i < items.length - 1", "i < items.length"));
-  writeFileSync(join(work, "src/report.js"), readFileSync(join(work, "src/report.js"), "utf8").replace('execSync("grep -c " + word + " " + logFile)', 'execFileSync("grep", ["-c", "--", word, logFile])').replace('import { execSync } from "node:child_process";', 'import { execFileSync } from "node:child_process";'));
+  // The whole fix, not just the two planted bugs: the first live run (10-17) rightly also flagged grep's exit 1 on no
+  // matches, regex vs plain matching, float math on cents (REVIEW.md), and the untested countMentionsFast.
+  writeFileSync(join(work, "src/cart.js"), readFileSync(join(work, "src/cart.js"), "utf8").replace(
+    "for (let i = 0; i < items.length - 1; i++) sum += Math.round(items[i].price * items[i].quantity * (1 - percent / 100));",
+    "for (const item of items) sum += Math.round((item.price * item.quantity * (100 - percent)) / 100); // integer cents, one rounding per line",
+  ));
+  writeFileSync(join(work, "src/report.js"), readFileSync(join(work, "src/report.js"), "utf8")
+    .replace('import { execSync } from "node:child_process";\n', "")
+    .replace('import { readFileSync } from "node:fs";', 'import { execFileSync } from "node:child_process";\nimport { readFileSync } from "node:fs";')
+    .replace(
+      'return Number(execSync("grep -c " + word + " " + logFile).toString().trim());',
+      `// No shell; -F matches the word literally, like countMentions. grep exits 1 when nothing matches.
+  try {
+    return Number(execFileSync("grep", ["-c", "-F", "--", word, logFile]).toString().trim());
+  } catch (err) {
+    if (err.status === 1) return 0;
+    throw err;
+  }`,
+    ));
   writeFileSync(join(work, "test/discount.test.js"), `import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { discountedTotal } from "../src/cart.js";
+import { countMentions, countMentionsFast } from "../src/report.js";
 
-test("discountedTotal discounts every line", () => {
+test("discountedTotal discounts every line, in integer cents", () => {
   assert.equal(discountedTotal([{ price: 1000, quantity: 1 }, { price: 500, quantity: 2 }], 10), 1800);
+  assert.equal(discountedTotal([{ price: 999, quantity: 1 }], 15), 849); // 849.15 rounds to 849
+  assert.equal(discountedTotal([], 10), 0);
+});
+
+test("countMentionsFast agrees with countMentions, including no matches and regex characters", () => {
+  const log = join(mkdtempSync(join(tmpdir(), "log-")), "app.log");
+  writeFileSync(log, "error a.b\\nok\\nerror axb\\n");
+  for (const word of ["error", "a.b", "missing", "; rm -rf /"]) assert.equal(countMentionsFast(log, word), countMentions(log, word), word);
 });
 `);
   git(["add", "-A"]);
-  git(["commit", "-q", "-m", "Fix the loop bound, pass grep arguments without a shell, test discounts"]);
+  git(["commit", "-q", "-m", "Fix the loop bound and cents rounding; grep without a shell, literal, 0 on no match; tests"]);
   git(["push", "-q", creds.remote, "HEAD:discounts"], { auth: creds.token });
   const head2 = git(["rev-parse", "HEAD"]);
 

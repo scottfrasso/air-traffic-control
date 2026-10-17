@@ -260,12 +260,16 @@ test("a snapshot that fails ends the run as CI errored (never 'in progress' fore
 test("an unexpected error after CI: live sessions are interrupted, the pipeline step errors, the review is incomplete", async () => {
   const h = harness();
   h.agents.script("classifier", () => classify(["correctness", "security"]));
-  h.agents.script("correctness", () => ok("review.json", { findings: [] }));
+  h.agents.script("correctness", () => ({ status: "done", outputs: { "review.json": "not json" } }));
   h.agents.script("security", () => new Promise(() => undefined)); // still running
-  const real = h.deps.store.recordFindings;
-  h.deps.store.recordFindings = async () => { throw new Error("storage exploded"); };
+  // Findings are written once every reviewer is done; a failed reviewer's step is written at once, mid-review.
+  const real = h.deps.store.recordStep;
+  h.deps.store.recordStep = async (run, name, status, detail) => {
+    if (name === "correctness") throw new Error("storage exploded");
+    return real(run, name, status, detail);
+  };
   assert.deepEqual(await h.run(), { outcome: "failed" });
-  h.deps.store.recordFindings = real;
+  h.deps.store.recordStep = real;
   assert.equal(h.recorded.steps.get("pipeline")?.status, "errored");
   assert.match(h.recorded.steps.get("pipeline")!.detail, /storage exploded/);
   assert.equal(h.recorded.finished, "done");
@@ -303,4 +307,18 @@ test("polling backs off: 10 s, then doubling, at most 60 s between polls", async
   h.agents.script("correctness", () => ok("review.json", { findings: [] }));
   await h.run();
   assert.deepEqual(sleeps.slice(0, 5), [10_000, 20_000, 40_000, 60_000, 60_000]);
+});
+
+test("the same bug from three reviewers is verified once and posted once, by the reviewer whose lane it is", async () => {
+  const h = harness();
+  h.agents.script("classifier", () => classify(["correctness", "security", "tests"]));
+  const injection = finding({ file: "src/report.js", line: 17, class: "command-injection", title: "User-controlled word concatenated into a shell command passed to execSync" });
+  h.agents.script("correctness", () => ok("review.json", { findings: [finding(), { ...injection, line: 18, class: "shell-injection" }] }));
+  h.agents.script("security", () => ok("review.json", { findings: [injection, { ...finding(), line: 5 }] }));
+  h.agents.script("tests", () => ok("review.json", { findings: [{ ...finding(), title: "skips the last item in the loop" }] }));
+  h.agents.script("verifier", () => votes(true, true, true));
+  await h.run();
+  assert.equal(h.agents.started.filter((s) => s.role === "verifier").length, 2, "one verifier per bug, not per report");
+  assert.deepEqual(h.recorded.findings.map((f) => [f.reviewer, f.class]).sort(), [["correctness", "off-by-one"], ["security", "command-injection"]]);
+  assert.equal(h.recorded.steps.get("tests")?.status, "passed", "a reviewer whose findings were all duplicates still passed");
 });

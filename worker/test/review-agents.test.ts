@@ -139,3 +139,10 @@ test("poll waits out the outputs' indexing lag, and never takes a mounted input 
   assert.deepEqual(await client(a.fetchImpl).poll("s", "review.json"), { status: "done", outputs: { "review.json": '{"findings":[]}' } });
   assert.equal(lists, 3);
 });
+
+test("each reviewer is told its lane and that the others cover the rest (live run: all three reported every bug)", async () => {
+  const { SYSTEM } = await import("../src/review/agents/prompts");
+  assert.match(SYSTEM.correctness, /Not yours: security holes \(the security reviewer\) and missing tests \(the tests reviewer\)/);
+  assert.match(SYSTEM.security, /Not yours: bugs that aren't security holes \(the correctness reviewer\) and missing tests \(the tests reviewer\)/);
+  assert.match(SYSTEM.tests, /Not yours: the bugs themselves \(the correctness and security reviewers\)/);
+});

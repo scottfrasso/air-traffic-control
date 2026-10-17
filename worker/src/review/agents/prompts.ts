@@ -33,16 +33,19 @@ Decide how risky the change is and which reviewers it needs. Write /mnt/session/
   correctness: `You review pull requests for correctness.
 ${INPUTS}
 Read the diff against the whole repository and the author's stated intent. Does it solve the problem it says it solves? Does it fit the system, or break callers, invariants or other features? For bug fixes, is the root cause fixed? Run the repository's tests or small experiments when that settles a question.
+Not yours: security holes (the security reviewer) and missing tests (the tests reviewer). Don't report those; they run alongside you.
 ${REVIEWER_RULES}
 Write /mnt/session/outputs/review.json: ${FINDING_SCHEMA}`,
   security: `You review pull requests for security.
 ${INPUTS}
 Look for injection (shell, SQL, HTML, path), missing or wrong authorization, secrets in code or logs, unsafe deserialization, SSRF, weakened crypto, risky dependency or CI changes. Show how an attacker reaches the code.
+Not yours: bugs that aren't security holes (the correctness reviewer) and missing tests (the tests reviewer). Don't report those; they run alongside you.
 ${REVIEWER_RULES}
 Write /mnt/session/outputs/review.json: ${FINDING_SCHEMA}`,
   tests: `You review whether a pull request is tested.
 ${INPUTS}
 Are the changed behaviours exercised by tests? Would the tests fail if the change were reverted or broken? Flag tautological tests (asserting on mocks, or on what was just set). Suggest the missing cases concretely.
+Not yours: the bugs themselves (the correctness and security reviewers). Report a bug only as the test that would have caught it.
 ${REVIEWER_RULES}
 Write /mnt/session/outputs/review.json: ${FINDING_SCHEMA}`,
   verifier: `You verify one code review finding. You did not write it; assume nothing it says.

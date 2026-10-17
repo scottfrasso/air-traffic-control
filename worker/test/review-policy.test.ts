@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyHardRules, atLeast, computeVerdict, countApprovals, filterNew, mergeGate, requiredApprovals, tallyVotes, type VerdictInput } from "../src/review/policy";
+import { applyHardRules, atLeast, computeVerdict, countApprovals, dedupeAcross, filterNew, mergeGate, requiredApprovals, tallyVotes, type VerdictInput } from "../src/review/policy";
 import type { Approval, Classification, Finding, RawFinding } from "../src/review/types";
 
 const cls = (over: Partial<Classification> = {}): Classification => ({ tier: "low", needsHuman: false, humanReasons: [], reviewers: ["correctness"], depth: "standard", ...over });
@@ -140,4 +140,39 @@ test("a follow-up run's classification never drops below the previous one", () =
   assert.deepEqual(atLeast(prev, next), { ...next, tier: "high", needsHuman: true, humanReasons: ["changes .atc/ci.yml"] });
   assert.deepEqual(atLeast(null, next), next);
   assert.equal(atLeast(cls({ tier: "low" }), cls({ tier: "medium" })).tier, "medium");
+});
+
+// Titles from the first live run (10-17): three reviewers reported the same bugs, and two different bugs sat on one line.
+const rf = (file: string, line: number, cls: string, title: string, severity: RawFinding["severity"] = "important"): RawFinding => ({ file, line, class: cls, title, severity, evidence: "e" });
+
+test("dedupeAcross keeps one finding per bug across reviewers, in the lane it belongs to", () => {
+  const out = dedupeAcross({
+    correctness: [
+      rf("src/report.js", 18, "shell-injection", "User-supplied word and logFile concatenated into execSync shell command"),
+      rf("src/cart.js", 13, "off-by-one", "discountedTotal loop skips the last line item"),
+      rf("src/cart.js", 13, "float-money", "Price computed with floating-point (1 - percent/100) multiplication"),
+    ],
+    tests: [
+      rf("src/cart.js", 13, "off-by-one", "discountedTotal skips the last cart line (loop bound items.length - 1)"),
+      rf("test/cart.test.js", 1, "missing-test", "New exported functions discountedTotal and countMentionsFast have no tests; CI passing only covers subtotal"),
+    ],
+    security: [
+      rf("src/report.js", 17, "command-injection", "User-controlled `word` and `logFile` concatenated into a shell command passed to execSync"),
+      rf("src/cart.js", 14, "off-by-one", "discountedTotal loop skips the last line item"),
+      rf("test/cart.test.js", 1, "missing-tests", "New exported functions discountedTotal and countMentionsFast have no tests"),
+    ],
+  });
+  const titles = (r: "correctness" | "security" | "tests") => (out[r] ?? []).map((f) => f.class).sort();
+  assert.deepEqual(titles("security"), ["command-injection"], "the injection stays with security, once");
+  assert.deepEqual(titles("correctness"), ["float-money", "off-by-one"], "a different bug on the same line is kept");
+  assert.deepEqual(titles("tests"), ["missing-test"], "the missing test stays with tests, once");
+});
+
+test("dedupeAcross never merges within one reviewer or across files", () => {
+  const out = dedupeAcross({
+    correctness: [rf("a.js", 1, "off-by-one", "loop skips the last item"), rf("a.js", 2, "off-by-one", "loop skips the last item")],
+    security: [rf("b.js", 1, "off-by-one", "loop skips the last item")],
+  });
+  assert.equal(out.correctness!.length, 2);
+  assert.equal(out.security!.length, 1);
 });

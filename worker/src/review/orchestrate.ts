@@ -1,6 +1,6 @@
 import type { AgentClient, Role, SessionResult, SessionSpec } from "./agents/client";
 import { classifierMessage, OUTPUT, reviewerMessage, verifierMessage } from "./agents/prompts";
-import { applyHardRules, atLeast, effectiveReviewers, filterNew, tallyVotes } from "./policy";
+import { applyHardRules, atLeast, dedupeAcross, effectiveReviewers, filterNew, tallyVotes } from "./policy";
 import { ConfigError, parseCiConfig, parseOwners, parseReviewConfig, type CiCommand } from "./repoconfig";
 import { InvalidOutput, parseClassification, parseReview, parseVotes } from "./schemas";
 import type { RepoStore } from "./store";
@@ -157,21 +157,25 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
     classification = { ...classification, reviewers: effectiveReviewers(classification.reviewers, ctx.open.map((f) => f.reviewer), snap.changedPaths.length > 0) };
     await write(deps.store.recordClassification(run, classification));
 
-    // ── reviewers, in parallel; each verifies its own important findings ──
-    const reviewer = async (role: Reviewer) => {
+    // ── reviewers, in parallel; then one finding per bug across them; then each verifies its own important ones ──
+    const review = async (role: Reviewer): Promise<RawFinding[] | null> => {
       const message = reviewerMessage(role, ctx.pr, { ciSummary, reviewMd: snap.config.reviewMd, since: ctx.lastReviewedSha, open: ctx.open, depth: classification.depth });
       const r = await session(role, spec(role, message, budgets.reviewer));
-      let found: RawFinding[];
+      // Findings wait for the other reviewers now, so notice a cancelled run here, not at the first write.
+      if (!(await isCurrent())) await cancel();
       try {
         if (r.status !== "done") throw new Error(failure(r));
-        found = filterNew(parseReview(r.outputs[OUTPUT[role]] ?? ""), ctx.resolved, ctx.runNumber);
+        return filterNew(parseReview(r.outputs[OUTPUT[role]] ?? ""), ctx.resolved, ctx.runNumber);
       } catch (err) {
         await write(deps.store.recordStep(run, role, "errored", err instanceof InvalidOutput ? `invalid review.json: ${err.message}` : (err as Error).message));
-        return;
+        return null;
       }
+    };
+    const post = async (role: Reviewer, found: RawFinding[], merged: number) => {
       const verified = await verify(role, found);
       await write(deps.store.recordFindings(run, role, verified.findings));
-      await write(deps.store.recordStep(run, role, "passed", `${verified.findings.length} finding(s) posted, ${verified.dropped} dropped by verification`));
+      const dupes = merged ? `, ${merged} merged with another reviewer's` : "";
+      await write(deps.store.recordStep(run, role, "passed", `${verified.findings.length} finding(s) posted, ${verified.dropped} dropped by verification${dupes}`));
       if (verified.errored) await write(deps.store.recordStep(run, `verify ${role}`, "errored", verified.errored));
     };
 
@@ -201,7 +205,10 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
       return { findings: out.filter((f): f is RawFinding => f !== null), dropped, errored };
     };
 
-    await Promise.all(classification.reviewers.map((role) => reviewer(role)));
+    const reviews = await Promise.all(classification.reviewers.map(async (role) => [role, await review(role)] as const));
+    const ran = Object.fromEntries(reviews.filter((x): x is readonly [Reviewer, RawFinding[]] => x[1] !== null));
+    const kept = dedupeAcross(ran);
+    await Promise.all(Object.entries(ran).map(([role, found]) => post(role as Reviewer, kept[role as Reviewer] ?? [], found.length - (kept[role as Reviewer] ?? []).length)));
     await write(deps.store.finishRun(run, "done"));
     return { outcome: "done" };
   } catch (err) {

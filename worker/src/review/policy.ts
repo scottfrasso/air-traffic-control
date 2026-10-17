@@ -130,3 +130,52 @@ export function computeVerdict(i: VerdictInput): Verdict {
 export function mergeGate(v: Verdict): { ok: boolean; blockers: string[] } {
   return { ok: v.mergeable, blockers: v.blockers };
 }
+
+const STOP = new Set(["the", "and", "for", "into", "with", "from", "that", "this", "when", "are", "not", "has", "have", "its", "but", "via", "new", "still", "only"]);
+const words = (f: RawFinding) =>
+  new Set(`${f.class} ${f.title}`.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !STOP.has(w)).map((w) => (w.length > 3 ? w.replace(/s$/, "") : w)));
+/** Same bug: same file, within a few lines, and most of the shorter description's words in the other. */
+const LINE_SLACK = 5;
+const SIMILAR = 0.5;
+function sameBug(a: RawFinding, b: RawFinding): boolean {
+  if (a.file !== b.file || Math.abs(a.line - b.line) > LINE_SLACK) return false;
+  const [x, y] = [words(a), words(b)];
+  let both = 0;
+  for (const w of x) if (y.has(w)) both++;
+  return both / Math.max(1, Math.min(x.size, y.size)) >= SIMILAR;
+}
+/** The reviewer a finding belongs to by what it is about. */
+function lane(f: RawFinding): Reviewer {
+  const text = `${f.class} ${f.title}`.toLowerCase();
+  if (/inject|auth|secret|ssrf|xss|csrf|traversal|deserial|crypt|sql|escap/.test(text)) return "security";
+  if (/\btests?\b|coverage|untested/.test(text)) return "tests";
+  return "correctness";
+}
+const SEVERITY_RANK: Record<RawFinding["severity"], number> = { important: 0, nit: 1, "pre-existing": 2 };
+
+/**
+ * Reviewers overlap (live run, 10-17: every reviewer reported the same off-by-one). Before verification, keep one
+ * finding per bug across reviewers: the one from the reviewer whose lane it is, else the most severe, else the first
+ * reviewer. Findings from one reviewer are never merged with each other, and different bugs on one line stay apart.
+ */
+export function dedupeAcross(byRole: Partial<Record<Reviewer, RawFinding[]>>): Partial<Record<Reviewer, RawFinding[]>> {
+  const all = REVIEWERS.flatMap((r) => (byRole[r] ?? []).map((f) => ({ r, f })));
+  const group = all.map((_, i) => i);
+  const root = (i: number): number => (group[i] === i ? i : (group[i] = root(group[i]!)));
+  for (let i = 0; i < all.length; i++)
+    for (let j = i + 1; j < all.length; j++) if (all[i]!.r !== all[j]!.r && sameBug(all[i]!.f, all[j]!.f)) group[root(j)] = root(i);
+  const keep = new Set<number>();
+  const members = new Map<number, number[]>();
+  all.forEach((_, i) => members.set(root(i), [...(members.get(root(i)) ?? []), i]));
+  for (const ids of members.values()) {
+    const best = [...ids].sort((a, b) => {
+      const [x, y] = [all[a]!, all[b]!];
+      return Number(y.r === lane(y.f)) - Number(x.r === lane(x.f)) || SEVERITY_RANK[x.f.severity] - SEVERITY_RANK[y.f.severity] || a - b;
+    })[0]!;
+    keep.add(best);
+  }
+  const out: Partial<Record<Reviewer, RawFinding[]>> = {};
+  for (const r of REVIEWERS) if (byRole[r]) out[r] = [];
+  all.forEach(({ r, f }, i) => keep.has(i) && out[r]!.push(f));
+  return out;
+}
