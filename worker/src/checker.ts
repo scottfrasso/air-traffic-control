@@ -13,6 +13,7 @@ export type CheckInput =
   | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string } }
   | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> }
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
+  | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> }
   | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> };
 

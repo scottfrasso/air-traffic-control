@@ -25,6 +25,7 @@ type Input =
   | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
   | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> }
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
+  | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
   | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] };
 
@@ -209,18 +210,23 @@ const fileAt = (sha: string, path: string): string | null => {
 
 const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
 
-function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
+/** The change of `sha` against `base` (three-dot, like a code host), or against `since` for a follow-up review. */
+function changes(i: { repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }) {
   fetchBranch(i.repo, i.target);
   fetchBranch(i.repo, i.branch);
   if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
-  // First review: the PR's whole change (three-dot, like a code host). Follow-ups: only what changed since then.
   const range = i.since ? [i.since, i.sha] : i.base ? [`${i.base}...${i.sha}`] : [`${i.sha}^`, i.sha];
   const diff = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", ...range]).out);
   const changedPaths = git(["diff", "--name-only", ...range]).out.split("\n").filter(Boolean);
+  return { diff: diff ? `${diff}\n` : "", changedPaths };
+}
+
+function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
+  const { diff, changedPaths } = changes(i);
   const tarGz = timed("archive", () => execFileSync("git", ["archive", "--format=tar.gz", i.sha], { cwd: dir, maxBuffer: SNAPSHOT_MAX_BYTES * 2 }));
   if (tarGz.byteLength > SNAPSHOT_MAX_BYTES) throw new Error(`repository archive is ${Math.round(tarGz.byteLength / 1e6)} MB, over the ${SNAPSHOT_MAX_BYTES / 1e6} MB limit`);
   return {
-    mode: "snapshot", sha: i.sha, diff: diff ? `${diff}\n` : "", changedPaths, tarGzBase64: tarGz.toString("base64"),
+    mode: "snapshot", sha: i.sha, diff, changedPaths, tarGzBase64: tarGz.toString("base64"),
     config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(i.sha, ".atc/review.yml"), owners: fileAt(i.sha, ".atc/owners"), reviewMd: fileAt(i.sha, "REVIEW.md") },
     timings,
   };
@@ -438,6 +444,7 @@ function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>):
 function run(): unknown {
   if (input.mode === "notes") return writeNotes(input.baseline, input.notes);
   if (input.mode === "snapshot") return snapshot(input);
+  if (input.mode === "diff") return { mode: "diff", ...changes(input), timings };
   if (input.mode === "ci") return ci(input);
   if (input.mode === "merge") return merge(input);
   if (input.mode === "single") {

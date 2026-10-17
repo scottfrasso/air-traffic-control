@@ -41,5 +41,8 @@ CREATE TABLE IF NOT EXISTS findings(
 -- A person's approval of one commit.
 CREATE TABLE IF NOT EXISTS approvals(pr INTEGER NOT NULL, sha TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(pr, sha, by));
 
+-- The PR diff (base...head) for the web UI, per head commit.
+CREATE TABLE IF NOT EXISTS diffs(sha TEXT NOT NULL, base TEXT NOT NULL, diff TEXT NOT NULL, paths TEXT NOT NULL, PRIMARY KEY(sha, base));
+
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, pr INTEGER, kind TEXT NOT NULL, detail TEXT NOT NULL);
 `;

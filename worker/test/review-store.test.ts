@@ -217,3 +217,15 @@ test("a merge conflict with the target is refused with the files", async () => {
   s.checker = async () => ({ mode: "merge", merged: false, reason: "merge conflict with main in src/a.ts", conflicts: ["src/a.ts"] });
   assert.deepEqual(await s.co.merge(pr.id, "ann@x"), { ok: false, blockers: ["merge conflict with main in src/a.ts"] });
 });
+
+test("the PR's diff comes from the container once per head commit, then from the cache", async () => {
+  const { s, pr } = await withPr();
+  s.checker = async (input) => ({ mode: "diff", diff: `diff for ${String(input.sha)}\n`, changedPaths: ["src/a.ts"] });
+  assert.deepEqual(await s.co.getDiff(pr.id), { sha: "f1", diff: "diff for f1\n", changedPaths: ["src/a.ts"] });
+  await s.co.getDiff(pr.id);
+  assert.equal(s.checkerCalls.filter((c) => c.mode === "diff").length, 1);
+  await s.push("fix", "f2");
+  assert.equal((await s.co.getDiff(pr.id)).diff, "diff for f2\n");
+  const call = s.checkerCalls.at(-1)!;
+  assert.deepEqual([call.branch, call.target, call.base, (call.repo as { token: string }).token], ["fix", "main", "m0", "read-token"]);
+});

@@ -33,6 +33,8 @@ export type RunRow = {
   finished_at: number | null;
 };
 
+export type EventDetail = Record<string, string | number | boolean | null | string[]>;
+
 export interface PrView {
   pr: Pr;
   run: RunRow | null;
@@ -40,7 +42,8 @@ export interface PrView {
   findings: Finding[];
   approvals: Approval[];
   verdict: Verdict;
-  events: Array<{ id: number; at: number; kind: string; detail: unknown }>;
+  /** Flat JSON (RPC typing turns `unknown` into `never`). */
+  events: Array<{ id: number; at: number; kind: string; detail: EventDetail }>;
 }
 
 type PrRow = Omit<Pr, "intent" | "createdAt" | "currentRun"> & { intent: string; created_at: number; current_run: number | null };
@@ -139,7 +142,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const events = this.sql
       .exec<{ id: number; at: number; kind: string; detail: string }>("SELECT id, at, kind, detail FROM events WHERE pr = ? ORDER BY id DESC LIMIT 50", id)
       .toArray()
-      .map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
+      .map((e) => ({ ...e, detail: JSON.parse(e.detail) as EventDetail }));
     return { pr, run, checks, findings, approvals, verdict: this.verdict(pr, run, checks, findings, approvals), events };
   }
 
@@ -345,6 +348,22 @@ export class RepoStore extends DurableObject<StoreEnv> {
     if (!this.current(run)) return false;
     this.sql.exec("UPDATE runs SET ci_config = ? WHERE id = ?", text, run);
     return true;
+  }
+
+  /** The PR's whole change for the web UI (the container's `diff` mode), cached per head commit. */
+  async getDiff(id: number): Promise<{ sha: string; diff: string; changedPaths: string[] }> {
+    const p = this.mustPr(id);
+    const base = p.base ?? "";
+    const hit = this.sql.exec<{ diff: string; paths: string }>("SELECT diff, paths FROM diffs WHERE sha = ? AND base = ?", p.head, base).toArray()[0];
+    if (hit) return { sha: p.head, diff: hit.diff, changedPaths: JSON.parse(hit.paths) as string[] };
+    const ref = await repoRef(this.env as unknown as Env, this.repo, "read", 900);
+    const out = JSON.parse(
+      await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "diff", repo: ref, branch: p.source, target: p.target, sha: p.head, base: p.base }),
+    ) as { error?: string; diff: string; changedPaths: string[] };
+    if (out.error) throw new Error(`diff failed: ${out.error}`);
+    const diff = out.diff.length > 2_000_000 ? `${out.diff.slice(0, 2_000_000)}\n… (diff truncated at 2 MB)\n` : out.diff;
+    this.sql.exec("INSERT OR REPLACE INTO diffs(sha, base, diff, paths) VALUES (?, ?, ?, ?)", p.head, base, diff, JSON.stringify(out.changedPaths));
+    return { sha: p.head, diff, changedPaths: out.changedPaths };
   }
 
   // ── merge ────────────────────────────────────────────────────────────

@@ -160,3 +160,16 @@ test("merge: refuses (retry) when the branch moved since the review", { timeout:
     r.cleanup();
   }
 });
+
+test("diff: the PR's whole change (base...head) for the web UI, without an archive", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    const d = await r.check({ mode: "diff", repo: r.ref, branch: "fix", target: "main", sha: r.head, base: r.base });
+    assert.equal(d.error, undefined, d.error);
+    assert.match(d.diff, /^\+export const n = 1;$/m);
+    assert.deepEqual(d.changedPaths.sort(), ["src/cart.ts", "src/new.ts"]);
+    assert.equal(d.tarGzBase64, undefined);
+  } finally {
+    r.cleanup();
+  }
+});

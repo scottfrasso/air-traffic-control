@@ -5,6 +5,8 @@ interface AgentmeshSecrets {
   AGENTMESH_API_KEY: string;
   /** Cloudflare API token used only to create/delete per-fork push subscriptions (ADR-0002). */
   CF_API_TOKEN: string;
+  /** Claude Managed Agents (review pipeline). Optional: without it every agent step is errored and a human must approve. */
+  ANTHROPIC_API_KEY?: string;
 }
 interface Env extends AgentmeshSecrets {}
 declare namespace Cloudflare {
