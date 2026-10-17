@@ -137,10 +137,20 @@ test("discountedTotal discounts every line, in integer cents", () => {
   assert.equal(discountedTotal([], 10), 0);
 });
 
+test("discountedTotal rounds half cents up, where float math would not (live run 4 found these)", () => {
+  assert.equal(discountedTotal([{ price: 5, quantity: 1 }], 90), 1); // 0.5; the float formula gives 0
+  assert.equal(discountedTotal([{ price: 15, quantity: 1 }], 90), 2); // 1.5
+  assert.equal(discountedTotal([{ price: 25, quantity: 1 }], 34), 17); // 16.5
+  assert.equal(discountedTotal([{ price: 25, quantity: 3 }], 34), 50); // 49.5, rounded per line
+  assert.equal(discountedTotal([{ price: 999, quantity: 2 }], 0), 1998);
+  assert.equal(discountedTotal([{ price: 999, quantity: 2 }], 100), 0);
+});
+
 test("countMentionsFast agrees with countMentions, including no matches and regex characters", () => {
   const log = join(mkdtempSync(join(tmpdir(), "log-")), "app.log");
   writeFileSync(log, "error a.b\\nok\\nerror axb\\n");
-  for (const word of ["error", "a.b", "missing", "; rm -rf /"]) assert.equal(countMentionsFast(log, word), countMentions(log, word), word);
+  for (const word of ["error", "a.b", "missing", "; rm -rf /", "-v"]) assert.equal(countMentionsFast(log, word), countMentions(log, word), word);
+  assert.throws(() => countMentionsFast(join(log, "..", "nope.log"), "x")); // grep exit 2 is an error, not 0
 });
 `);
   git(["add", "-A"]);
