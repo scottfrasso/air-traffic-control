@@ -174,3 +174,8 @@ demo/.work/
 worker-configuration.d.ts
 .DS_Store
 .playwright-mcp/
+
+# Design specs and implementation plans stay local
+docs/superpowers/specs/
+docs/superpowers/plans/
+.superpowers/
