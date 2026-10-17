@@ -6,7 +6,11 @@
 //   single typecheck one ref
 //   land   verify fork is current with baseline, typecheck it, fast-forward baseline main to it
 //   notes  attach ATC's flight logs to landed commits as git notes under refs/notes/atc
-import { execFileSync } from "node:child_process";
+// Review pipeline (worker/src/review):
+//   snapshot  the repo at a PR's head as tar.gz, its diff, changed paths, and its .atc/* + REVIEW.md config
+//   ci        run the repo's CI commands at a commit, each a check, bounded per command
+//   merge     merge a PR branch onto its target, run CI on the result, push the target only if CI passes
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { landGuard } from "./guard.ts";
@@ -19,7 +23,13 @@ type Input =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
   | { mode: "land"; fork: RepoRef & { expectedHead?: string }; baseline: RepoRef & { expectedHead: string } }
-  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
+  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> }
+  | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
+  | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] };
+
+interface CiCommand { name: string; run: string; timeoutSeconds: number }
+interface CiCheck { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number }
 
 const startedAt = Date.now(); // before the startup git lock, so "total" includes every wait (review of #36)
 /**
@@ -182,6 +192,96 @@ function fetchMain(repo: RepoRef, label: string): string {
   });
 }
 
+/** Fetch a branch of a repo (review pipeline: PRs are branches); returns the fetched sha. */
+function fetchBranch(repo: RepoRef, branch: string): string {
+  const ref = `refs/atc-branches/${repo.name}/${branch}`;
+  return withGitLock(() => {
+    timed(`fetch ${branch}`, () => git([...LOW_SPEED, "fetch", "-q", "--no-tags", repo.remote, `+refs/heads/${branch}:${ref}`], { token: repo.token, timeoutMs: FETCH_TIMEOUT_MS }));
+    return git(["rev-parse", ref]).out;
+  });
+}
+
+/** The text of `path` at `sha`, or null if it isn't there. */
+const fileAt = (sha: string, path: string): string | null => {
+  const r = git(["show", `${sha}:${path}`], { allowFail: true });
+  return r.ok ? `${r.out}\n` : null;
+};
+
+const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
+
+function snapshot(i: Extract<Input, { mode: "snapshot" }>) {
+  fetchBranch(i.repo, i.target);
+  fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
+  // First review: the PR's whole change (three-dot, like a code host). Follow-ups: only what changed since then.
+  const range = i.since ? [i.since, i.sha] : i.base ? [`${i.base}...${i.sha}`] : [`${i.sha}^`, i.sha];
+  const diff = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", ...range]).out);
+  const changedPaths = git(["diff", "--name-only", ...range]).out.split("\n").filter(Boolean);
+  const tarGz = timed("archive", () => execFileSync("git", ["archive", "--format=tar.gz", i.sha], { cwd: dir, maxBuffer: SNAPSHOT_MAX_BYTES * 2 }));
+  if (tarGz.byteLength > SNAPSHOT_MAX_BYTES) throw new Error(`repository archive is ${Math.round(tarGz.byteLength / 1e6)} MB, over the ${SNAPSHOT_MAX_BYTES / 1e6} MB limit`);
+  return {
+    mode: "snapshot", sha: i.sha, diff: diff ? `${diff}\n` : "", changedPaths, tarGzBase64: tarGz.toString("base64"),
+    config: { ci: fileAt(i.sha, ".atc/ci.yml"), review: fileAt(i.sha, ".atc/review.yml"), owners: fileAt(i.sha, ".atc/owners"), reviewMd: fileAt(i.sha, "REVIEW.md") },
+    timings,
+  };
+}
+
+/** Run CI commands in a fresh worktree at `sha`, in order; the first failure stops the rest (shown as skipped). */
+function runCi(sha: string, commands: CiCommand[]): CiCheck[] {
+  const wt = mkdtempSync(join(WORK, "ci-"));
+  const home = mkdtempSync(join(WORK, "ci-home-"));
+  const out: CiCheck[] = [];
+  try {
+    git(["worktree", "add", "-q", "--detach", wt, sha]);
+    let stopped = false;
+    for (const c of commands) {
+      if (stopped) {
+        out.push({ name: c.name, status: "skipped", log: "not run: an earlier command failed", ms: 0 });
+        continue;
+      }
+      progress(`ci ${c.name}`);
+      const t = Date.now();
+      // Only a minimal environment: the container's own variables (tokens, CHECK_INPUT) never reach repo code.
+      const r = spawnSync("sh", ["-c", `exec 2>&1\n${c.run}`], {
+        cwd: wt, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" },
+        encoding: "utf8", timeout: c.timeoutSeconds * 1000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024,
+      });
+      const ms = Date.now() - t;
+      const timedOut = (r.error as { code?: string } | undefined)?.code === "ETIMEDOUT" || r.signal === "SIGKILL";
+      const tail = (r.stdout ?? "").slice(-7800);
+      if (timedOut) out.push({ name: c.name, status: "errored", log: `${tail}\n[timed out after ${c.timeoutSeconds} s]`, ms });
+      else if (r.error) out.push({ name: c.name, status: "errored", log: `could not run: ${r.error.message}`, ms });
+      else out.push({ name: c.name, status: r.status === 0 ? "passed" : "failed", log: r.status === 0 ? tail : `${tail}\n[exit ${r.status}]`, ms });
+      stopped = out.at(-1)!.status !== "passed";
+    }
+  } finally {
+    git(["worktree", "remove", "--force", wt], { allowFail: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+  return out;
+}
+
+function ci(i: Extract<Input, { mode: "ci" }>) {
+  fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) throw new Error(`commit ${i.sha.slice(0, 7)} isn't on ${i.branch}`);
+  return { mode: "ci", checks: runCi(i.sha, i.commands), timings };
+}
+
+/** Merge queue for a PR: source onto the target's current head, CI on that exact commit, then a fast-forward push. */
+function merge(i: Extract<Input, { mode: "merge" }>) {
+  const target = fetchBranch(i.repo, i.target);
+  const source = fetchBranch(i.repo, i.source);
+  if (source !== i.expectedSource) return { mode: "merge", merged: false, retry: true, reason: `${i.source} moved to ${source.slice(0, 7)} since it was reviewed (${i.expectedSource.slice(0, 7)})` };
+  if (target !== i.expectedTarget) return { mode: "merge", merged: false, retry: true, reason: `${i.target} moved to ${target.slice(0, 7)}; merge again onto the new head`, targetHead: target };
+  const onto = ontoBase(source, target, i.message);
+  if ("conflicts" in onto) return { mode: "merge", merged: false, reason: `merge conflict with ${i.target} in ${onto.conflicts.join(", ")}`, conflicts: onto.conflicts };
+  const checks = runCi(onto.sha, i.commands);
+  if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
+  const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+  if (!push.ok) return { mode: "merge", merged: false, retry: true, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); retry`, checks };
+  return { mode: "merge", merged: true, sha: onto.sha, checks, timings };
+}
+
 const treeOf = (rev: string) => git(["rev-parse", `${rev}^{tree}`]).out;
 
 /** Main's incremental TypeScript state for a baseline commit, computed once and cached by tree. */
@@ -337,6 +437,9 @@ function writeNotes(base: RepoRef, notes: Array<{ sha: string; note: string }>):
 
 function run(): unknown {
   if (input.mode === "notes") return writeNotes(input.baseline, input.notes);
+  if (input.mode === "snapshot") return snapshot(input);
+  if (input.mode === "ci") return ci(input);
+  if (input.mode === "merge") return merge(input);
   if (input.mode === "single") {
     // "Green" means: this PR, merged onto the CURRENT main, typechecks. That's what would land.
     const base = input.baseline ? fetchMain(input.baseline, "baseline") : null;

@@ -80,9 +80,6 @@ importers:
       agents:
         specifier: 0.28.0
         version: 0.28.0(@babel/core@8.0.7)(@babel/runtime@7.29.10)(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@modelcontextprotocol/server@2.0.0)(react@19.2.0)(rolldown@1.2.13)(zod@4.6.5)
-      diff:
-        specifier: ^9.0.0
-        version: 9.0.0
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -93,9 +90,6 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261010.1
         version: 5.20261010.1
-      '@types/diff':
-        specifier: ^8.0.0
-        version: 8.0.0
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
@@ -1328,10 +1322,6 @@ packages:
   '@tybys/wasm-util@0.10.4':
     resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
 
-  '@types/diff@8.0.0':
-    resolution: {integrity: sha512-o7jqJM04gfaYrdCecCVMbZhNdG6T1MHg/oQoRFdERLV+4d+V7FijhiEAbFu0Usww84Yijk9yH58U4Jk4HbtzZw==}
-    deprecated: This is a stub types definition. diff provides its own type definitions, so you do not need this installed.
-
   '@types/dom-mediacapture-transform@0.1.12':
     resolution: {integrity: sha512-d7/QsLRwF864A5mgIM/YrfiglHoYn7zgCcAoJgW404r+2DwnNr7EBbLnCWpmOMgH8y0te73L1AV6H1bmauaWFw==}
 
@@ -1770,10 +1760,6 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
-
-  diff@9.0.0:
-    resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
-    engines: {node: '>=0.3.1'}
 
   dot-case@3.0.4:
     resolution: {integrity: sha512-Kv5nKlh6yRrdrGvxeJ2e5y2eRUpkUosIW4A2AS38zwSz27zu7ufDwQPi5Jhs3XAlGNetl3bmnGhQsMtkKJnj3w==}
@@ -3895,10 +3881,6 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@types/diff@8.0.0':
-    dependencies:
-      diff: 9.0.0
-
   '@types/dom-mediacapture-transform@0.1.12':
     dependencies:
       '@types/dom-webcodecs': 0.1.13
@@ -4246,8 +4228,6 @@ snapshots:
   depd@2.0.0: {}
 
   detect-libc@2.1.2: {}
-
-  diff@9.0.0: {}
 
   dot-case@3.0.4:
     dependencies:

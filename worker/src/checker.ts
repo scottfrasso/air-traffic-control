@@ -11,7 +11,19 @@ export type CheckInput =
   | { mode: "single"; repo: RepoRef; baseline?: RepoRef }
   | { mode: "pair"; a: RepoRef; b: RepoRef; baseline?: RepoRef }
   | { mode: "land"; fork: RepoRef & { expectedHead: string }; baseline: RepoRef & { expectedHead: string } }
-  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> };
+  | { mode: "notes"; baseline: RepoRef; notes: Array<{ sha: string; note: string }> }
+  | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
+  | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> }
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: Array<{ name: string; run: string; timeoutSeconds: number }> };
+
+/**
+ * How long one container run may take before it's killed. CI and merges run the repo's own commands (each bounded by
+ * its own timeout), so they get the sum plus slack for fetching, capped at an hour; everything else the fixed limit.
+ */
+export function runTimeoutSeconds(input: CheckInput): number {
+  if (input.mode === "ci" || input.mode === "merge") return Math.min(3600, 120 + input.commands.reduce((s, c) => s + c.timeoutSeconds, 0));
+  return CHECK_TIMEOUT_S;
+}
 
 export interface TsError {
   file: string;
@@ -94,7 +106,7 @@ export class Checker extends DurableObject<Env> {
   /** Run one check; returns the JSON result as a string (keeps the RPC boundary simple). */
   async run(input: CheckInput): Promise<string> {
     const c = await this.container();
-    const proc = await c.exec(["timeout", "--kill-after=5", String(CHECK_TIMEOUT_S), "node", "/opt/agentmesh/check.ts"], {
+    const proc = await c.exec(["timeout", "--kill-after=5", String(runTimeoutSeconds(input)), "node", "/opt/agentmesh/check.ts"], {
       env: { CHECK_INPUT: JSON.stringify(input), PATH: "/usr/local/bin:/usr/bin:/bin" },
     });
     const out = await proc.output();
