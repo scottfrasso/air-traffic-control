@@ -22,8 +22,6 @@
     {
       "class_name": "Checker",
       "scheduling_policy": "durable_object",
-      // At most this many checker containers at once, across every repo (cost cap; security review, 10-23).
-      "max_instances": 10,
       "images": { "checker": { "dockerfile": "./container/Dockerfile" } }
     }
   ],

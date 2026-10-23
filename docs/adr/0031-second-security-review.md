@@ -27,7 +27,8 @@ good once the container's cache was cold. `pnpm audit` reported 11 advisories (6
   reviewers as `open-findings.json`, never inside the instructions. Changed paths come from `git diff -z` (real names:
   quoted non-ASCII paths no longer escape `.atc/owners` globs).
 - **Cost.** A person may start 200 runs a day across all repos (`REVIEW_MAX_RUNS_PER_PERSON_PER_DAY`, counted only
-  when a run actually starts); at most 10 checker containers run at once (`max_instances`).
+  when a run actually starts). Containers are one per repo (a Durable Object each; wrangler doesn't allow
+  `max_instances` for those), so the 50-repos-per-person cap bounds how many one person can run at once.
 - **Identity.** A bearer that isn't a valid personal token is refused (never retried as the Access cookie); a JWT must
   carry the team's issuer and be past its `nbf`; a token can revoke itself (others still need Access); tokens from
   before expiry existed now expire 90 days after creation.
