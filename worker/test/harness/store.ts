@@ -43,8 +43,8 @@ export function store(repo = "shop") {
     ARTIFACTS: {
       get: async (_repo: string) => ({
         log: async ({ ref }: { ref: string }) => {
-          const name = ref.replace(/^refs\/heads\//, "");
-          return heads.has(name) ? [{ hash: heads.get(name)! }] : [];
+          // Like Artifacts (seen live 10-23): a bare branch name resolves, "refs/heads/<name>" doesn't.
+          return heads.has(ref) ? [{ hash: heads.get(ref)! }] : [];
         },
         createToken: async (scope: string) => ({ plaintext: `${scope}-token` }),
         info: async () => ({ remote: `https://artifacts.example/${repo}` }),

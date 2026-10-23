@@ -21,7 +21,6 @@ good once the container's cache was cold. `pnpm audit` reported 11 advisories (6
   back on the protected commit (the guard clears it).
 - **The guard ignores abandoned locks.** The merge lock stores its start and time limit; a lock past its limit (a
   crash, a deploy mid-merge) no longer switches the guard off. A merge calls the guard itself when it has to.
-- **Heads by full ref name** (`refs/heads/<branch>`), so a tag named `main` can't stand in for the branch.
 - **Findings.** With no last reviewed commit (say the first run was cancelled), nothing earlier becomes fixed. A
   finding labelled "pre-existing" on a line the PR adds is important (and verified). Earlier open findings go to
   reviewers as `open-findings.json`, never inside the instructions. Changed paths come from `git diff -z` (real names:
@@ -52,3 +51,6 @@ good once the container's cache was cold. `pnpm audit` reported 11 advisories (6
   - The admin bootstrap can mint a token for any email; remove it once Access is set up.
   - CI containers have open internet egress; `workers_dev` is on (set it off behind a custom domain with Access).
   - `safe.directory` is `*` in the image.
+  - Heads are read by bare branch name: Artifacts' `log` doesn't resolve `refs/heads/<branch>` (tried live; every
+    branch came back missing), so whether a tag named `main` could shadow the branch is unconfirmed. The restore
+    itself uses `refs/heads/main` (ls-remote, force-with-lease), so it never acts on a tag.

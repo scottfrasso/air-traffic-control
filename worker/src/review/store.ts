@@ -143,8 +143,9 @@ export class RepoStore extends DurableObject<StoreEnv> {
 
   private async headOf(branch: string): Promise<string | null> {
     using repo = await this.env.ARTIFACTS.get(this.repo);
-    // The full ref name: a tag called "main" must never stand in for the branch (security review, 10-23).
-    return (await repo.log({ ref: `refs/heads/${branch}`, limit: 1 }))[0]?.hash ?? null;
+    // A bare branch name: Artifacts' log doesn't resolve "refs/heads/<branch>" (seen live 10-23: every branch came back
+    // missing). Whether a tag of the same name could shadow the branch is unconfirmed (ADR-0031, known limits).
+    return (await repo.log({ ref: branch, limit: 1 }))[0]?.hash ?? null;
   }
 
   // ── PRs ──────────────────────────────────────────────────────────────

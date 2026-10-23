@@ -702,16 +702,3 @@ test("without a last reviewed commit, nothing earlier is marked fixed (a cancell
   await fullDone(s, b.run, { reviewers: ["correctness", "security"] });
   assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open");
 });
-
-test("heads are read by full ref name, so a tag called main can't stand in for the branch", async () => {
-  const { s } = await withPr();
-  const refs: string[] = [];
-  const env = (s.co as unknown as { env: { ARTIFACTS: { get: (r: string) => Promise<Record<string, unknown>> } } }).env;
-  const get = env.ARTIFACTS.get;
-  env.ARTIFACTS.get = async (r: string) => {
-    const h = await get(r);
-    return { ...h, log: async (o: { ref: string }) => (refs.push(o.ref), (h.log as (o: { ref: string }) => Promise<unknown>)(o)) };
-  };
-  await s.co.alarm();
-  assert.ok(refs.length && refs.every((r) => r.startsWith("refs/heads/")), JSON.stringify(refs));
-});
