@@ -1,7 +1,9 @@
 # Checker container for the review pipeline: snapshots, CI commands, merges (ADR-0010, ADR-0027).
-# Pinned by digest (node:24-trixie-slim on 2026-10-17): a re-tagged base image can't change what runs here.
-FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
+# Pinned by digest (node:24-trixie-slim on 2026-10-23): a re-tagged base image can't change what runs here. Bump it
+# for security fixes; the upgrade below also takes the Debian security updates published since the image was built.
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
 RUN apt-get update \
+  && apt-get upgrade --yes --no-install-recommends \
   && apt-get install --yes --no-install-recommends ca-certificates git procps \
   && rm -rf /var/lib/apt/lists/*
 # pnpm and yarn for repos' own CI commands (.atc/ci.yml).

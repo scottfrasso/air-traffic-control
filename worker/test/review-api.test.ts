@@ -323,3 +323,24 @@ test("a repo's own events (main protection) are readable", async () => {
   assert.equal(r.status, 200);
   assert.ok((r.body.events as Array<{ kind: string }>).some((e) => e.kind === "branch.protected"));
 });
+
+test("MCP over HTTP: initialize, then tools/list names the review tools (the MCP SDK's transport, not just our functions)", async () => {
+  const a = await app();
+  const rpc = async (body: unknown, session?: string) => {
+    const res = await handle(new Request("https://atc.example/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json", accept: "application/json, text/event-stream", ...(session ? { "mcp-session-id": session } : {}) },
+      body: JSON.stringify(body),
+    }), a.env as never, { waitUntil: () => undefined, passThroughOnException: () => undefined } as never);
+    const text = await res.text();
+    const json = text.trim().startsWith("{") ? JSON.parse(text) : JSON.parse(text.split("\n").find((l) => l.startsWith("data: "))!.slice(6));
+    return { status: res.status, session: res.headers.get("mcp-session-id") ?? undefined, json };
+  };
+  const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  assert.equal(init.status, 200, JSON.stringify(init.json));
+  assert.equal(init.json.result.serverInfo.name, "atc-review");
+  const list = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, init.session);
+  assert.deepEqual((list.json.result.tools as Array<{ name: string }>).map((t) => t.name).sort(), ["get_pr", "mark_ready", "open_pr", "resolve_finding", "run_checks"]);
+  const call = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_pr", arguments: { repo: "nope", pr: 1 } } }, init.session);
+  assert.match(JSON.stringify(call.json), /no repo nope/);
+});

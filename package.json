@@ -9,5 +9,12 @@
     "setup:agents": "pnpm --dir demo exec tsx src/setup-agents.ts",
     "e2e:review": "pnpm --dir demo exec tsx src/review-e2e.ts"
   },
-  "packageManager": "pnpm@10.13.1"
+  "packageManager": "pnpm@10.34.7",
+  "pnpm": {
+    "overrides": {
+      "@modelcontextprotocol/sdk": "^1.32.1",
+      "@modelcontextprotocol/client": "^2.3.1",
+      "ip-address": "^10.7.4"
+    }
+  }
 }
