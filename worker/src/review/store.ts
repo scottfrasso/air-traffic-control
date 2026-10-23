@@ -27,6 +27,8 @@ const PROTECTED_KEY = "protected:main";
 const FROZEN_KEY = "frozen:main";
 /** A hidden ref holding the protected commit, so a restore can fetch it even after a force push and a cold cache. */
 const PROTECTED_REF = "refs/atc/protected/main";
+/** The protected commit last saved under PROTECTED_REF. */
+const KEPT_KEY = "kept:main";
 /** How often the store checks main itself, in case a push event never comes (a new repo's first minutes; seen 10-17). */
 const PROTECT_EVERY_MS = 2 * 60_000;
 const MAX_TITLE = 200;
@@ -131,7 +133,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
 
   override async alarm(): Promise<void> {
     try {
-      if (this.meta("repo")) await this.guardProtected(null);
+      if (this.meta("repo")) {
+        await this.guardProtected(null);
+        await this.keepProtected();
+      }
     } finally {
       await this.ctx.storage.setAlarm(Date.now() + PROTECT_EVERY_MS);
     }
@@ -173,7 +178,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
     const [head, base] = await Promise.all([this.headOf(input.source), this.headOf(target)]);
     if (!head) throw new Error(`branch ${input.source} not found in ${this.repo}`);
     if (!base) throw new Error(`branch ${target} not found in ${this.repo}`);
-    if (target === PROTECTED_BRANCH && !this.meta(PROTECTED_KEY)) this.setMeta(PROTECTED_KEY, base);
+    if (target === PROTECTED_BRANCH && !this.meta(PROTECTED_KEY)) {
+      this.setMeta(PROTECTED_KEY, base);
+      this.ctx.waitUntil(this.keepProtected().catch(() => undefined)); // saved now; the alarm retries if this fails
+    }
     await this.keepWatching();
     const intent = Object.fromEntries(Object.keys(EMPTY_INTENT).map((k) => {
       const v = (input.intent as Record<string, unknown> | undefined)?.[k];
@@ -308,6 +316,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
       known = before && !/^0+$/.test(before) ? before : live;
       this.setMeta(PROTECTED_KEY, known);
       this.log("branch.protected", null, { branch: PROTECTED_BRANCH, sha: known });
+      this.ctx.waitUntil(this.keepProtected().catch(() => undefined));
     }
     if (live === known) {
       if (this.meta(FROZEN_KEY)) this.sql.exec("DELETE FROM meta WHERE key = ?", FROZEN_KEY);
@@ -322,6 +331,20 @@ export class RepoStore extends DurableObject<StoreEnv> {
     // A restore that fails freezes merges: nothing may build on a main nobody reviewed until it's back.
     else this.setMeta(FROZEN_KEY, `main is at ${(live ?? "nothing").slice(0, 7)}, not ${known.slice(0, 7)}: ${(res.error ?? res.reason ?? "").slice(0, 200)}`);
     this.log(res.restored ? "branch.restored" : "branch.restore_failed", null, { branch: PROTECTED_BRANCH, from: live, to: known, eventSha, ...(res.restored ? {} : { reason: (res.error ?? res.reason ?? "").slice(0, 300) }) });
+  }
+
+  /**
+   * Save the protected commit under the hidden ref as soon as it's known (not only at the first merge), so a force push
+   * to an unrelated history can still be undone (seen live 10-23: a never-merged repo's restore had nothing to fetch).
+   * Only while main is on it; the alarm retries until it's saved.
+   */
+  private async keepProtected(): Promise<void> {
+    const known = this.meta(PROTECTED_KEY);
+    if (!known || this.meta(KEPT_KEY) === known) return;
+    if ((await this.headOf(PROTECTED_BRANCH)) !== known) return;
+    const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);
+    const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "keep", repo: ref, branch: PROTECTED_BRANCH, sha: known, keepRef: PROTECTED_REF })) as { kept?: boolean };
+    if (res.kept) this.setMeta(KEPT_KEY, known);
   }
 
   /** A merge holds the lock, and it isn't one a crash or a deploy abandoned (older than its own time limit). */
@@ -677,7 +700,10 @@ export class RepoStore extends DurableObject<StoreEnv> {
         ) as { error?: string; merged?: boolean; sha?: string; retry?: boolean; targetHead?: string; reason?: string; checks?: Array<{ name: string; status: string; log: string; ms: number }> };
         if (res.error) return { ok: false, blockers: [`merge failed: ${res.error}`] };
         if (res.merged && res.sha) {
-          if (pr.target === PROTECTED_BRANCH) this.setMeta(PROTECTED_KEY, res.sha); // the merge's own push stays
+          if (pr.target === PROTECTED_BRANCH) {
+            this.setMeta(PROTECTED_KEY, res.sha); // the merge's own push stays
+            this.setMeta(KEPT_KEY, res.sha); // and the container saved it under the hidden ref
+          }
           this.sql.exec("UPDATE prs SET state = 'merged' WHERE id = ?", id);
           this.log("pr.merged", id, { by, sha: res.sha, head: pr.head, onto: target });
           return { ok: true, sha: res.sha };

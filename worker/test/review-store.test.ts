@@ -244,7 +244,7 @@ test("merge runs the PR's CI on the merged commit in the container, then marks t
   const { s, pr } = await mergeablePr();
   const r = await s.co.merge(pr.id, "ann@x");
   assert.deepEqual(r, { ok: true, sha: "merged-f1" });
-  const call = s.checkerCalls[0]!;
+  const call = s.checkerCalls.find((c) => c.mode === "merge")!;
   assert.deepEqual([call.mode, call.source, call.target, call.expectedSource, call.expectedTarget], ["merge", "fix", "main", "f1", "m0"]);
   assert.deepEqual(call.commands, [{ name: "test", run: "pnpm test", timeoutSeconds: 300 }]);
   assert.deepEqual((call.repo as { token: string }).token, "write-token");
@@ -701,4 +701,17 @@ test("without a last reviewed commit, nothing earlier is marked fixed (a cancell
   await s.co.recordDelta(b.run, null);
   await fullDone(s, b.run, { reviewers: ["correctness", "security"] });
   assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open");
+});
+
+test("the protected commit is saved under the hidden ref as soon as it's known, not only at the first merge", async () => {
+  const { s } = await withPr(); // main protected at m0 when the PR was opened
+  const fallback = s.checker;
+  s.checker = async (input) => (input.mode === "keep" ? { mode: "keep", kept: true } : fallback(input));
+  await new Promise((r) => setTimeout(r, 20)); // the save runs in the background (waitUntil)
+  const keep = s.checkerCalls.find((c) => c.mode === "keep"); // tried right when the PR was opened
+  assert.deepEqual(keep && [keep.branch, keep.sha, keep.keepRef], ["main", "m0", "refs/atc/protected/main"]);
+  await s.co.alarm(); // and the alarm makes sure it's saved (the first try's fake answer didn't say "kept")
+  const n = s.checkerCalls.length;
+  await s.co.alarm();
+  assert.equal(s.checkerCalls.length, n, "once saved, not again");
 });

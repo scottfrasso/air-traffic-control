@@ -400,3 +400,14 @@ test("ci: each job gets its own temp directory, not the shared /tmp", { timeout:
     r.cleanup();
   }
 });
+
+test("keep: saves a commit of the branch under the hidden ref", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    const out = await r.check({ mode: "keep", repo: r.ref, branch: "main", sha: r.base, keepRef: "refs/atc/protected/main" });
+    assert.equal(out.kept, true, out.reason ?? out.error);
+    assert.equal(execFileSync("git", ["rev-parse", "refs/atc/protected/main"], { cwd: r.remote, encoding: "utf8" }).trim(), r.base);
+  } finally {
+    r.cleanup();
+  }
+});

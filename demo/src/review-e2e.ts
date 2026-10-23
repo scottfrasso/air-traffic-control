@@ -119,7 +119,9 @@ export function countMentionsFast(logFile, word) {
     .replace('import { readFileSync } from "node:fs";', 'import { execFileSync } from "node:child_process";\nimport { readFileSync } from "node:fs";')
     .replace(
       'return Number(execSync("grep -c " + word + " " + logFile).toString().trim());',
-      `// No shell; -F matches the word literally, like countMentions. grep exits 1 when nothing matches.
+      `// No shell; -F matches the word literally, like countMentions. grep exits 1 when nothing matches. An empty or
+  // multi-line word means something else to grep, so those take the plain count.
+  if (!word || word.includes("\\n")) return countMentions(logFile, word);
   try {
     return Number(execFileSync("grep", ["-c", "-F", "--", word, logFile]).toString().trim());
   } catch (err) {
@@ -152,8 +154,8 @@ test("discountedTotal rounds half cents up, where float math would not (live run
 
 test("countMentionsFast agrees with countMentions, including no matches and regex characters", () => {
   const log = join(mkdtempSync(join(tmpdir(), "log-")), "app.log");
-  writeFileSync(log, "error a.b\\nok\\nerror axb\\n");
-  for (const word of ["error", "a.b", "missing", "; rm -rf /", "-v"]) assert.equal(countMentionsFast(log, word), countMentions(log, word), word);
+  writeFileSync(log, "error a.b\\nok\\nerror axb\\nuse -v here\\n");
+  for (const word of ["error", "a.b", "missing", "; rm -rf /", "-v", "", "a\\nb"]) assert.equal(countMentionsFast(log, word), countMentions(log, word), JSON.stringify(word));
   assert.throws(() => countMentionsFast(join(log, "..", "nope.log"), "x")); // grep exit 2 is an error, not 0
 });
 `);

@@ -18,7 +18,8 @@ type Input =
   | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
   | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[]; keepRef?: string }
-  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string; keepRef?: string };
+  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string; keepRef?: string }
+  | { mode: "keep"; repo: RepoRef; branch: string; sha: string; keepRef: string };
 
 interface CiCommand { name: string; run: string; timeoutSeconds: number }
 interface CiCheck { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number }
@@ -369,6 +370,14 @@ function ontoTarget(head: string, target: string, message: string): { sha: strin
  * Put `branch` back to `sha`, but only if it is still at `current` (force-with-lease): a later legitimate move, such
  * as a merge landing meanwhile, is never undone.
  */
+/** Save `sha` (a commit of `branch`) under the hidden ref, so a later restore can fetch it after any force push. */
+function keep(i: Extract<Input, { mode: "keep" }>) {
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) return { mode: "keep", kept: false, reason: `${i.sha.slice(0, 7)} isn't on ${i.branch}`, timings };
+  const push = git([...LOW_SPEED, "push", "-q", "--force", i.repo.remote, `${i.sha}:${i.keepRef}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS });
+  return push.ok ? { mode: "keep", kept: true, timings } : { mode: "keep", kept: false, reason: push.out.slice(-300), timings };
+}
+
 function restore(i: Extract<Input, { mode: "restore" }>) {
   // Where the branch is now ("" if it was deleted), from the remote itself.
   const ls = git([...LOW_SPEED, "ls-remote", i.repo.remote, `refs/heads/${i.branch}`], { token: i.repo.token, timeoutMs: FETCH_TIMEOUT_MS }).out.split(/\s/)[0] ?? "";
@@ -397,6 +406,7 @@ async function run(): Promise<unknown> {
   }
   if (input.mode === "ci") return ci(input);
   if (input.mode === "restore") return restore(input);
+  if (input.mode === "keep") return keep(input);
   return merge(input);
 }
 
