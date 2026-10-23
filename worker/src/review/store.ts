@@ -23,6 +23,10 @@ export interface StoreEnv {
 /** The branch only merges may move (other targets aren't protected yet). */
 const PROTECTED_BRANCH = "main";
 const PROTECTED_KEY = "protected:main";
+/** Set while main is off its protected commit and a restore failed: merges wait (security review, 10-23). */
+const FROZEN_KEY = "frozen:main";
+/** A hidden ref holding the protected commit, so a restore can fetch it even after a force push and a cold cache. */
+const PROTECTED_REF = "refs/atc/protected/main";
 /** How often the store checks main itself, in case a push event never comes (a new repo's first minutes; seen 10-17). */
 const PROTECT_EVERY_MS = 2 * 60_000;
 const MAX_TITLE = 200;
@@ -139,7 +143,8 @@ export class RepoStore extends DurableObject<StoreEnv> {
 
   private async headOf(branch: string): Promise<string | null> {
     using repo = await this.env.ARTIFACTS.get(this.repo);
-    return (await repo.log({ ref: branch, limit: 1 }))[0]?.hash ?? null;
+    // The full ref name: a tag called "main" must never stand in for the branch (security review, 10-23).
+    return (await repo.log({ ref: `refs/heads/${branch}`, limit: 1 }))[0]?.hash ?? null;
   }
 
   // ── PRs ──────────────────────────────────────────────────────────────
@@ -294,19 +299,34 @@ export class RepoStore extends DurableObject<StoreEnv> {
    * If the creating push's event was missed (it can come before the repo's subscription is live; seen 10-17), the
    * first event seen trusts where main was *before* it, not the push itself.
    */
-  private async guardProtected(eventSha: string | null, before?: string): Promise<void> {
+  private async guardProtected(eventSha: string | null, before?: string, fromMerge = false): Promise<void> {
     const live = await this.headOf(PROTECTED_BRANCH);
-    if (!live) return;
     let known = this.meta(PROTECTED_KEY);
     if (!known) {
+      if (!live) return; // no main yet
       known = before && !/^0+$/.test(before) ? before : live;
       this.setMeta(PROTECTED_KEY, known);
       this.log("branch.protected", null, { branch: PROTECTED_BRANCH, sha: known });
     }
-    if (live === known || this.meta("merging")) return; // a merge in progress records its own push when it lands
+    if (live === known) {
+      if (this.meta(FROZEN_KEY)) this.sql.exec("DELETE FROM meta WHERE key = ?", FROZEN_KEY);
+      return;
+    }
+    // A merge in progress moves main itself and records it when it lands; an abandoned lock doesn't count.
+    if (!fromMerge && this.mergeInProgress()) return;
+    // Deleted (live null) or moved: put it back. The container re-creates a deleted main (security review, 10-23).
     const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);
-    const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "restore", repo: ref, branch: PROTECTED_BRANCH, sha: known, current: live })) as { error?: string; restored?: boolean; reason?: string };
+    const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "restore", repo: ref, branch: PROTECTED_BRANCH, sha: known, current: live ?? "", keepRef: PROTECTED_REF })) as { error?: string; restored?: boolean; reason?: string };
+    if (res.restored) this.sql.exec("DELETE FROM meta WHERE key = ?", FROZEN_KEY);
+    // A restore that fails freezes merges: nothing may build on a main nobody reviewed until it's back.
+    else this.setMeta(FROZEN_KEY, `main is at ${(live ?? "nothing").slice(0, 7)}, not ${known.slice(0, 7)}: ${(res.error ?? res.reason ?? "").slice(0, 200)}`);
     this.log(res.restored ? "branch.restored" : "branch.restore_failed", null, { branch: PROTECTED_BRANCH, from: live, to: known, eventSha, ...(res.restored ? {} : { reason: (res.error ?? res.reason ?? "").slice(0, 300) }) });
+  }
+
+  /** A merge holds the lock, and it isn't one a crash or a deploy abandoned (older than its own time limit). */
+  private mergeInProgress(): boolean {
+    const [at, limitMs] = (this.meta("merging") ?? "").split(":").map(Number);
+    return !!at && at > Date.now() - (limitMs || 2 * 3600_000);
   }
 
   private setMeta(key: string, value: string) {
@@ -320,7 +340,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
    * still going on an older head, since one run is in charge of a PR. Every state change happens before the first
    * await, so two calls at once start one run.
    */
-  async runChecks(id: number, by: string, opts: { sha?: string; only?: CheckName[] } = {}): Promise<{ run: number }> {
+  async runChecks(id: number, by: string, opts: { sha?: string; only?: CheckName[] } = {}): Promise<{ run: number; started?: true }> {
     let p = this.mustPr(id);
     if (!OPEN_STATES.includes(p.state)) throw new Error(`PR${id} is ${p.state}`);
     for (const c of opts.only ?? []) if (!CHECK_NAMES.includes(c)) throw new Error(`unknown check ${c}: use ${CHECK_NAMES.join(", ")}`);
@@ -357,7 +377,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
     if (stopped) await this.terminate(stopped);
     // If it can't start, the PR keeps the result it had (a finished run), not "never checked".
     await this.launch(id, run, only, cur && cur.status !== "running" ? cur.id : null);
-    return { run };
+    return { run, started: true };
   }
 
   /** No failed or errored check in it, CI at merge time included. */
@@ -603,6 +623,8 @@ export class RepoStore extends DurableObject<StoreEnv> {
     if (out.error) throw new Error(`diff failed: ${out.error}`);
     const diff = out.diff.length > 2_000_000 ? `${out.diff.slice(0, 2_000_000)}\n… (diff truncated at 2 MB)\n` : out.diff;
     this.sql.exec("INSERT OR REPLACE INTO diffs(sha, base, diff, paths) VALUES (?, ?, ?, ?)", p.head, base, diff, JSON.stringify(out.changedPaths));
+    // Up to 2 MB each: keep only the most recent few (security review, 10-23).
+    this.sql.exec("DELETE FROM diffs WHERE rowid NOT IN (SELECT rowid FROM diffs ORDER BY rowid DESC LIMIT 20)");
     return { sha: p.head, diff, changedPaths: out.changedPaths };
   }
 
@@ -626,11 +648,22 @@ export class RepoStore extends DurableObject<StoreEnv> {
     // One limit for the whole merge, from what the container may take (CI on the merged commit, twice if the target
     // moved), so the push token and the lock both outlive it (code review, 10-17).
     const limitS = 2 * runTimeoutSeconds({ mode: "merge", commands } as never) + 300;
-    const lock = Number(this.meta("merging") ?? 0);
-    if (lock > Date.now() - limitS * 1000) return { ok: false, blockers: ["another merge is in progress; try again shortly"] };
-    this.sql.exec("INSERT INTO meta(key, value) VALUES ('merging', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(Date.now()));
+    const pr = view.pr;
+    // main moves only by a merge, so a merge onto main builds only on the protected commit: a direct push the guard
+    // hasn't put back yet must never become a merge's parent (security review, 10-23).
+    if (pr.target === PROTECTED_BRANCH) {
+      const frozen = this.meta(FROZEN_KEY);
+      if (frozen) return { ok: false, blockers: [`main was changed outside a merge and couldn't be put back (${frozen}); a person must restore it`] };
+      const known = this.meta(PROTECTED_KEY);
+      const live = await this.headOf(PROTECTED_BRANCH);
+      if (known && live !== known) {
+        await this.guardProtected(null);
+        return { ok: false, blockers: [`main was changed outside a merge (it's at ${(live ?? "nothing").slice(0, 7)}, the last merge left ${known.slice(0, 7)}); it's being put back: try again shortly`] };
+      }
+    }
+    if (this.mergeInProgress()) return { ok: false, blockers: ["another merge is in progress; try again shortly"] };
+    this.setMeta("merging", `${Date.now()}:${limitS * 1000}`);
     try {
-      const pr = view.pr;
       const ref = await repoRef(this.env as unknown as Env, this.repo, "write", limitS);
       for (let attempt = 0; attempt < 2; attempt++) {
         const target = await this.headOf(pr.target);
@@ -638,6 +671,7 @@ export class RepoStore extends DurableObject<StoreEnv> {
         const res = JSON.parse(
           await this.env.CHECKER.getByName(`review-${this.repo}`).run({
             mode: "merge", repo: ref, source: pr.source, target: pr.target, expectedSource: pr.head, expectedTarget: target, message: `Merge PR${id}: ${pr.title}`, commands,
+            ...(pr.target === PROTECTED_BRANCH ? { keepRef: PROTECTED_REF } : {}),
           }),
         ) as { error?: string; merged?: boolean; sha?: string; retry?: boolean; targetHead?: string; reason?: string; checks?: Array<{ name: string; status: string; log: string; ms: number }> };
         if (res.error) return { ok: false, blockers: [`merge failed: ${res.error}`] };
@@ -647,7 +681,12 @@ export class RepoStore extends DurableObject<StoreEnv> {
           this.log("pr.merged", id, { by, sha: res.sha, head: pr.head, onto: target });
           return { ok: true, sha: res.sha };
         }
-        if (res.retry && res.targetHead && attempt === 0) continue; // the target moved: once more on its new head
+        // The target moved: once more on its new head. Not main: only merges move it, so that's a push to put back.
+        if (res.retry && res.targetHead && pr.target === PROTECTED_BRANCH) {
+          await this.guardProtected(null, undefined, true);
+          return { ok: false, blockers: ["main was changed outside a merge while merging; it's being put back: try again shortly"] };
+        }
+        if (res.retry && res.targetHead && attempt === 0) continue;
         const failed = (res.checks ?? []).filter((c) => c.status !== "passed");
         if (failed.length && pr.currentRun)
           for (const c of res.checks ?? [])
@@ -677,11 +716,13 @@ export class RepoStore extends DurableObject<StoreEnv> {
       // is the model varying, not a fix (review of 10-17).
       // And only in a file that changed since the last review: a cheap commit plus "these are fixed" in the code
       // doesn't clear a finding in a file nobody touched (security review, 10-17).
+      // No delta (no last reviewed commit, e.g. the first run was cancelled): nothing is known to have changed, so
+      // nothing earlier becomes fixed (security review, 10-23).
       const delta = r.delta ? new Set(JSON.parse(r.delta) as string[]) : null;
-      if (r.scope === null)
+      if (r.scope === null && delta)
         for (const reviewer of passed)
           for (const f of this.sql.exec<{ id: number; file: string }>("SELECT id, file FROM findings WHERE pr = ? AND reviewer = ? AND status = 'open' AND run < ? AND sha != ?", r.pr, reviewer, run, r.sha).toArray())
-            if (!delta || delta.has(f.file)) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE id = ?", f.id);
+            if (delta.has(f.file)) this.sql.exec("UPDATE findings SET status = 'fixed' WHERE id = ?", f.id);
     }
     this.log("run.finished", r.pr, { run, outcome });
     return true;

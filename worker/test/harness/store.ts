@@ -42,7 +42,10 @@ export function store(repo = "shop") {
   const env = {
     ARTIFACTS: {
       get: async (_repo: string) => ({
-        log: async ({ ref }: { ref: string }) => (heads.has(ref) ? [{ hash: heads.get(ref)! }] : []),
+        log: async ({ ref }: { ref: string }) => {
+          const name = ref.replace(/^refs\/heads\//, "");
+          return heads.has(name) ? [{ hash: heads.get(name)! }] : [];
+        },
         createToken: async (scope: string) => ({ plaintext: `${scope}-token` }),
         info: async () => ({ remote: `https://artifacts.example/${repo}` }),
         [Symbol.dispose]: () => undefined,

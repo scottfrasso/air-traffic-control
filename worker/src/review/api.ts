@@ -13,6 +13,20 @@ export interface ApiEnv {
   CF_ACCOUNT_ID?: string;
   PUSH_QUEUE_ID?: string;
   ARTIFACTS_NAMESPACE?: string;
+  /** Runs one person may start in a day, across every repo (cost cap). Default 200. */
+  REVIEW_MAX_RUNS_PER_PERSON_PER_DAY?: string;
+}
+
+/**
+ * Start checks for a person within their daily run cap (all repos; security review, 10-23). Counted only when a run
+ * actually starts: asking again for a run that's already going is free.
+ */
+export async function checksFor(env: Pick<ApiEnv, "REVIEW_MAX_RUNS_PER_PERSON_PER_DAY">, directory: Pick<Directory, "runsToday" | "countRun">, email: string, start: () => Promise<{ run: number; started?: true }>): Promise<{ run: number }> {
+  const cap = Number(env.REVIEW_MAX_RUNS_PER_PERSON_PER_DAY ?? 200) || 200;
+  if ((await directory.runsToday(email)) >= cap) throw new Error(`run limit: ${cap} runs a day for ${email}; try again tomorrow`);
+  const r = await start();
+  if (r.started) await directory.countRun(email);
+  return { run: r.run };
 }
 
 class HttpError extends Error {
@@ -60,11 +74,13 @@ function mapError(err: unknown): HttpError {
   if (/^unknown check /.test(m)) return new HttpError(400, m);
   if (/^run limit: /.test(m)) return new HttpError(429, m);
   if (/branch .* not found|can't merge .* into itself/.test(m)) return new HttpError(400, m);
-  return new HttpError(500, m);
+  // Anything else is ours: log it, and don't hand internals (git stderr, process lists) to the caller.
+  console.error(`api error: ${m}`);
+  return new HttpError(500, "internal error");
 }
 
 const routes: Route[] = [
-  ["GET", /^\/api\/me$/, async (c) => json(c.person)],
+  ["GET", /^\/api\/me$/, async (c) => json({ email: c.person.email, name: c.person.name, via: c.person.via })],
 
   ["GET", /^\/api\/repos$/, async (c) => json({ repos: await c.directory.listRepos() })],
   [
@@ -149,10 +165,10 @@ const routes: Route[] = [
       if (b.sha !== undefined && typeof b.sha !== "string") throw new HttpError(400, "sha must be a commit");
       if (b.only !== undefined && (!Array.isArray(b.only) || !b.only.length || b.only.some((x) => !CHECK_NAMES.includes(x as CheckName))))
         throw new HttpError(400, `only must be a non-empty list of: ${CHECK_NAMES.join(", ")} (leave it out for all checks)`);
-      return json(await store(c).runChecks(prId(c), c.person.email, { ...(b.sha ? { sha: b.sha as string } : {}), ...(b.only ? { only: b.only as CheckName[] } : {}) }));
+      return json(await checksFor(c.env, c.directory, c.person.email, () => store(c).runChecks(prId(c), c.person.email, { ...(b.sha ? { sha: b.sha as string } : {}), ...(b.only ? { only: b.only as CheckName[] } : {}) })));
     },
   ],
-  ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/ready$/, async (c) => json(await store(c).markReady(prId(c), c.person.email))],
+  ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/ready$/, async (c) => json(await checksFor(c.env, c.directory, c.person.email, () => store(c).runChecks(prId(c), c.person.email)))],
   ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/draft$/, async (c) => (await store(c).markDraft(prId(c), c.person.email), json({ ok: true }))],
   ["POST", /^\/api\/repos\/([^/]+)\/prs\/(\d+)\/close$/, async (c) => (await store(c).closePr(prId(c), c.person.email), json({ ok: true }))],
   [
@@ -185,7 +201,7 @@ const routes: Route[] = [
     },
   ],
 
-  ["GET", /^\/api\/tokens$/, async (c) => json({ tokens: await c.directory.listTokens(c.person.email) })],
+  ["GET", /^\/api\/tokens$/, async (c) => json({ tokens: (await c.directory.listTokens(c.person.email)).map((t) => ({ ...t, current: t.id === c.person.tokenId })) })],
   [
     "POST",
     /^\/api\/tokens$/,
@@ -195,7 +211,16 @@ const routes: Route[] = [
       return json(await c.directory.createToken(c.person.email, typeof label === "string" ? label : "token"), 201);
     },
   ],
-  ["DELETE", /^\/api\/tokens\/(\d+)$/, async (c) => (accessOnly(c, "revoke tokens"), await c.directory.revokeToken(c.person.email, Number(c.params[0])), json({ ok: true }))],
+  [
+    "DELETE",
+    /^\/api\/tokens\/(\d+)$/,
+    async (c) => {
+      // A token may revoke itself (a leaked one can be killed before Access exists); others need Access.
+      if (c.person.tokenId !== Number(c.params[0])) accessOnly(c, "revoke other tokens");
+      await c.directory.revokeToken(c.person.email, Number(c.params[0]));
+      return json({ ok: true });
+    },
+  ],
 ];
 
 /** The method and path of every route (the web UI's test checks its calls against this). */

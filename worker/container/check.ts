@@ -17,8 +17,8 @@ type Input =
   | { mode: "snapshot"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null; since?: string | null }
   | { mode: "diff"; repo: RepoRef; branch: string; target: string; sha: string; base: string | null }
   | { mode: "ci"; repo: RepoRef; branch: string; sha: string; commands: CiCommand[] }
-  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[] }
-  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string };
+  | { mode: "merge"; repo: RepoRef; source: string; target: string; expectedSource: string; expectedTarget: string; message: string; commands: CiCommand[]; keepRef?: string }
+  | { mode: "restore"; repo: RepoRef; branch: string; sha: string; current: string; keepRef?: string };
 
 interface CiCommand { name: string; run: string; timeoutSeconds: number }
 interface CiCheck { name: string; status: "passed" | "failed" | "errored" | "skipped"; log: string; ms: number }
@@ -145,6 +145,9 @@ let dir = repoDir; // git commands run here; typechecks run in throwaway worktre
 const timings: Array<{ step: string; ms: number; cached?: boolean }> = [];
 const timed = <T,>(step: string, fn: () => T): T => { progress(`step ${step}`); const t = Date.now(); const r = fn(); timings.push({ step, ms: Date.now() - t }); return r; };
 
+/** The most git output we read: a diff this size is past the store's 2 MB cap anyway. */
+const GIT_MAX_OUTPUT = 64 * 1024 * 1024;
+
 function git(args: string[], opts: { token?: string; allowFail?: boolean; input?: string; timeoutMs?: number } = {}): { ok: boolean; out: string } {
   // The subcommand: the first argument that isn't an option. Every `-c` value here contains "=", so it's skipped;
   // a bare `-C <path>` would be misread (not used).
@@ -158,7 +161,8 @@ function git(args: string[], opts: { token?: string; allowFail?: boolean; input?
   try {
     return {
       ok: true,
-      out: execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs }).trim(),
+      // maxBuffer: Node's 1 MB default made any diff over 1 MB fail (security review, 10-23).
+      out: execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], input: opts.input, timeout: opts.timeoutMs, maxBuffer: GIT_MAX_OUTPUT }).trim(),
     };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
@@ -188,7 +192,9 @@ const SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
 const diffOf = (range: string[]) => {
   // --no-renames: a rename lists both paths, so moving a protected file out of an owners glob still needs a person.
   const d = timed("diff", () => git(["diff", "--no-color", "--no-ext-diff", "--no-renames", ...range]).out);
-  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", "--no-renames", ...range]).out.split("\n").filter(Boolean) };
+  // -z: real names, NUL-separated. Without it git quotes non-ASCII paths ("a/\303\251.ts"), which no owners glob
+  // matches (security review, 10-23).
+  return { diff: d ? `${d}\n` : "", paths: git(["diff", "--name-only", "-z", "--no-renames", ...range]).out.split("\0").filter(Boolean) };
 };
 
 /**
@@ -231,7 +237,9 @@ const DEFAULT_BRANCH = "main";
  * with setsid (security review, 10-17). Not root (tests): run as ourselves.
  */
 const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
-const jobUser = () => (ROOT ? { uid: 20000 + Math.floor(Math.random() * 40000), gid: 10001 } : null);
+// From our pid, not a random number: two concurrent jobs are two processes, so they never share a uid (and pkill -U never
+// kills the other job; security review, 10-23).
+const jobUser = () => (ROOT ? { uid: 20000 + (process.pid % 40000), gid: 10001 } : null);
 /**
  * Per job: files up to 4 GB (ulimit -f counts 1 KiB blocks), and for a job's own uid at most 512 processes (the
  * process limit counts every process of the uid, so it only makes sense for a uid of its own).
@@ -250,7 +258,7 @@ function runCommand(c: CiCommand, cwd: string, home: string, user: { uid: number
     const killGroup = (pid: number | undefined) => { if (pid) try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ } };
     const child = spawn("sh", ["-c", `exec 2>&1\n${limits(user)}\n${c.run}`], {
       // (The cast: wrangler's generated types add the Worker's vars to ProcessEnv; this process has only these.)
-      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, CI: "true" } as unknown as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(user ?? {}),
+      cwd, env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: home, TMPDIR: join(home, "tmp"), CI: "true" } as unknown as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(user ?? {}),
     });
     child.stdout.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
     child.stderr.on("data", (d: Buffer) => { out = (out + d.toString("utf8")).slice(-200_000); });
@@ -273,6 +281,7 @@ async function runCi(sha: string, commands: CiCommand[]): Promise<CiCheck[]> {
   const user = jobUser();
   try {
     git(["worktree", "add", "-q", "--detach", wt, sha]);
+    mkdirSync(join(home, "tmp")); // the job's own temp directory, not the container's shared /tmp
     if (user) execFileSync("chown", ["-R", `${user.uid}:${user.gid}`, wt, home]);
     let stopped = false;
     for (const c of commands) {
@@ -319,6 +328,9 @@ async function merge(i: Extract<Input, { mode: "merge" }>) {
     if (checks.some((c) => c.status !== "passed" && c.status !== "skipped")) return { mode: "merge", merged: false, reason: "CI failed on the merged commit", checks, sha: onto.sha };
     const push = timed("push target", () => git([...LOW_SPEED, "push", "-q", i.repo.remote, `${onto.sha}:refs/heads/${i.target}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
     if (!push.ok) return { mode: "merge", merged: false, reason: `push to ${i.target} failed (${push.out.slice(0, 160)}); merge again`, checks };
+    // Keep the merged commit under a hidden ref too, so a restore can fetch it after any force push (security review,
+    // 10-23). Best effort: the store also knows the sha, and the warm cache usually has it.
+    if (i.keepRef) git([...LOW_SPEED, "push", "-q", "--force", i.repo.remote, `${onto.sha}:${i.keepRef}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS });
     return { mode: "merge", merged: true, sha: onto.sha, checks, timings };
   } finally {
     if (onto.sha !== source) git(["update-ref", "-d", ontoRef(onto.sha)], { allowFail: true }); // pushed or not, the scratch ref goes
@@ -358,9 +370,17 @@ function ontoTarget(head: string, target: string, message: string): { sha: strin
  * as a merge landing meanwhile, is never undone.
  */
 function restore(i: Extract<Input, { mode: "restore" }>) {
-  const now = fetchBranch(i.repo, i.branch);
-  if (now !== i.current) return { mode: "restore", restored: false, reason: `${i.branch} is at ${now.slice(0, 7)}, not ${i.current.slice(0, 7)}`, timings };
+  // Where the branch is now ("" if it was deleted), from the remote itself.
+  const ls = git([...LOW_SPEED, "ls-remote", i.repo.remote, `refs/heads/${i.branch}`], { token: i.repo.token, timeoutMs: FETCH_TIMEOUT_MS }).out.split(/\s/)[0] ?? "";
+  if (ls !== i.current) return { mode: "restore", restored: false, reason: `${i.branch} is at ${ls.slice(0, 7) || "nothing"}, not ${i.current.slice(0, 7) || "nothing"}`, timings };
+  // The protected commit may not be in a cold cache. Usually the bad push is on top of it, so fetching the branch
+  // brings it; after a force push to another history, fetch it from its hidden ref (merges keep it there).
+  if (i.current && !git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) fetchBranch(i.repo, i.branch);
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok && i.keepRef)
+    withGitLock(() => git([...LOW_SPEED, "fetch", "-q", "--no-tags", i.repo.remote, `+${i.keepRef}:refs/atc-protected/${i.repo.name}`], { token: i.repo.token, allowFail: true, timeoutMs: FETCH_TIMEOUT_MS }));
+  if (!git(["cat-file", "-e", `${i.sha}^{commit}`], { allowFail: true }).ok) return { mode: "restore", restored: false, reason: `the protected commit ${i.sha.slice(0, 7)} isn't available to push back`, timings };
   const push = timed("push restore", () => git([...LOW_SPEED, "push", "-q", `--force-with-lease=refs/heads/${i.branch}:${i.current}`, i.repo.remote, `${i.sha}:refs/heads/${i.branch}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS }));
+  if (push.ok && i.keepRef) git([...LOW_SPEED, "push", "-q", "--force", i.repo.remote, `${i.sha}:${i.keepRef}`], { token: i.repo.token, allowFail: true, timeoutMs: PUSH_TIMEOUT_MS });
   return push.ok ? { mode: "restore", restored: true, timings } : { mode: "restore", restored: false, reason: push.out.slice(-500), timings };
 }
 

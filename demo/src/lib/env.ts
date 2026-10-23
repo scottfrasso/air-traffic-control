@@ -28,5 +28,7 @@ export function need(name: string): string {
 }
 
 export const config = {
-  workerUrl: process.env.AGENTMESH_URL ?? dotenv.AGENTMESH_URL ?? "https://agentmesh-review.scottfrasso.workers.dev",
+  get workerUrl() {
+    return need("AGENTMESH_URL"); // your deployment (pnpm setup:cloudflare writes it to .env)
+  },
 };

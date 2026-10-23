@@ -176,9 +176,14 @@ test("a second run reviews the diff since the last reviewed commit and lists the
   h.agents.script("correctness", () => ok("review.json", { findings: [] }));
   await h.run();
   assert.deepEqual(h.snapshotCalls, [{ base: "m0", sha: "h1", since: "h0" }]);
-  const msg = h.agents.started.find((s) => s.role === "correctness")!.message;
-  assert.match(msg, /changes since h0/);
-  assert.match(msg, /off-by-one.*src\/cart\.ts/);
+  const started = h.agents.started.find((s) => s.role === "correctness")!;
+  assert.match(started.message, /changes since h0/);
+  // The open findings are model-written text: they go in a file, as data, not in the instructions (10-23).
+  assert.doesNotMatch(started.message, /src\/cart\.ts/);
+  assert.match(started.message, /open-findings\.json/);
+  const file = started.files.find((f) => f.name === "open-findings.json")!;
+  assert.match(h.agents.file(started, "open-findings.json") ?? "", /off-by-one/);
+  assert.ok(file);
 });
 
 test("a finding the author resolved isn't posted again", async () => {
@@ -428,4 +433,16 @@ test("a Workflow replay doesn't write again: every store write is a durable step
   assert.ok(first > 0);
   await h.run(); // the Workflow runs run() again from the top: cached steps return their results
   assert.equal(h.recorded.writes, first, "no store write ran twice");
+});
+
+test("a 'pre-existing' finding on a line this PR added is new: it's treated as important (and verified)", async () => {
+  const h = harness();
+  h.deps.snapshot = (async (pr: Pr, sha: string, since: string | null) => ({ ...(await harness().deps.snapshot(pr, sha, since)), added: { "src/cart.ts": [4] } })) as never;
+  h.agents.script("classifier", () => classify([]));
+  h.agents.script("correctness", () => ok("review.json", { findings: [finding({ severity: "pre-existing" })] }));
+  h.agents.script("security", () => ok("review.json", { findings: [] }));
+  h.agents.script("verifier", () => votes(true, true, true));
+  await h.run();
+  assert.deepEqual(h.recorded.findings.map((f) => f.severity), ["important"]);
+  assert.equal(h.agents.started.filter((s) => s.role === "verifier").length, 1);
 });

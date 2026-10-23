@@ -12,7 +12,8 @@ export interface Person {
 
 /** How the caller proved who they are. Agents use tokens; only Access sign-ins can approve (spec: an agent never approves). */
 export type Via = "access" | "token";
-export type Caller = Person & { via: Via };
+/** `tokenId`: the personal token the request came with (so it can revoke itself). */
+export type Caller = Person & { via: Via; tokenId?: number };
 
 export const TOKEN_PREFIX = "atc_";
 
@@ -66,7 +67,8 @@ export async function verifyAccessJwt(jwt: string, cfg: { teamDomain: string; au
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (!aud.includes(cfg.aud)) return null;
     if (typeof claims.exp !== "number" || claims.exp * 1000 < Date.now()) return null;
-    if (claims.iss !== undefined && claims.iss !== `https://${cfg.teamDomain}`) return null;
+    if (claims.iss !== `https://${cfg.teamDomain}`) return null; // Access always sets it (security review, 10-23)
+    if (typeof claims.nbf === "number" && claims.nbf * 1000 > Date.now() + 60_000) return null;
     return typeof claims.email === "string" && claims.email ? claims.email.toLowerCase() : null;
   } catch {
     return null;
@@ -86,9 +88,11 @@ export async function personFromRequest(
   fetchImpl: typeof fetch = fetch,
 ): Promise<Caller | null> {
   const auth = request.headers.get("authorization") ?? "";
-  if (auth.startsWith(`Bearer ${TOKEN_PREFIX}`)) {
+  if (auth) {
+    // A bearer that isn't a valid personal token is refused, never retried as the Access cookie (security review, 10-23).
+    if (!auth.startsWith(`Bearer ${TOKEN_PREFIX}`)) return null;
     const p = await directory.personForToken(await hashToken(auth.slice(7).trim()));
-    return p ? { ...p, via: "token" } : null;
+    return p ? { email: p.email, name: p.name, via: "token", tokenId: p.tokenId } : null;
   }
   const jwt = request.headers.get("cf-access-jwt-assertion") ?? /(?:^|;\s*)CF_Authorization=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
   if (!jwt || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;

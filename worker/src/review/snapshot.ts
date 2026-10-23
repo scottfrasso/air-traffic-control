@@ -3,6 +3,25 @@ import type { RepoRef } from "../checker";
 import type { Snapshot } from "./orchestrate";
 import type { Pr } from "./types";
 
+/** Per file, the line numbers (new side) the diff adds: a finding there is this PR's, whatever the model calls it. */
+export function addedLines(diff: string): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  let file: string | null = null;
+  let line = 0;
+  for (const l of diff.split("\n")) {
+    if (l.startsWith("+++ ")) {
+      file = l === "+++ /dev/null" ? null : l.slice(4).replace(/^b\//, "");
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(l);
+    if (hunk) { line = Number(hunk[1]); continue; }
+    if (!file || l.startsWith("diff --git") || l.startsWith("--- ")) continue;
+    if (l.startsWith("+")) (out[file] ??= []).push(line++);
+    else if (l.startsWith(" ")) line++;
+  }
+  return out;
+}
+
 /**
  * Build a run's snapshot in the checker container (git archive + diff + config, at the PR's head) and upload it
  * once for every session of the run: repo.tar.gz, diff.patch, pr.json. Sessions never get a repo credential;
@@ -35,6 +54,7 @@ export async function buildSnapshot(opts: {
     // The whole change: the classifier and the hard rules judge all of it on every run.
     changedPaths: out.changedPaths,
     sinceChangedPaths: opts.since ? (out.sinceChangedPaths ?? []) : null,
+    added: addedLines(out.diff),
     config: out.config,
   };
 }

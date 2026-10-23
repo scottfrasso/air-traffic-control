@@ -69,7 +69,7 @@ test("personal tokens: shown once, stored only as a hash, and map to their perso
   const rows = db.prepare("SELECT * FROM tokens").all() as Array<Record<string, unknown>>;
   assert.equal(JSON.stringify(rows).includes(token), false);
   assert.equal(rows[0]!.hash, await hashToken(token));
-  assert.deepEqual(await d.personForToken(await hashToken(token)), { email: "ann@x.dev", name: "ann" });
+  assert.deepEqual(await d.personForToken(await hashToken(token)), { email: "ann@x.dev", name: "ann", tokenId: 1 });
   assert.deepEqual((await d.listTokens("ann@x.dev")).map((t) => [t.id, t.label]), [[id, "laptop agent"]]);
   await d.revokeToken("bob@x.dev", id); // not his: no effect
   assert.ok(await d.personForToken(await hashToken(token)));
@@ -116,4 +116,20 @@ test("personal tokens expire after 90 days", async () => {
   } finally {
     Date.now = real;
   }
+});
+
+test("an Access JWT without the team's issuer, or not valid yet (nbf), is rejected", async () => {
+  const s = await signer();
+  const { iss: _iss, ...noIss } = claims();
+  assert.equal(await verifyAccessJwt(await s.sign(noIss), { teamDomain: TEAM, aud: AUD }, s.certs), null);
+  assert.equal(await verifyAccessJwt(await s.sign(claims({ nbf: Math.floor(Date.now() / 1000) + 600 })), { teamDomain: TEAM, aud: AUD }, s.certs), null);
+});
+
+test("tokens made before expiry existed get one (90 days from their creation)", async () => {
+  const { DatabaseSync: DB } = await import("node:sqlite");
+  const db = new DB(":memory:");
+  db.exec("CREATE TABLE tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, label TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER)");
+  db.exec("INSERT INTO tokens(email, label, hash, created_at) VALUES ('a@x', 'old', 'h', 1000)");
+  new Directory({ storage: { sql: sqlStorage(db) } } as never, {} as never);
+  assert.deepEqual(db.prepare("SELECT expires_at FROM tokens").all().map((r) => r.expires_at), [1000 + 90 * 86_400_000]);
 });

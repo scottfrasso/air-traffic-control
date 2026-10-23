@@ -20,6 +20,8 @@ export interface Snapshot {
   changedPaths: string[];
   /** On a follow-up, the paths changed since the last reviewed commit (only their findings can become fixed); else null. */
   sinceChangedPaths: string[] | null;
+  /** Per file, the lines the PR adds (from diff.patch). */
+  added?: Record<string, number[]>;
   /** Config read from the head commit (null = file absent). */
   config: { ci: string | null; review: string | null; owners: string | null; reviewMd: string | null };
 }
@@ -186,15 +188,25 @@ export async function runReview(deps: ReviewDeps, params: { repo: string; pr: nu
       await write("classification", () => deps.store.recordClassification(run, final));
     }
 
+    // Earlier runs' open findings, for the reviewers to re-check: uploaded as data, never put in a prompt.
+    const openFiles = ctx.open.length
+      ? [{ name: "open-findings.json", fileId: await deps.step("upload open findings", () => deps.agents.upload("open-findings.json", JSON.stringify(ctx.open.map(({ id, reviewer, severity, file, line, class: cls, title }) => ({ id, reviewer, severity, file, line, class: cls, title }))))) }]
+      : [];
+
     // ── reviewers, in parallel; then one finding per bug across them; then each verifies its own important ones ──
     const review = async (role: Reviewer): Promise<RawFinding[] | null> => {
       const message = reviewerMessage(role, ctx.pr, { ciSummary, reviewMd: snap.config.reviewMd, since: ctx.lastReviewedSha, open: ctx.open, depth: classification.depth });
-      const r = await session(role, spec(role, message, budgets.reviewer));
+      const r = await session(role, spec(role, message, budgets.reviewer, openFiles));
       // Findings wait for the other reviewers now, so notice a cancelled run here, not at the first write.
       if (!(await isCurrent())) await cancel();
       try {
         if (r.status !== "done") throw new Error(failure(r));
-        return filterNew(parseReview(r.outputs[OUTPUT[role]] ?? ""), ctx.resolved, ctx.runNumber);
+        // "Pre-existing" never blocks and isn't verified, so it's checked: on a line this PR adds, it's the PR's own
+        // finding, and important (security review, 10-23: a model could be talked into the label).
+        const found = parseReview(r.outputs[OUTPUT[role]] ?? "").map((f) =>
+          f.severity === "pre-existing" && snap.added?.[f.file]?.includes(f.line) ? { ...f, severity: "important" as const } : f,
+        );
+        return filterNew(found, ctx.resolved, ctx.runNumber);
       } catch (err) {
         await write(`${role} step`, () => deps.store.recordStep(run, role, "errored", err instanceof InvalidOutput ? `invalid review.json: ${err.message}` : (err as Error).message));
         return null;

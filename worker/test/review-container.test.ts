@@ -43,6 +43,7 @@ function repo(opts: { ci?: string; fixFiles?: Record<string, string> } = {}) {
   const check = async (input: object) => {
     const { stdout } = await run(process.execPath, ["--experimental-strip-types", "--no-warnings", CHECK], {
       env: { CHECK_INPUT: JSON.stringify(input), ATC_CACHE: join(root, "cache"), ATC_WORK: join(root, "w"), PATH: `${dirname(process.execPath)}:${GIT_DIR}:/usr/bin:/bin`, HOME: root, SECRET_TOKEN: "do-not-leak" } as unknown as NodeJS.ProcessEnv,
+      maxBuffer: 64 * 1024 * 1024,
     });
     return JSON.parse(stdout.split("\n").find((l) => l.startsWith("@@RESULT "))!.slice(9));
   };
@@ -318,6 +319,83 @@ test("restore: puts a branch back to a commit, only if it's still where we saw i
     assert.equal(out.error, undefined, out.error);
     assert.equal(out.restored, true);
     assert.equal(r.mainHead(), r.base);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("restore after a force push to an unrelated history, with a cold cache, fetches the protected commit from its hidden ref", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    execFileSync("git", ["update-ref", "refs/atc/protected/main", r.base], { cwd: r.remote });
+    r.g("checkout", "-q", "--orphan", "evil");
+    r.g("rm", "-rfq", ".");
+    r.write({ "x.txt": "x\n" });
+    r.g("add", "-A");
+    r.g("commit", "-q", "-m", "orphan");
+    r.g("push", "-q", "--force", "origin", "HEAD:main");
+    const bad = r.mainHead();
+    rmSync(join(r.root, "cache"), { recursive: true, force: true }); // the container went cold
+    const out = await r.check({ mode: "restore", repo: r.ref, branch: "main", sha: r.base, current: bad, keepRef: "refs/atc/protected/main" });
+    assert.equal(out.error, undefined, out.error);
+    assert.equal(out.restored, true, out.reason);
+    assert.equal(r.mainHead(), r.base);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("restore re-creates a deleted main", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    execFileSync("git", ["update-ref", "refs/atc/protected/main", r.base], { cwd: r.remote });
+    execFileSync("git", ["update-ref", "-d", "refs/heads/main"], { cwd: r.remote });
+    const out = await r.check({ mode: "restore", repo: r.ref, branch: "main", sha: r.base, current: "", keepRef: "refs/atc/protected/main" });
+    assert.equal(out.restored, true, out.reason ?? out.error);
+    assert.equal(r.mainHead(), r.base);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("merge onto main also moves the hidden protected ref to the merged commit", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    const out = await r.check({ mode: "merge", repo: r.ref, source: "fix", target: "main", expectedSource: r.head, expectedTarget: r.base, message: "Merge PR1: fix", commands: [], keepRef: "refs/atc/protected/main" });
+    assert.equal(out.merged, true, out.reason ?? out.error);
+    assert.equal(execFileSync("git", ["rev-parse", "refs/atc/protected/main"], { cwd: r.remote, encoding: "utf8" }).trim(), out.sha);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("changed paths with non-ASCII names come back as real names (not git's quoted form), so owner globs match them", { timeout: 60_000 }, async () => {
+  const r = repo({ fixFiles: { "migrations/0042_ü.sql": "select 1;\n" } });
+  try {
+    const d = await r.check({ mode: "diff", repo: r.ref, branch: "fix", target: "main", sha: r.head, base: r.base });
+    assert.ok(d.changedPaths.includes("migrations/0042_ü.sql"), JSON.stringify(d.changedPaths));
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("a diff over 1 MB comes back (git output isn't capped at Node's default buffer)", { timeout: 60_000 }, async () => {
+  const r = repo({ fixFiles: { "big.txt": "x".repeat(80) + "\n".repeat(1) + Array.from({ length: 30_000 }, (_, i) => `line ${i} ${"y".repeat(40)}`).join("\n") + "\n" } });
+  try {
+    const d = await r.check({ mode: "diff", repo: r.ref, branch: "fix", target: "main", sha: r.head, base: r.base });
+    assert.equal(d.error, undefined, d.error);
+    assert.ok(d.diff.length > 1_000_000, String(d.diff.length));
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("ci: each job gets its own temp directory, not the shared /tmp", { timeout: 60_000 }, async () => {
+  const r = repo();
+  try {
+    const c = await r.check({ mode: "ci", repo: r.ref, branch: "fix", sha: r.head, commands: [{ name: "tmp", run: "echo \"$TMPDIR\"", timeoutSeconds: 30 }] });
+    const dir = c.checks[0].log.trim();
+    assert.ok(dir && !/^\/tmp\/?$/.test(dir) && dir.includes("ci-home-"), dir);
   } finally {
     r.cleanup();
   }

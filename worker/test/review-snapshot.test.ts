@@ -48,3 +48,9 @@ test("on a follow-up, the since-diff is uploaded as since.patch next to the whol
   assert.equal(agents.uploads.get(snap.fileIds["diff.patch"]!)!.data, "+whole\n");
   assert.deepEqual(snap.changedPaths, ["a", "b"]);
 });
+
+test("addedLines lists, per file, the new-side line numbers the diff adds", async () => {
+  const { addedLines } = await import("../src/review/snapshot");
+  const diff = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,3 @@\n keep\n+new one\n keep\n@@ -10,0 +11,2 @@\n+x\n+y\ndiff --git a/b.ts b/b.ts\nnew file mode 100644\n--- /dev/null\n+++ b/b.ts\n@@ -0,0 +1 @@\n+z\n";
+  assert.deepEqual(addedLines(diff), { "src/a.ts": [2, 11, 12], "b.ts": [1] });
+});

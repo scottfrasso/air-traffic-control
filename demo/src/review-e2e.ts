@@ -52,8 +52,12 @@ async function settled(repo: string, id: number, sha: string, timeoutMs = 30 * 6
 const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(2, 14);
 const repo = `review-e2e-${stamp}`;
 const work = mkdtempSync(join(tmpdir(), "atc-review-e2e-"));
+// The git token goes through git's environment, never its argv (other processes can read argv).
 const git = (args: string[], opts: { auth?: string } = {}) =>
-  execFileSync("git", [...(opts.auth ? ["-c", `http.extraHeader=Authorization: Bearer ${opts.auth}`] : []), "-c", "user.name=e2e", "-c", "user.email=e2e@atc.dev", ...args], { cwd: work, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@atc.dev", ...args], {
+    cwd: work, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: opts.auth ? { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${opts.auth}` } : process.env,
+  }).trim();
 
 try {
   say("system", `creating ${repo} on ${config.workerUrl}`);

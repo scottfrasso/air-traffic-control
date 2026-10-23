@@ -266,7 +266,7 @@ test("CSRF: a browser request that changes something must come from this site, a
 test("only an Access sign-in creates or revokes tokens: a token (maybe an agent's) can't mint more", async () => {
   const a = await app();
   assert.equal((await a.call("POST", "/api/tokens", { label: "more" })).status, 403);
-  assert.equal((await a.call("DELETE", "/api/tokens/1")).status, 403);
+  assert.equal((await a.call("DELETE", "/api/tokens/999")).status, 403, "another token: needs Access");
 });
 
 test("a short admin secret disables the admin endpoint", async () => {
@@ -343,4 +343,54 @@ test("MCP over HTTP: initialize, then tools/list names the review tools (the MCP
   assert.deepEqual((list.json.result.tools as Array<{ name: string }>).map((t) => t.name).sort(), ["get_pr", "mark_ready", "open_pr", "resolve_finding", "run_checks"]);
   const call = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_pr", arguments: { repo: "nope", pr: 1 } } }, init.session);
   assert.match(JSON.stringify(call.json), /no repo nope/);
+});
+
+// ── security review of 10-23 ──
+test("a token can revoke itself (a leaked token can be killed without Access), but no other token", async () => {
+  const a = await app();
+  const mine = (await a.call("GET", "/api/tokens")).body.tokens as Array<{ id: number; label: string }>;
+  const own = mine[0]!.id;
+  const other = (await a.directory.createToken("ann@x", "other")).id;
+  assert.equal((await a.call("DELETE", `/api/tokens/${other}`)).status, 403);
+  assert.equal((await a.call("DELETE", `/api/tokens/${own}`)).status, 200);
+  assert.equal((await a.call("GET", "/api/me")).status, 401);
+});
+
+test("a bearer that isn't a personal token is refused outright, never falling back to the Access cookie", async () => {
+  const a = await app();
+  const res = await handle(new Request("https://atc.example/api/me", { headers: { authorization: "Bearer something-else", "cf-access-jwt-assertion": "x" } }), a.env as never, {} as never);
+  assert.equal(res.status, 401);
+});
+
+test("API responses say nosniff; unexpected errors don't echo their internals", async () => {
+  const a = await app();
+  const ok = await handle(new Request("https://atc.example/api/me", { headers: { authorization: `Bearer ${a.token}` } }), a.env as never, {} as never);
+  assert.equal(ok.headers.get("x-content-type-options"), "nosniff");
+  (a.s.co as unknown as { getPr: () => Promise<never> }).getPr = async () => { throw new Error("git stderr: secret-ish detail"); };
+  const res = await a.call("GET", "/api/repos/shop/prs/1");
+  assert.equal(res.status, 500);
+  assert.doesNotMatch(JSON.stringify(res.body), /secret-ish/);
+});
+
+test("the UI's script is allowed by its hash, not by 'unsafe-inline'", async () => {
+  const a = await app();
+  const res = await handle(new Request("https://atc.example/"), a.env as never, {} as never);
+  const csp = res.headers.get("content-security-policy") ?? "";
+  const scriptSrc = /script-src ([^;]*)/.exec(csp)![1]!;
+  assert.doesNotMatch(scriptSrc, /unsafe-inline/);
+  assert.match(scriptSrc, /'sha256-[A-Za-z0-9+/=]+'/);
+  const html = await res.text();
+  const inline = /<script>([\s\S]*?)<\/script>/.exec(html)![1]!;
+  const digest = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(inline))).toString("base64");
+  assert.ok(scriptSrc.includes(`'sha256-${digest}'`), "the hash matches the page's script");
+});
+
+test("a person has a daily run cap across all their repos", async () => {
+  const a = await app();
+  (a.env as Record<string, unknown>).REVIEW_MAX_RUNS_PER_PERSON_PER_DAY = "1";
+  const pr = (await a.call("POST", "/api/repos/shop/prs", { title: "Fix cart", source: "fix" })).body as { id: number };
+  assert.equal((await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`, { only: ["ci"] })).status, 200);
+  const again = await a.call("POST", `/api/repos/shop/prs/${pr.id}/checks`);
+  assert.equal(again.status, 429);
+  assert.match(String(again.body.error), /a day for ann@x/);
 });

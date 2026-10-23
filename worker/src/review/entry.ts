@@ -47,12 +47,29 @@ const unauthorized = () =>
  * The review pipeline's HTTP surface: the web UI (a static shell; data comes from the API), the JSON API, and MCP
  * for coding agents. Everything but the shell and /health needs a person (Access JWT or personal token).
  */
+/** The UI's one inline script, allowed by its hash rather than 'unsafe-inline' (security review, 10-23). */
+let scriptHash: Promise<string> | null = null;
+const uiScriptHash = () =>
+  (scriptHash ??= (async () => {
+    const inline = /<script>([\s\S]*?)<\/script>/.exec(ui)?.[1] ?? "";
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(inline)));
+    return `'sha256-${btoa(String.fromCharCode(...digest))}'`;
+  })());
+
 export async function handle(request: Request, env: ReviewWorkerEnv, ctx: ExecutionContext): Promise<Response> {
+  const res = await route(request, env, ctx);
+  // Nothing we send is meant to be sniffed into another type. (A copy: some responses' headers are immutable.)
+  const out = new Response(res.body, res);
+  out.headers.set("x-content-type-options", "nosniff");
+  return out;
+}
+
+async function route(request: Request, env: ReviewWorkerEnv, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health") return Response.json({ ok: true });
   if (request.method === "POST" && url.pathname === "/api/admin/tokens") return mintToken(request, env);
   if (request.method === "GET" && UI_PAGES.test(url.pathname))
-    return new Response(ui, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'" } });
+    return new Response(ui, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'self'; script-src 'self' ${await uiScriptHash()}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'` } });
   if (!sameSiteWrite(request, url)) return Response.json({ error: "cross-site request refused: send JSON from this site" }, { status: 403 });
   const directory = env.DIRECTORY.getByName("directory");
   const person = await personFromRequest(request, env, directory);

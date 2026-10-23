@@ -3,12 +3,14 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import type { Directory } from "./directory";
 import type { Person } from "./identity";
+import { checksFor } from "./api";
 import type { RepoStore } from "./store";
 import { CHECK_NAMES, type CheckName } from "./types";
 
 export interface McpEnv {
   REPOS: DurableObjectNamespace<RepoStore>;
   DIRECTORY: DurableObjectNamespace<Directory>;
+  REVIEW_MAX_RUNS_PER_PERSON_PER_DAY?: string;
 }
 
 /**
@@ -24,9 +26,14 @@ export function reviewTools(env: McpEnv, person: Person) {
   return {
     open_pr: async (a: { repo: string; title: string; source: string; target?: string; intent?: Record<string, string> }) =>
       (await repo(a.repo)).openPr({ title: a.title, author: person.email, source: a.source, ...(a.target ? { target: a.target } : {}), ...(a.intent ? { intent: a.intent } : {}) }),
-    run_checks: async (a: { repo: string; pr: number; sha?: string; only?: CheckName[] }) =>
-      (await repo(a.repo)).runChecks(a.pr, person.email, { ...(a.sha ? { sha: a.sha } : {}), ...(a.only ? { only: a.only } : {}) }),
-    mark_ready: async (a: { repo: string; pr: number }) => (await repo(a.repo)).markReady(a.pr, person.email),
+    run_checks: async (a: { repo: string; pr: number; sha?: string; only?: CheckName[] }) => {
+      const r = await repo(a.repo);
+      return checksFor(env, env.DIRECTORY.getByName("directory"), person.email, () => r.runChecks(a.pr, person.email, { ...(a.sha ? { sha: a.sha } : {}), ...(a.only ? { only: a.only } : {}) }));
+    },
+    mark_ready: async (a: { repo: string; pr: number }) => {
+      const r = await repo(a.repo);
+      return checksFor(env, env.DIRECTORY.getByName("directory"), person.email, () => r.runChecks(a.pr, person.email));
+    },
     get_pr: async (a: { repo: string; pr: number }) => {
       const v = await (await repo(a.repo)).getPr(a.pr);
       return {

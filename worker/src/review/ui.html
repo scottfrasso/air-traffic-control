@@ -513,10 +513,10 @@ async function settings() {
       h("section", { class: "panel" },
         h("h2", {}, "Personal API tokens"),
         h("p", { class: "muted small" }, "For git, the API, and coding agents over MCP at /mcp. An agent using your token acts as you, but can't approve."),
-        tokens.map((t) => h("div", { class: "list-line" }, h("span", {}, t.label), h("span", { class: "spacer" }), h("span", { class: "muted small" }, ago(t.created_at)), h("button", { class: "quiet danger", disabled: me.via !== "access", onclick: async () => { await api("DELETE", `/api/tokens/${t.id}`); route(); } }, "Revoke"))),
+        tokens.map((t) => h("div", { class: "list-line" }, h("span", {}, t.label), h("span", { class: "spacer" }), h("span", { class: "muted small" }, ago(t.created_at)), h("button", { class: "quiet danger", disabled: me.via !== "access" && !t.current, title: t.current ? "This is the token you're signed in with" : null, onclick: async () => { if (t.current && !confirm("Revoke the token you're signed in with? You'll be signed out.")) return; await api("DELETE", `/api/tokens/${t.id}`); route(); } }, t.current ? "Revoke (this one)" : "Revoke"))),
         me.via === "access"
           ? h("div", { class: "row", style: "margin-top: 14px" }, label, h("button", { onclick: async () => { const t = await api("POST", `/api/tokens`, { label: label.value.trim() || "token" }); made.replaceChildren(h("p", { class: "small", style: "margin-top: 12px" }, "Copy it now. It won't be shown again. It works for 90 days."), h("pre", {}, t.token)); } }, "Create token"))
-          : h("p", { class: "note", style: "margin-top: 14px" }, "Creating and revoking tokens needs an Access sign-in, so a token can't make more of itself."),
+          : h("p", { class: "note", style: "margin-top: 14px" }, "Creating tokens, and revoking any but your own, needs an Access sign-in, so a token can't make more of itself."),
         made)),
   );
 }

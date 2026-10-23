@@ -23,6 +23,9 @@ export class Directory extends DurableObject {
     this.sql.exec(SCHEMA);
     const cols = this.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('tokens')").toArray().map((c) => c.name);
     if (!cols.includes("expires_at")) this.sql.exec("ALTER TABLE tokens ADD COLUMN expires_at INTEGER");
+    // Tokens from before expiry existed expire 90 days after they were made (security review, 10-23).
+    this.sql.exec("UPDATE tokens SET expires_at = created_at + ? WHERE expires_at IS NULL", TOKEN_TTL_MS);
+    this.sql.exec("CREATE TABLE IF NOT EXISTS person_runs(email TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(email, day))");
   }
 
   async ensurePerson(email: string): Promise<Person> {
@@ -41,8 +44,8 @@ export class Directory extends DurableObject {
     return { id: this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id, token };
   }
 
-  async listTokens(email: string): Promise<Array<{ id: number; label: string; created_at: number }>> {
-    return this.sql.exec<{ id: number; label: string; created_at: number }>("SELECT id, label, created_at FROM tokens WHERE email = ? AND revoked_at IS NULL ORDER BY id", email.toLowerCase()).toArray();
+  async listTokens(email: string): Promise<Array<{ id: number; label: string; created_at: number; expires_at: number | null }>> {
+    return this.sql.exec<{ id: number; label: string; created_at: number; expires_at: number | null }>("SELECT id, label, created_at, expires_at FROM tokens WHERE email = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY id", email.toLowerCase(), Date.now()).toArray();
   }
 
   /** Only the token's own person can revoke it. */
@@ -50,11 +53,20 @@ export class Directory extends DurableObject {
     this.sql.exec("UPDATE tokens SET revoked_at = ? WHERE id = ? AND email = ? AND revoked_at IS NULL", Date.now(), id, email.toLowerCase());
   }
 
-  async personForToken(hash: string): Promise<Person | null> {
+  async personForToken(hash: string): Promise<(Person & { tokenId: number }) | null> {
     const p = this.sql
-      .exec<{ email: string; name: string }>("SELECT p.email, p.name FROM tokens t JOIN people p ON p.email = t.email WHERE t.hash = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)", hash, Date.now())
+      .exec<{ email: string; name: string; tokenId: number }>("SELECT p.email, p.name, t.id AS tokenId FROM tokens t JOIN people p ON p.email = t.email WHERE t.hash = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)", hash, Date.now())
       .toArray()[0];
-    return p ? { email: p.email, name: p.name } : null;
+    return p ? { email: p.email, name: p.name, tokenId: p.tokenId } : null;
+  }
+
+  /** Runs this person started today, across every repo (a per-person cost cap; security review, 10-23). */
+  async runsToday(email: string): Promise<number> {
+    return this.sql.exec<{ n: number }>("SELECT n FROM person_runs WHERE email = ? AND day = ?", email, new Date().toISOString().slice(0, 10)).toArray()[0]?.n ?? 0;
+  }
+
+  async countRun(email: string): Promise<void> {
+    this.sql.exec("INSERT INTO person_runs(email, day, n) VALUES (?, ?, 1) ON CONFLICT(email, day) DO UPDATE SET n = n + 1", email, new Date().toISOString().slice(0, 10));
   }
 
   async addRepo(name: string, by: string, subscriptionId: string | null): Promise<void> {

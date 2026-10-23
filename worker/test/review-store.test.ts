@@ -81,7 +81,7 @@ test("run checks names the commit: anything but the head is refused", async () =
 test("run checks twice on one head is one run; after a push it cancels the older run and starts one for the new head", async () => {
   const { s, pr } = await withPr();
   const a = await s.co.runChecks(pr.id, "ann@x");
-  assert.deepEqual(await s.co.runChecks(pr.id, "ann@x", { sha: "f1" }), a);
+  assert.equal((await s.co.runChecks(pr.id, "ann@x", { sha: "f1" })).run, a.run);
   await s.push("fix", "f2");
   const b = await s.co.runChecks(pr.id, "ann@x");
   assert.notEqual(b.run, a.run);
@@ -179,6 +179,7 @@ test("a later run that doesn't re-report an open finding marks it fixed; one it 
   assert.equal(ctx.lastReviewedSha, "f1");
   assert.equal(ctx.runNumber, 2);
   assert.equal(ctx.open.length, 2);
+  await s.co.recordDelta(2, ["src/a.ts", "src/b.ts"]);
   await s.co.recordFindings(2, "correctness", [{ ...b, line: 10 }]);
   await s.co.recordStep(2, "correctness", "passed");
   await s.co.finishRun(2, "done");
@@ -250,17 +251,20 @@ test("merge runs the PR's CI on the merged commit in the container, then marks t
   assert.equal((await s.co.getPr(pr.id)).pr.state, "merged");
 });
 
-test("merge onto a target that moved meanwhile retries once on the new head", async () => {
+test("main moving during a merge isn't merged onto (only merges move main): the merge stops and main is put back", async () => {
   const { s, pr } = await mergeablePr();
   let calls = 0;
   s.checker = async (input) => {
+    if (input.mode === "restore") return { mode: "restore", restored: true };
     if (calls++ === 0) {
       s.heads.set("main", "m1");
       return { mode: "merge", merged: false, retry: true, reason: "main moved to m1", targetHead: "m1" }; // as container/check.ts answers
     }
     return { mode: "merge", merged: true, sha: `merged-onto-${String(input.expectedTarget)}`, checks: [] };
   };
-  assert.deepEqual(await s.co.merge(pr.id, "ann@x"), { ok: true, sha: "merged-onto-m1" });
+  const r = await s.co.merge(pr.id, "ann@x");
+  assert.equal(r.ok, false);
+  assert.ok(s.checkerCalls.some((c) => c.mode === "restore" && c.current === "m1"));
 });
 
 test("CI failing on the merged commit leaves the PR open and shows the failure", async () => {
@@ -301,6 +305,7 @@ test("a later run marks fixed only the findings of reviewers that ran and passed
   await s.co.finishRun(1, "done");
   await s.push("fix", "f2");
   await s.co.runChecks(pr.id, "ann@x");
+  await s.co.recordDelta(2, ["src/r.js", "src/c.js"]);
   await s.co.recordStep(2, "correctness", "passed"); // security didn't run (or errored) in run 2
   await s.co.finishRun(2, "done");
   const byClass = Object.fromEntries((await s.co.getPr(pr.id)).findings.map((f) => [f.class, f.status]));
@@ -400,6 +405,7 @@ test("an important finding is marked fixed only by a full run on a different com
   await s.co.finishRun(part.run, "done");
   assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open", "a partial run can't clear it");
   const full = await s.co.runChecks(pr.id, "ann@x");
+  await s.co.recordDelta(full.run, ["src/a.ts"]);
   await fullDone(s, full.run, { reviewers: ["correctness", "security"] });
   assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "fixed");
 });
@@ -408,7 +414,7 @@ test("single checks a clean full run on the head already covered return that run
   const { s, pr } = await withPr();
   const a = await s.co.runChecks(pr.id, "ann@x");
   await fullDone(s, a.run, { reviewers: ["correctness", "security"] });
-  assert.deepEqual(await s.co.runChecks(pr.id, "ann@x", { only: ["ci", "security"] }), a);
+  assert.equal((await s.co.runChecks(pr.id, "ann@x", { only: ["ci", "security"] })).run, a.run);
   assert.equal(s.runs.length, 1);
   assert.equal((await s.co.getPr(pr.id)).verdict.mergeable, true);
   const t = await s.co.runChecks(pr.id, "ann@x", { only: ["tests"] }); // tests didn't run in it: a real single check
@@ -528,7 +534,7 @@ test("a follow-up marks a finding fixed only if its file changed since the last 
 test("asking for a single check while the full checks run on that head joins the full run", async () => {
   const { s, pr } = await withPr();
   const a = await s.co.runChecks(pr.id, "ann@x");
-  assert.deepEqual(await s.co.runChecks(pr.id, "ann@x", { only: ["security"] }), a);
+  assert.equal((await s.co.runChecks(pr.id, "ann@x", { only: ["security"] })).run, a.run);
   assert.deepEqual([s.runs.length, s.terminated.length], [1, 0]);
 });
 
@@ -623,4 +629,89 @@ test("a direct push to main is put back even if its push event never arrives (th
   const restore = s.checkerCalls.find((c) => c.mode === "restore");
   assert.deepEqual(restore && [restore.sha, restore.current], ["m0", "evil1"]);
   assert.ok(s.alarmAt! >= before!, "and sets the next one");
+});
+
+// ── security review of 10-23 ──
+const restoring = (s: ReturnType<typeof store>, ok = true) => {
+  const fallback = s.checker;
+  s.checker = async (input) => (input.mode === "restore" ? { mode: "restore", restored: ok, ...(ok ? {} : { reason: "bad object" }) } : fallback(input));
+};
+
+test("a merge refuses to build on a main that isn't the protected commit, and puts main back", async () => {
+  const { s, pr } = await withPr(); // main protected at m0
+  restoring(s);
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  s.heads.set("main", "evil1"); // a direct push the guard hasn't seen yet
+  const r = await s.co.merge(pr.id, "ann@x");
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && r.blockers.some((b) => /main was changed outside a merge/.test(b)), JSON.stringify(r));
+  assert.equal(s.checkerCalls.some((c) => c.mode === "merge"), false, "nothing merged onto evil1");
+  assert.ok(s.checkerCalls.some((c) => c.mode === "restore" && c.current === "evil1"));
+});
+
+test("a restore that fails freezes merges until main is back on the protected commit", async () => {
+  const { s, pr } = await withPr();
+  restoring(s, false);
+  s.heads.set("main", "evil1");
+  await s.co.onPush("refs/heads/main", "evil1", "m0");
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  const r = await s.co.merge(pr.id, "ann@x");
+  assert.ok(!r.ok && r.blockers.some((b) => /couldn't be put back/.test(b)), JSON.stringify(r));
+  s.heads.set("main", "m0"); // a person fixed it
+  restoring(s, true);
+  await s.co.alarm();
+  assert.equal((await s.co.merge(pr.id, "ann@x")).ok, true);
+});
+
+test("each merge keeps its commit fetchable for a later restore (a hidden ref)", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await fullDone(s, a.run);
+  await s.co.merge(pr.id, "ann@x");
+  const call = s.checkerCalls.find((c) => c.mode === "merge")!;
+  assert.equal(call.keepRef, "refs/atc/protected/main");
+});
+
+test("an abandoned merge lock doesn't switch the main guard off", async () => {
+  const { s } = await withPr();
+  restoring(s);
+  s.q("INSERT INTO meta(key, value) VALUES ('merging', ?)", String(Date.now() - 3 * 3600_000));
+  s.heads.set("main", "evil1");
+  await s.co.onPush("refs/heads/main", "evil1", "m0");
+  assert.ok(s.checkerCalls.some((c) => c.mode === "restore"));
+});
+
+test("deleting main is undone: it's re-created at the protected commit", async () => {
+  const { s } = await withPr();
+  restoring(s);
+  s.heads.delete("main");
+  await s.co.alarm();
+  const r = s.checkerCalls.find((c) => c.mode === "restore");
+  assert.deepEqual(r && [r.sha, r.current], ["m0", ""]);
+});
+
+test("without a last reviewed commit, nothing earlier is marked fixed (a cancelled first run's findings stay open)", async () => {
+  const { s, pr } = await withPr();
+  const a = await s.co.runChecks(pr.id, "ann@x");
+  await s.co.recordFindings(a.run, "security", [{ file: "src/a.ts", line: 3, severity: "important", class: "injection", title: "t", evidence: "e" }]);
+  await s.push("fix", "f2");
+  const b = await s.co.runChecks(pr.id, "ann@x"); // cancels run 1: no done run, so no since
+  await s.co.recordDelta(b.run, null);
+  await fullDone(s, b.run, { reviewers: ["correctness", "security"] });
+  assert.equal((await s.co.getPr(pr.id)).findings[0]!.status, "open");
+});
+
+test("heads are read by full ref name, so a tag called main can't stand in for the branch", async () => {
+  const { s } = await withPr();
+  const refs: string[] = [];
+  const env = (s.co as unknown as { env: { ARTIFACTS: { get: (r: string) => Promise<Record<string, unknown>> } } }).env;
+  const get = env.ARTIFACTS.get;
+  env.ARTIFACTS.get = async (r: string) => {
+    const h = await get(r);
+    return { ...h, log: async (o: { ref: string }) => (refs.push(o.ref), (h.log as (o: { ref: string }) => Promise<unknown>)(o)) };
+  };
+  await s.co.alarm();
+  assert.ok(refs.length && refs.every((r) => r.startsWith("refs/heads/")), JSON.stringify(refs));
 });
