@@ -715,3 +715,26 @@ test("the protected commit is saved under the hidden ref as soon as it's known, 
   await s.co.alarm();
   assert.equal(s.checkerCalls.length, n, "once saved, not again");
 });
+
+test("a frozen repo doesn't retry its restore on every alarm (each try starts a container): only when main moves, or hourly", async () => {
+  const { s } = await withPr();
+  restoring(s, false);
+  s.heads.set("main", "evil1");
+  await s.co.alarm(); // the first try fails: frozen
+  const tries = () => s.checkerCalls.filter((c) => c.mode === "restore").length;
+  assert.equal(tries(), 1);
+  await s.co.alarm();
+  await s.co.alarm();
+  assert.equal(tries(), 1, "main hasn't moved: no new container run");
+  s.heads.set("main", "evil2");
+  await s.co.alarm();
+  assert.equal(tries(), 2, "main moved: try again");
+  const real = Date.now;
+  Date.now = () => real() + 61 * 60_000;
+  try {
+    await s.co.alarm();
+    assert.equal(tries(), 3, "an hour later: try again");
+  } finally {
+    Date.now = real;
+  }
+});

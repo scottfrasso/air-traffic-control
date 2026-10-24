@@ -27,6 +27,9 @@ const PROTECTED_KEY = "protected:main";
 const FROZEN_KEY = "frozen:main";
 /** A hidden ref holding the protected commit, so a restore can fetch it even after a force push and a cold cache. */
 const PROTECTED_REF = "refs/atc/protected/main";
+/** When a restore was last tried, and on which head ("<ms> <sha>"). */
+const TRIED_KEY = "restore-tried:main";
+const RETRY_FROZEN_MS = 60 * 60_000;
 /** The protected commit last saved under PROTECTED_REF. */
 const KEPT_KEY = "kept:main";
 /** How often the store checks main itself, in case a push event never comes (a new repo's first minutes; seen 10-17). */
@@ -324,6 +327,11 @@ export class RepoStore extends DurableObject<StoreEnv> {
     }
     // A merge in progress moves main itself and records it when it lands; an abandoned lock doesn't count.
     if (!fromMerge && this.mergeInProgress()) return;
+    // Frozen (a restore failed): every try starts a container, so try again only when main moves, or hourly
+    // (seen 10-24: a frozen test repo retried every 2 minutes and kept a container awake for a day).
+    const [triedAt, triedOn] = (this.meta(TRIED_KEY) ?? "").split(" ");
+    if (this.meta(FROZEN_KEY) && triedOn === (live ?? "") && Number(triedAt) > Date.now() - RETRY_FROZEN_MS) return;
+    this.setMeta(TRIED_KEY, `${Date.now()} ${live ?? ""}`);
     // Deleted (live null) or moved: put it back. The container re-creates a deleted main (security review, 10-23).
     const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);
     const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "restore", repo: ref, branch: PROTECTED_BRANCH, sha: known, current: live ?? "", keepRef: PROTECTED_REF })) as { error?: string; restored?: boolean; reason?: string };
