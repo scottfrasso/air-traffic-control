@@ -30,6 +30,7 @@ const PROTECTED_REF = "refs/atc/protected/main";
 /** When a restore was last tried, and on which head ("<ms> <sha>"). */
 const TRIED_KEY = "restore-tried:main";
 const RETRY_FROZEN_MS = 60 * 60_000;
+const RETRY_FROZEN_MAX_MS = 24 * 60 * 60_000;
 /** The protected commit last saved under PROTECTED_REF. */
 const KEPT_KEY = "kept:main";
 /** How often the store checks main itself, in case a push event never comes (a new repo's first minutes; seen 10-17). */
@@ -327,15 +328,18 @@ export class RepoStore extends DurableObject<StoreEnv> {
     }
     // A merge in progress moves main itself and records it when it lands; an abandoned lock doesn't count.
     if (!fromMerge && this.mergeInProgress()) return;
-    // Frozen (a restore failed): every try starts a container, so try again only when main moves, or hourly
-    // (seen 10-24: a frozen test repo retried every 2 minutes and kept a container awake for a day).
-    const [triedAt, triedOn] = (this.meta(TRIED_KEY) ?? "").split(" ");
-    if (this.meta(FROZEN_KEY) && triedOn === (live ?? "") && Number(triedAt) > Date.now() - RETRY_FROZEN_MS) return;
-    this.setMeta(TRIED_KEY, `${Date.now()} ${live ?? ""}`);
+    // Frozen (a restore failed): every try starts a container, so try again right away only if main moved, else back
+    // off: 1 h, 2 h, 4 h ... at most a day apart (ADR-0032; seen 10-24: a frozen test repo retried every 2 minutes
+    // and kept an 8 GiB container awake for a day).
+    const [triedAt, triedOn, triedN] = (this.meta(TRIED_KEY) ?? "").split(" ");
+    const same = triedOn === (live ?? "");
+    const tries = same ? Number(triedN) || 1 : 0;
+    if (this.meta(FROZEN_KEY) && same && Number(triedAt) > Date.now() - Math.min(RETRY_FROZEN_MAX_MS, RETRY_FROZEN_MS * 2 ** (tries - 1))) return;
+    this.setMeta(TRIED_KEY, `${Date.now()} ${live ?? ""} ${tries + 1}`);
     // Deleted (live null) or moved: put it back. The container re-creates a deleted main (security review, 10-23).
     const ref = await repoRef(this.env as unknown as Env, this.repo, "write", 600);
     const res = JSON.parse(await this.env.CHECKER.getByName(`review-${this.repo}`).run({ mode: "restore", repo: ref, branch: PROTECTED_BRANCH, sha: known, current: live ?? "", keepRef: PROTECTED_REF })) as { error?: string; restored?: boolean; reason?: string };
-    if (res.restored) this.sql.exec("DELETE FROM meta WHERE key = ?", FROZEN_KEY);
+    if (res.restored) this.sql.exec("DELETE FROM meta WHERE key IN (?, ?)", FROZEN_KEY, TRIED_KEY);
     // A restore that fails freezes merges: nothing may build on a main nobody reviewed until it's back.
     else this.setMeta(FROZEN_KEY, `main is at ${(live ?? "nothing").slice(0, 7)}, not ${known.slice(0, 7)}: ${(res.error ?? res.reason ?? "").slice(0, 200)}`);
     this.log(res.restored ? "branch.restored" : "branch.restore_failed", null, { branch: PROTECTED_BRANCH, from: live, to: known, eventSha, ...(res.restored ? {} : { reason: (res.error ?? res.reason ?? "").slice(0, 300) }) });

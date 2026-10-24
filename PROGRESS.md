@@ -2,7 +2,14 @@
 
 _Last updated 2026-10-17. Direction: PRs and an agent review pipeline on Cloudflare (ADR-0027)._
 
-## Live (2026-10-17)
+## Taken down (2026-10-24)
+
+Everything on Cloudflare was deleted for a vacation (security and cost): the `agentmesh-review` Worker and its Durable
+Objects, workflow, queues, push subscriptions and container app; the old ATC Worker `agentmesh` too. The Artifacts
+repos (data only) remain. To bring it back: a Cloudflare token, `pnpm setup:cloudflare`, `pnpm setup:agents`, then
+`pnpm e2e:review`. Why the last week cost ~$5 in container memory, and the fix: ADR-0032.
+
+## Live (2026-10-17, until 10-24)
 
 - Deployed as a separate Worker, **https://agentmesh-review.scottfrasso.workers.dev** (`agentmesh-review`, own queues
   `agentmesh-review-push-events` + DLQ); the ATC Worker `agentmesh` is untouched.

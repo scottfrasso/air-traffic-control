@@ -716,7 +716,7 @@ test("the protected commit is saved under the hidden ref as soon as it's known, 
   assert.equal(s.checkerCalls.length, n, "once saved, not again");
 });
 
-test("a frozen repo doesn't retry its restore on every alarm (each try starts a container): only when main moves, or hourly", async () => {
+test("a frozen repo doesn't retry its restore on every alarm (each try starts a container): right away only if main moves, else 1 h, 2 h, 4 h... at most a day", async () => {
   const { s } = await withPr();
   restoring(s, false);
   s.heads.set("main", "evil1");
@@ -730,10 +730,22 @@ test("a frozen repo doesn't retry its restore on every alarm (each try starts a 
   await s.co.alarm();
   assert.equal(tries(), 2, "main moved: try again");
   const real = Date.now;
-  Date.now = () => real() + 61 * 60_000;
+  const at = (minutes: number) => (Date.now = () => real() + minutes * 60_000);
   try {
+    at(61);
     await s.co.alarm();
-    assert.equal(tries(), 3, "an hour later: try again");
+    assert.equal(tries(), 3, "an hour after the last try: try again");
+    at(61 + 61);
+    await s.co.alarm();
+    assert.equal(tries(), 3, "then it waits longer: two hours");
+    at(61 + 121);
+    await s.co.alarm();
+    assert.equal(tries(), 4, "two hours after: try again");
+    at(61 + 121 + 24 * 60 + 1);
+    await s.co.alarm();
+    at(61 + 121 + 24 * 60 + 1 + 24 * 60 + 1);
+    await s.co.alarm();
+    assert.equal(tries(), 6, "never more than a day apart");
   } finally {
     Date.now = real;
   }

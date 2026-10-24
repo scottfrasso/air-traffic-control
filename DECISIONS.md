@@ -37,7 +37,8 @@ the raw spike findings (milestone 1).
 | [0028](docs/adr/0028-first-live-review-deployment.md) | First live deployment: separate Worker, Haiku/Sonnet, reviewer lanes and dedupe, temporary token bootstrap | Accepted |
 | [0029](docs/adr/0029-checks-run-when-asked.md) | Checks run only when asked (run_checks, single checks, stale verdicts); a UI built around the check track | Accepted, amended by 0030 |
 | [0030](docs/adr/0030-security-review-hardening.md) | Hardening after the security and quality reviews: protected main, CSRF, minApprovals, findings rules, cost caps, CI uids | Accepted, amended by 0031 |
-| [0031](docs/adr/0031-second-security-review.md) | Second security review: merges only onto the protected commit, cold-cache restores, freeze on failure; dependency updates | Accepted |
+| [0031](docs/adr/0031-second-security-review.md) | Second security review: merges only onto the protected commit, cold-cache restores, freeze on failure; dependency updates | Accepted, amended by 0032 |
+| [0032](docs/adr/0032-stuck-retry-cost.md) | A stuck retry kept a container awake: back off failed restores; price every background loop | Accepted |
 
 ## Milestone 1 spike findings (real Artifacts, 2026-10-10)
 
