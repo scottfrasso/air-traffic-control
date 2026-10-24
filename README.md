@@ -1,161 +1,100 @@
-# ATC: Air Traffic Control for coding agents
+# Reviews on Cloudflare
 
-**Early conflict signals and a landing sequence for many coding agents working on one repo.**
-Built on Cloudflare Workers and Artifacts for the "Build the next Git platform" competition.
+Pull requests on Cloudflare Artifacts repos, reviewed by Claude agents before a person has to look.
 
-https://github.com/user-attachments/assets/b39d2151-e981-463f-94a3-d87822c23004
+Agents push as often as they like: **a push never runs anything**, because checks cost money. When the work is done,
+the agent (or a person, in the web UI) asks to **run the checks** on that exact commit, and the PR goes through them:
 
-🎬 Demo video (6:52). Full quality: [`submission/atc-demo.mp4`](submission/atc-demo.mp4) · 60-second version: [`submission/atc-linkedin.mp4`](submission/atc-linkedin.mp4)
+1. **CI** runs the repo's own commands (`.atc/ci.yml`) in a container. If anything fails, the run stops there: no
+   agent time is spent on a red PR.
+2. A **classifier** agent reads the change and the author's intent and decides the risk tier (low, medium, high),
+   whether a person must look and why, and which reviewers to run.
+3. **Reviewers** run in parallel: correctness, security, tests. Each reports findings with evidence.
+4. **Verifiers** check every important finding independently; only findings that two of three votes confirm are
+   posted. Nits (at most five per reviewer) are shown but never block.
+5. The **verdict** is computed in code: CI, review (clean, findings, incomplete), security (clear, blocking), the
+   risk tier and how many human approvals it needs (0, 1 or 2), and what still blocks the merge.
 
-✈️ **Watch a recorded run, no setup or key needed: [https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay](https://agentmesh.scottfrasso.workers.dev/r/shop-261011185716?replay)** (use the 1X–8X buttons; click a parked plane to read its flight log)
+A push after that leaves the result in place but marks it stale until the checks run again; follow-up reviews look
+only at what changed since and don't repeat findings the author already answered. An agent can also run single checks
+(just CI, or one reviewer) while it iterates; merging still needs a full run on the head. Approvals cover one commit. An agent's approval never counts as a
+person's. Every change needs at least one person unless the repo opts out. Merging re-runs CI on the merged commit and
+only then moves the target branch, and `main` moves only that way: a direct push to it is put back.
 
-GitHub shows you a conflict at PR or merge time. By then two agents have each spent an hour on work that can't
-both land. ATC (internally `agentmesh`) watches every agent's pull request (each one is a fork in Cloudflare Artifacts)
-**while the work is in flight**. It tells agents early when another agent's change will break theirs, and it decides the
-**landing sequence**: who merges next, and why.
+Design and every decision: [ADR-0027](docs/adr/0027-pr-review-pipeline.md), amended by
+[ADR-0028](docs/adr/0028-first-live-review-deployment.md), [ADR-0029](docs/adr/0029-checks-run-when-asked.md) and
+[ADR-0030](docs/adr/0030-security-review-hardening.md).
+The story so far, with costs: [`docs/diary/`](docs/diary/).
 
-- **PR1** changes the signature of `applyDiscount`.
-- **PR2**, in another fork, adds a new caller of `applyDiscount` in a different file.
-- Plain `git merge` reports **no conflict**. Each PR typechecks on its own.
-- About 10–15 seconds after PR2 pushes, both agents get a **semantic-conflict signal** naming `applyDiscount` and the other PR.
-  That comes from a speculative merge plus `tsc` in a container. No one had asked to land yet.
-- ATC's sequence shows, for example, `#1 PR2 CLEARED: beats PR1 on applyDiscount, smaller diff` and `PR1 HOLD: lands after PR2`.
-- PR1 asks to land and merges. Only PR2 (the real conflict) is told to **go around**; it fixes the call and lands.
-  The three independent PRs are just re-checked on the new main and land in sequence with **no rebases**. Main typechecks.
+## How it's built
 
-![ATC replay: PR1 landing, PR2 rebased, three PRs going around](docs/screenshots/atc-replay.png)
+| Piece | Cloudflare | What it does |
+|---|---|---|
+| Repos | Artifacts | Git hosting; people and agents push branches with plain git |
+| PR store | Durable Object per repo (SQLite) | PRs, review runs, checks, findings, approvals, events |
+| Push events | Queues (per-repo event subscription) + DLQ | A push to any branch moves the PRs on it |
+| Review run | Workflows | One durable run per PR head: snapshot → CI → classifier → reviewers → verifiers |
+| Container | Containers (Durable Object–managed) | Snapshots, CI commands, merges, diffs |
+| Agents | Claude Managed Agents | Classifier, correctness, security, tests, verifier; each session has a budget |
+| People | Cloudflare Access + personal API tokens | Who approves; agents act as the person whose token they use |
 
-## Run the demo
+No repo credential ever enters an agent's sandbox: the container builds a read-only snapshot and the agents get
+files. Repo and PR content is treated as data, never as instructions.
+
+## Set it up
+
+You need a Cloudflare account (Workers Paid, Artifacts, Containers, Queues), Docker for the container image, and an
+Anthropic API key with Managed Agents access.
+
+1. Put `CLOUDFLARE_API_TOKEN` and `ANTHROPIC_API_KEY` in `.env` at the repo root (git-ignored).
+2. `pnpm install`
+3. `pnpm setup:agents` creates the five review agents and their sandbox environment, and writes their ids into
+   `worker/wrangler.jsonc`. `--dry-run` shows the plan.
+4. `pnpm setup:cloudflare` creates the queues and the Artifacts namespace and deploys the Worker with its secrets.
+5. Put **Cloudflare Access** in front of the Worker, and set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in
+   `worker/wrangler.jsonc`.
+6. Sign in, create a repository and a personal API token in the UI.
+
+Per repo, add:
+
+```yaml
+# .atc/ci.yml: the CI that gates the agents
+commands:
+  - name: install
+    run: pnpm install --frozen-lockfile
+  - name: test
+    run: pnpm test
+    timeout: 600
+```
+
+Optional: `.atc/review.yml` on main (session budgets in US cents: `classifier`, `reviewer`, `verifier`; and
+`minApprovals: 0` to let a low-risk change merge without a person), `.atc/owners`
+(globs of paths that always need a person), and `REVIEW.md` (what failure looks like in this repo; every reviewer
+reads it).
+
+## For coding agents
+
+MCP at `/mcp` with a personal token (`Authorization: Bearer atc_…`): `open_pr` (a draft), `run_checks` (when the work is
+done; `sha` to name the commit, `only` for single checks), `get_pr` (verdict, checks, open findings) and
+`resolve_finding`. The same operations are in the JSON API under `/api/repos/:repo/prs` (`POST …/:id/checks`), and
+`GET /api/prs` lists every repo's PRs.
+
+## Develop
 
 ```bash
-pnpm install
-./demo/run.sh          # end to end against the deployed Worker + real Artifacts, about 40 s
+pnpm -r typecheck
+pnpm test            # Worker: policy, store, orchestration (fake agents), container modes (local git), API, UI contract
+pnpm e2e:review      # live: a repo with two planted bugs must be caught, blocked, fixed and merged (needs a deployment)
 ```
 
-`.env` at the repo root needs `CLOUDFLARE_API_TOKEN` (Artifacts edit, for seeding the baseline) and `AGENTMESH_API_KEY`.
-The script prints a dashboard link (`/r/<baseline>`). Paste the API key once when it asks. Add `?replay` to replay the
-recorded run through the animation (1x–8x), which is how the video is made.
+## Status
 
-### Real agents
+Built and tested with fakes; not yet run against real Managed Agents. See [PROGRESS.md](PROGRESS.md).
 
-```bash
-pnpm --dir demo exec tsx src/live.ts 4     # fresh runway + 4 agent prompts + the `claude mcp add` command
-```
-See [`handover/02-run-real-claude-code-agents.md`](handover/02-run-real-claude-code-agents.md). Each Claude Code session
-calls `start_work` and gets a PR number plus ready-to-run git commands. It then works, pushes, follows `get_signals` and
-`get_clearance`, and calls `request_land`. Verified: two real Claude Code agents with colliding tasks ran concurrently. One landed,
-the other was told to go around, fixed the first agent's new caller, and landed. Main typechecks.
+## History
 
-Milestone checks, each against deployed resources:
-
-```bash
-cd demo
-pnpm exec tsx src/checks/m2-index.ts        # in-flight index: touched files, symbols, overlaps
-pnpm exec tsx src/checks/m3-signals.ts      # declare_intent / get_signals (agent B uses MCP)
-pnpm exec tsx src/checks/m4-speculative.ts  # speculative merge + typecheck → semantic conflict
-pnpm exec tsx src/teardown.ts               # delete old runs (repos, forks, subscriptions)
-cd ../worker && pnpm test                   # unit tests: symbols, signals, conflicts, landing order
-```
-
-## Architecture
-
-```
- agents (scripts or MCP clients)
-   │  git push (repo-scoped token)                 │ HTTP API / MCP: start_work, declare_intent,
-   ▼                                               ▼ get_signals, request_land
- ┌──────────────────────┐   pushed event    ┌────────────────────────────────────────────┐
- │ Artifacts            │ ───────────────▶  │ Worker "agentmesh"                         │
- │  baseline repo       │  (Queues event    │  queue consumer ──┐                        │
- │  one fork per agent  │   subscription,   │  /api, /mcp ──────┤                        │
- └──────────────────────┘   per fork)       │  /r/<baseline> dashboard (8-bit ATC)       │
-        ▲   ▲                               └───────────────────┼────────────────────────┘
-        │   │ readTree / readBlob / log / fork / createToken    ▼
-        │   └──────────────────────────────  Coordinator DO (SQLite, one per baseline)
-        │                                    forks · touched files · symbol deltas · imports
-        │                                    intents · signals · pair checks · event log
-        │                                    reconcile alarm (fallback for new subscriptions)
-        │                                         │ starts
-        │                                         ▼
-        │                                    PushPipeline Workflow (one per fork@sha)
-        │                                     1. index fork vs merge base (Artifacts binding)
-        │                                     2. apply index → overlap / signature signals
-        │                                     3. speculative merge with every other fork
-        │  git fetch / merge / tsc / push         │
-        └───────────────────────────────────  Checker DO + container (Sandbox, node24+git+tsc)
-                                              pair · single · land (fast-forward baseline)
-```
-
-### How each Cloudflare product is used
-
-| Product | Role |
-| --- | --- |
-| **Artifacts** | All repo storage. One baseline repo per project and one **fork per agent** (`<baseline>--pr<N>`), created with the Workers binding's `fork()`. Agents use plain `git` over HTTPS with repo-scoped tokens minted by `createToken()`. The Coordinator diffs forks without cloning, using `log()`, `readTree()` and `readBlob()`. |
-| **Artifacts events → Queues** | Each fork gets an `artifacts.repo` **`pushed`** event subscription delivering to the `agentmesh-push-events` queue. The Worker's queue consumer forwards pushes to the Coordinator. |
-| **Workers** | One Worker serves the HTTP API, the MCP server, the dashboard, and the queue consumer. |
-| **Durable Objects (SQLite)** | `Coordinator`, one per baseline, holds the in-flight index, intents, signals, pair-check results, landing state and event log. The `Checker` DO owns the container. |
-| **Containers / Sandbox** | `Checker` follows the Sandbox SDK 1.0 model (`ctx.container`). It clones forks, runs `git merge`, `tsc --noEmit`, and fast-forward landing pushes. |
-| **Workflows** | `PushPipeline` runs one durable, retried pipeline per push: index → signals → speculative merges. |
-| **Agents SDK (MCP)** | `/mcp` is a stateless MCP server (`createMcpHandler`) with tools `start_work`, `declare_intent`, `get_signals`, `get_clearance`, `request_land`, `get_history`, and `review` (for the optional review gate). |
-| **Durable Object WebSockets** | The Coordinator pushes every state change to dashboards over hibernatable WebSockets. It records snapshots for replay and sends HMAC-signed outbound webhooks. |
-
-### The rules
-
-- **Signals are context, not commands.** Kinds: `signature_change` (an export you use, edit, or plan to touch is changing),
-  `overlap` (same file), `intent_overlap`, `semantic_conflict` (the merge fails typecheck and neither fork does alone),
-  `merge_conflict` (textual), `rebase_required`, `land_blocked`, `landed`.
-- **Landing gate (a merge queue):** a PR lands only if it is **current and green**, meaning it merges onto the *current*
-  main and that exact commit typechecks. ATC does the merge itself, so agents never rebase just because main moved.
-  When PRs conflict, the one **closest to landing** wins: requested landing > checked on current main > green.
-  **Ties go to the smaller diff.** After a landing, only PRs that conflict with it go around; everyone else stays in line.
-- **ATC sequence:** every in-flight PR gets one clearance and one reason: `CLEARED`, `FOLLOW`, `HOLD`
-  (a conflicting PR lands first), `GO AROUND` (a conflicting PR landed first, or it no longer fits on main: rebase onto the new main, then land), `STAND DOWN`
-  (another attempt at the same task ships) or `STANDBY` (checks running). Agents read theirs with
-  `get_clearance`. The dashboard flies the planes in exactly this order.
-- **Checks reuse work** (ADR-0013): main is computed once per baseline head (incremental TypeScript state). Results are cached
-  by git tree hash, so a fork's own check is reused by every pair it's in, and each pair usually costs a single `tsc` on the merge.
-- **Optional review gate** (ADR-0023, off by default): PRs wait in `REVIEW` until a reviewer approves their latest push,
-  either a reviewer agent through the MCP `review` tool or a person with the APPROVE button on the runway. The note goes
-  into the flight log. Try it with `./demo/run.sh --review`.
-- **Competing attempts** (ADR-0026): agents that pass the same `task` to `declare_intent` are attempts at one task.
-  Once all are checked, ATC ships the best one (green, fewest conflicts, smallest blast radius, fewest files, smallest diff)
-  and tells the others to `STAND DOWN`, with why. A person can override with PICK on the runway. The winner's flight log
-  records what it was chosen over. If the attempt that ships goes quiet (no push, land request, intent or poll of its own clearance for 15 min,
-  configurable), the next one gets the task, so a stopped agent can't stall the others. Try it with `./demo/run.sh --attempts`.
-- **Flight log on main** (ADR-0019): when ATC lands a PR it attaches the PR's story (intent, signals, clearances and why
-  it went around) to the landed commit as a git note. `git fetch <baseline> refs/notes/atc:refs/notes/atc && git log --notes=atc`
-  shows why main looks the way it does; agents ask with `get_history`; on the dashboard, click a parked plane.
-- **Savings in numbers:** `run.sh` and the dashboard's SAVINGS panel report pairs checked, time to a conflict signal,
-  typecheck cache hits, and rebases ATC asked for vs. rebasing every open PR on every landing.
-
-Design decisions and their evidence are in [`DECISIONS.md`](DECISIONS.md) and [`docs/adr/`](docs/adr/).
-Status, including what's stubbed and cut, is in [`PROGRESS.md`](PROGRESS.md).
-
-## Repo layout
-
-| Path | What |
-| --- | --- |
-| `worker/` | The Worker: `coordinator.ts`, `pipeline.ts`, `checker.ts` + `container/`, `mcp.ts`, `api.ts`, `dashboard.html`, pure logic in `symbols.ts`, `signals.ts`, `conflicts.ts`, `landing.ts` (unit tested in `test/`) |
-| `demo/` | `run.sh` acceptance test, scripted agents (`scenario.ts`), milestone checks, seed and teardown tools |
-| `sample-repo/` | `shop-core`, the small TypeScript repo the agents work on |
-| `docs/` | ADRs, Cloudflare API notes, screenshots |
-| `handover/` | Standalone prompts for account-owner tasks done in the Cloudflare dashboard |
-
-## Deploy your own
-
-Needs a Workers Paid account, Docker (for the checker image) and an API token with Workers, Queues, Artifacts and
-Containers edit. Put `CLOUDFLARE_API_TOKEN=...` in `.env` at the repo root, then:
-
-```bash
-pnpm install
-pnpm setup:cloudflare --dry-run   # what it would create or change
-pnpm setup:cloudflare             # queues + Artifacts namespace if missing, wrangler.jsonc IDs, secrets, deploy
-./demo/run.sh
-```
-
-On a brand-new account, open Workers once in the dashboard to pick a `workers.dev` subdomain first. If your API token is
-IP-restricted, also set `CLOUDFLARE_AGENTMESH_WORKER_API_KEY` to a token with Queues edit only and no IP filter: the Worker
-uses it from Cloudflare's network. `setup:cloudflare` is idempotent and only touches resources named `agentmesh*`. It generates `AGENTMESH_API_KEY` into
-`.env` if you don't have one (paste it into the dashboard once) and writes `AGENTMESH_URL`, so `./demo/run.sh` targets
-your deployment.
+This repo began as **Air Traffic Control**, a coordination layer for many coding agents on one repo, entered in a
+Cloudflare hackathon on 2026-10-14 ([video](submission/atc-demo.mp4), [60 s cut](submission/atc-linkedin.mp4)).
+That code is in the git history before ADR-0027.
 
 MIT licensed.

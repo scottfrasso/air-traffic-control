@@ -1,6 +1,0 @@
-[
-  { "agent": "claude-discounts", "task": "Make discounts structured: change applyDiscount in src/pricing.ts to take a Discount object ({ kind: \"percent\" | \"fixed\", value: number }) instead of a percent number, and update every caller." },
-  { "agent": "claude-checkout", "task": "Add member pricing at checkout: create src/checkout.ts exporting memberPrice(price: Cents): Cents that gives members 15% off using applyDiscount from src/pricing.ts." },
-  { "agent": "claude-shipping", "task": "Add shipping: create src/shipping.ts with shippingCost(weightKg: number): Cents (499 cents flat + 150 cents per started kg), and add an optional shipping parameter to cartTotal in src/cart.ts." },
-  { "agent": "claude-tax", "task": "Support tax-exempt carts: add an optional taxExempt flag to cartTotal in src/cart.ts that skips applyTax." }
-]

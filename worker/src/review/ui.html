@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reviews</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root {
+    --paper: #f3f5f7; --sheet: #ffffff; --ink: #18202a; --muted: #5b6675; --rule: #d5dbe3; --rule-soft: #e6eaef;
+    --go: #1f8a5b; --hold: #b87308; --stop: #c8322f; --idle: #aab3bf; --act: #3949ab; --act-ink: #ffffff;
+    --go-wash: #e3f3ea; --hold-wash: #fbf0dc; --stop-wash: #fbe5e4; --act-wash: #e8eaf8;
+    --go-ink: #146343; --hold-ink: #7f4e00; --stop-ink: #a1221f;
+    --add: #e6f4ec; --add-mark: #b9e0c8; --del: #fbe9e8; --del-mark: #f1c4c1;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --lamp-glow: 0 0 0 4px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #12171e; --sheet: #192029; --ink: #e3e8ee; --muted: #93a0b0; --rule: #2c3643; --rule-soft: #222b36;
+      --go: #3fb27f; --hold: #e0a03a; --stop: #f0605a; --idle: #4b5767; --act: #8c9cf0; --act-ink: #12171e;
+      --go-wash: #16302a; --hold-wash: #33291a; --stop-wash: #3a1f22; --act-wash: #232a48;
+      --go-ink: #5fcf9b; --hold-ink: #f0b85c; --stop-ink: #ff8a84;
+      --add: #15291f; --add-mark: #1f4a33; --del: #2f1b1d; --del-mark: #5a2a2c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #12171e; --sheet: #192029; --ink: #e3e8ee; --muted: #93a0b0; --rule: #2c3643; --rule-soft: #222b36;
+    --go: #3fb27f; --hold: #e0a03a; --stop: #f0605a; --idle: #4b5767; --act: #8c9cf0; --act-ink: #12171e;
+    --go-wash: #16302a; --hold-wash: #33291a; --stop-wash: #3a1f22; --act-wash: #232a48;
+    --go-ink: #5fcf9b; --hold-ink: #f0b85c; --stop-ink: #ff8a84;
+    --add: #15291f; --add-mark: #1f4a33; --del: #2f1b1d; --del-mark: #5a2a2c;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.55 var(--sans); }
+  a { color: var(--act); text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--act); outline-offset: 2px; border-radius: 4px; }
+  code, .mono { font-family: var(--mono); font-size: 0.86em; }
+
+  /* ── frame ── */
+  .top { display: flex; align-items: center; gap: 20px; padding: 0 24px; height: 56px; border-bottom: 1px solid var(--rule); background: var(--sheet); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
+  .brand-mark { display: flex; gap: 3px; }
+  .brand-mark i { width: 7px; height: 7px; border-radius: 50%; background: var(--go); }
+  .brand-mark i:nth-child(2) { background: var(--hold); }
+  .brand-mark i:nth-child(3) { background: var(--stop); }
+  .top nav { display: flex; gap: 4px; }
+  .top nav a { color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
+  .top nav a[aria-current="page"] { color: var(--ink); background: var(--paper); }
+  .who { margin-left: auto; color: var(--muted); font-size: 13px; text-align: right; line-height: 1.3; }
+  .who b { color: var(--ink); font-weight: 500; display: block; }
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0; letter-spacing: -0.015em; font-weight: 700; }
+  h2 { font-size: 17px; margin: 0 0 12px; font-weight: 600; }
+  p { margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .err { color: var(--stop); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .spacer { flex: 1; }
+
+  /* ── controls ── */
+  button, .btn { font: 500 14px/1 var(--sans); padding: 9px 14px; border-radius: 7px; border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button.primary { background: var(--act); border-color: var(--act); color: var(--act-ink); }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--act); }
+  button.go { background: var(--go); border-color: var(--go); color: #fff; }
+  button.quiet { background: transparent; border-color: transparent; color: var(--muted); }
+  button.quiet:hover:not(:disabled) { color: var(--ink); border-color: var(--rule); }
+  button.danger { color: var(--stop); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  input, select, textarea { font: 14px/1.4 var(--sans); padding: 8px 10px; border: 1px solid var(--rule); border-radius: 7px; background: var(--sheet); color: var(--ink); max-width: 100%; }
+  textarea { width: 100%; min-height: 56px; resize: vertical; }
+  label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+  .split { position: relative; display: inline-flex; }
+  .split > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .split > button:nth-child(2) { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgba(255,255,255,0.35); padding: 9px 10px; }
+  .menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 5; min-width: 260px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 9px; padding: 6px; box-shadow: 0 10px 30px rgba(20, 30, 45, 0.16); }
+  .menu button { width: 100%; border: 0; justify-content: flex-start; padding: 9px 10px; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .menu button:hover { background: var(--paper); }
+  .menu button span { font-weight: 400; font-size: 12.5px; color: var(--muted); }
+
+  /* ── signal lamps: the one loud element ── */
+  .lamp { width: 12px; height: 12px; border-radius: 50%; background: var(--idle); flex: none; display: inline-block; }
+  .lamp.go { background: var(--go); box-shadow: var(--lamp-glow) var(--go-wash); }
+  .lamp.hold { background: var(--hold); box-shadow: var(--lamp-glow) var(--hold-wash); }
+  .lamp.stop { background: var(--stop); box-shadow: var(--lamp-glow) var(--stop-wash); }
+  .lamp.run { background: var(--act); box-shadow: var(--lamp-glow) var(--act-wash); animation: pulse 1.4s ease-in-out infinite; }
+  .lamp.off { background: transparent; border: 2px dashed var(--idle); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 7px transparent; opacity: 0.55; } }
+  @media (prefers-reduced-motion: reduce) { .lamp.run { animation: none; } }
+
+  .track { position: relative; display: grid; grid-template-columns: repeat(6, 1fr); background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 22px 8px 18px; }
+  .track::before { content: ""; position: absolute; left: calc(100% / 12); right: calc(100% / 12); top: 33px; height: 2px; background: var(--rule); }
+  .track.stale { border-style: dashed; }
+  .station { position: relative; padding: 0 10px; text-align: center; min-width: 0; }
+  .station .lamp { width: 24px; height: 24px; position: relative; z-index: 1; border: 4px solid var(--sheet); box-sizing: content-box; }
+  .station .lamp.off { border: 2px dashed var(--idle); width: 24px; height: 24px; background: var(--sheet); }
+  .station h3 { margin: 10px 0 2px; font-size: 14px; font-weight: 600; }
+  .station p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+  .station .subs { display: flex; flex-direction: column; align-items: center; gap: 1px; margin-top: 6px; }
+  .riskchip { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 5px; margin: 2px 0 3px; }
+  .riskchip.low { background: var(--go-wash); color: var(--go-ink); }
+  .riskchip.medium { background: var(--hold-wash); color: var(--hold-ink); }
+  .riskchip.high { background: var(--stop-wash); color: var(--stop-ink); }
+  .station .subs span { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .station .subs .lamp { width: 8px; height: 8px; border: 0; box-shadow: none; }
+
+  .mini { display: inline-flex; align-items: center; gap: 0; }
+  .mini .lamp { width: 10px; height: 10px; box-shadow: none; }
+  .mini .lamp + .lamp { margin-left: 10px; position: relative; }
+  .mini .lamp + .lamp::before { content: ""; position: absolute; right: 10px; top: 4px; width: 10px; height: 2px; background: var(--rule); }
+  .mini .lamp.off { width: 10px; height: 10px; border-width: 1.5px; }
+
+  /* ── dashboard ── */
+  .head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--rule); margin: 0 0 4px; overflow-x: auto; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); padding: 10px 14px; margin-bottom: -1px; white-space: nowrap; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--act); }
+  .tabs .count { font-size: 12px; background: var(--rule-soft); color: var(--muted); padding: 2px 7px; border-radius: 10px; }
+  .prs { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; }
+  .pr-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 130px minmax(0, 280px); gap: 18px; align-items: center; padding: 16px 20px; border-top: 1px solid var(--rule-soft); color: inherit; text-decoration: none; }
+  .pr-row:first-child { border-top: 0; }
+  .pr-row:hover { background: var(--paper); }
+  .pr-row .title { font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+  .pr-row .meta { font-size: 13px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
+  .pr-row .next { font-size: 13px; line-height: 1.4; }
+  .pr-row .next.go { color: var(--go-ink); font-weight: 600; }
+  .risk { font-size: 13px; color: var(--muted); line-height: 1.45; }
+  .risk b { font-weight: 600; color: var(--ink); }
+  .tag { display: inline-block; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 5px; background: var(--rule-soft); color: var(--muted); }
+  .tag.draft { background: var(--rule-soft); }
+  .tag.ready { background: var(--act-wash); color: var(--act); }
+  .tag.merged { background: var(--go-wash); color: var(--go-ink); }
+  .tag.closed { background: var(--stop-wash); color: var(--stop-ink); }
+  .tag.stale { background: var(--hold-wash); color: var(--hold-ink); }
+  .empty { padding: 48px 24px; text-align: center; color: var(--muted); }
+  .empty h2 { color: var(--ink); }
+  .side-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; margin-top: 40px; }
+  .panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 20px; }
+  .list-line { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--rule-soft); }
+  .list-line:first-of-type { border-top: 0; }
+  pre { font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; margin: 8px 0; background: var(--paper); border: 1px solid var(--rule-soft); border-radius: 8px; padding: 10px 12px; }
+
+  /* ── PR page ── */
+  .crumbs { font-size: 13px; color: var(--muted); margin-bottom: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .crumbs a { color: var(--muted); }
+  .pr-head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 22px; }
+  .pr-head .facts { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: 13.5px; color: var(--muted); }
+  .pr-head .facts b { color: var(--ink); font-weight: 500; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 16px 0 6px; }
+  .nextline { display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin-top: 14px; border-radius: 9px; background: var(--paper); border: 1px solid var(--rule-soft); font-size: 14px; }
+  .nextline.go { background: var(--go-wash); border-color: transparent; }
+  .nextline.hold { background: var(--hold-wash); border-color: transparent; }
+  .nextline.stop { background: var(--stop-wash); border-color: transparent; }
+  .banner { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px 16px; border-radius: 9px; background: var(--hold-wash); margin-bottom: 14px; font-size: 14px; }
+  .note { font-size: 13px; color: var(--muted); }
+  .section { margin-top: 28px; }
+  .intent { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 6px 16px; font-size: 14px; }
+  .intent dt { color: var(--muted); }
+  .intent dd { margin: 0; overflow-wrap: anywhere; }
+  .reasons { margin: 0; padding-left: 18px; }
+  .reasons li { margin: 3px 0; }
+
+  .finding { border: 1px solid var(--rule); border-left: 4px solid var(--idle); border-radius: 9px; background: var(--sheet); padding: 14px 16px; margin: 10px 0; }
+  .finding.important { border-left-color: var(--stop); }
+  .finding.nit { border-left-color: var(--idle); }
+  .finding.pre-existing { border-left-color: var(--hold); }
+  .finding.done { opacity: 0.7; }
+  .finding h4 { margin: 0; font-size: 14.5px; font-weight: 600; }
+  .finding .where { font-size: 12.5px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 6px; }
+  .finding .evidence { font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+  .finding .fix { font-size: 13.5px; margin: 6px 0 0; }
+  .finding .answer { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .finding .answer input { flex: 1 1 220px; }
+  .sev { font-size: 12px; font-weight: 600; }
+  .sev.important { color: var(--stop-ink); }
+  .sev.nit { color: var(--muted); }
+  .sev.pre-existing { color: var(--hold-ink); }
+
+  .files { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 20px; align-items: start; }
+  .filelist { position: sticky; top: 12px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 8px; font-size: 13px; max-height: calc(100vh - 24px); overflow: auto; }
+  .filelist a { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; }
+  .filelist a:hover { background: var(--paper); }
+  .filelist .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font-family: var(--mono); font-size: 12px; }
+  .plus { color: var(--go); font-family: var(--mono); font-size: 12px; }
+  .minus { color: var(--stop); font-family: var(--mono); font-size: 12px; }
+  .flag { width: 8px; height: 8px; border-radius: 50%; background: var(--stop); flex: none; }
+  .diff { border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: var(--sheet); margin-bottom: 18px; }
+  .diff > summary { list-style: none; cursor: pointer; display: flex; gap: 10px; align-items: center; padding: 10px 14px; background: var(--paper); border-bottom: 1px solid var(--rule); font-family: var(--mono); font-size: 13px; }
+  .diff > summary::-webkit-details-marker { display: none; }
+  .diff:not([open]) > summary { border-bottom: 0; }
+  .diff .scroll { overflow-x: auto; }
+  .diff table { border-collapse: collapse; width: 100%; font: 12.5px/1.6 var(--mono); }
+  .diff td { padding: 0 10px; white-space: pre; vertical-align: top; }
+  .diff td.n { color: var(--muted); text-align: right; width: 1%; user-select: none; opacity: 0.75; }
+  .diff tr.add td.c { background: var(--add); }
+  .diff tr.add td.n { background: var(--add-mark); }
+  .diff tr.del td.c { background: var(--del); }
+  .diff tr.del td.n { background: var(--del-mark); }
+  .diff tr.hunk td { color: var(--muted); background: var(--act-wash); padding-top: 3px; padding-bottom: 3px; }
+  .diff tr.inline td { white-space: normal; padding: 6px 12px 10px; background: var(--paper); font: 15px/1.55 var(--sans); }
+  .diff tr.inline .finding { margin: 4px 0; }
+  /* A long code line widens the table; keep the finding in view, not stretched across it. */
+  .diff .pin { position: sticky; left: 12px; max-width: min(860px, calc(100vw - 80px)); }
+
+  .check { border: 1px solid var(--rule); border-radius: 10px; background: var(--sheet); margin: 8px 0; }
+  .check > summary { list-style: none; cursor: pointer; display: flex; gap: 12px; align-items: center; padding: 12px 16px; }
+  .check > summary::-webkit-details-marker { display: none; }
+  .check .kind { font-size: 12px; color: var(--muted); }
+  .check pre { margin: 0 16px 14px; max-height: 420px; overflow: auto; }
+  .events { list-style: none; margin: 0; padding: 0; }
+  .events li { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 14px; padding: 8px 0; border-top: 1px solid var(--rule-soft); font-size: 13.5px; }
+  .events li:first-child { border-top: 0; }
+  .events time { color: var(--muted); }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+
+  @media (max-width: 900px) {
+    .pr-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .files { grid-template-columns: minmax(0, 1fr); }
+    .filelist { position: static; max-height: none; }
+    .side-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .top { padding: 0 16px; gap: 12px; }
+    .top nav a { padding: 6px 6px; }
+    .who { display: none; }
+    .brand-name { display: none; }
+    main { padding: 22px 16px 64px; }
+    h1 { font-size: 22px; }
+    .track { grid-template-columns: minmax(0, 1fr); padding: 14px 16px; }
+    .track::before { left: 27px; right: auto; top: 26px; bottom: 26px; width: 2px; height: auto; }
+    .station { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 12px; text-align: left; padding: 8px 0; }
+    .station > .lamp { grid-row: span 4; margin-top: 2px; }
+    .station h3 { margin: 0; }
+    .station .subs { align-items: flex-start; }
+    .station .riskchip { justify-self: start; }
+    .intent { grid-template-columns: minmax(0, 1fr); }
+    .intent dt { margin-top: 6px; }
+    .events li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/" data-nav><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">Reviews</span></a>
+  <nav id="nav"></nav>
+  <div class="who" id="who"></div>
+</header>
+<main id="app"><p class="muted">Loading…</p></main>
+<script>
+"use strict";
+// Every element is built with textContent: nothing from the server is ever parsed as HTML.
+const app = document.getElementById("app");
+let token = "";
+try { token = localStorage.getItem("atc-token") || ""; } catch (_) {}
+let timer = null;
+let me = null;
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+const show = (...els) => { app.replaceChildren(...els.flat(Infinity).filter((e) => e !== null && e !== undefined && e !== false)); };
+const short = (sha) => (sha || "").slice(0, 7);
+const enc = encodeURIComponent;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
+const ago = (t) => {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(t).toLocaleDateString();
+};
+
+async function api(method, path, body) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await fetch(path, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { signIn(); throw new Error("not signed in"); }
+  if (!res.ok) { const e = new Error(data.error || `HTTP ${res.status}`); e.data = data; throw e; }
+  return data;
+}
+
+function go(href) { prTab = "overview"; history.pushState(null, "", href); route(); }
+function link(href, text, cls) { return h("a", { href, class: cls, onclick: (e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); go(href); } }, text); }
+function fail(err) { return h("p", { class: "err" }, err.message || String(err)); }
+
+/**
+ * While something runs, look again every few seconds, but re-render only when what's shown changed, and never under
+ * someone's hands: not while they type in a field or have a menu open (review of 10-17).
+ */
+function poll(read, shown, render, ms) {
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    const busy = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.querySelector(".menu");
+    let now = shown;
+    try { now = await read(); } catch (_) {}
+    if (now !== shown && !busy) render(); else poll(read, busy ? shown : now, render, ms);
+  }, ms);
+}
+
+function signIn() {
+  clearTimeout(timer);
+  document.getElementById("nav").replaceChildren();
+  document.getElementById("who").replaceChildren();
+  const input = h("input", { type: "password", placeholder: "atc_…", autocomplete: "off", style: "flex: 1 1 320px" });
+  const submit = () => { token = input.value.trim(); try { localStorage.setItem("atc-token", token); } catch (_) {} route(); };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  show(h("div", { class: "panel", style: "max-width: 560px; margin: 48px auto" },
+    h("h1", {}, "Sign in"),
+    h("p", { class: "muted", style: "margin-top: 10px" }, "Sign in through Cloudflare Access, or paste a personal API token. The token stays in this browser."),
+    h("div", { class: "row", style: "margin-top: 16px" }, input, h("button", { class: "primary", onclick: submit }, "Sign in")),
+    h("p", { class: "note", style: "margin-top: 14px" }, "With a token you can read everything and run checks. Approving a merge needs an Access sign-in, so an agent's token can never approve its own work.")));
+}
+
+function frame(page) {
+  document.getElementById("nav").replaceChildren(
+    h("a", { href: "/", "aria-current": page === "prs" ? "page" : null, onclick: (e) => { e.preventDefault(); go("/"); } }, "Pull requests"),
+    h("a", { href: "/settings", "aria-current": page === "settings" ? "page" : null, onclick: (e) => { e.preventDefault(); go("/settings"); } }, "Repos and tokens"));
+  document.getElementById("who").replaceChildren(h("b", {}, me.email), me.via === "access" ? "Signed in with Access" : "Signed in with a token");
+}
+
+// ── reading a PR's state ──────────────────────────────────────────────
+
+const REVIEWER_NAMES = { correctness: "Correctness", security: "Security", tests: "Tests" };
+const parseJson = (s, d) => { try { return s ? JSON.parse(s) : d; } catch (_) { return d; } };
+
+/** The six stations of the track, each with a lamp (go, hold, stop, run, idle, off) and a line of detail. */
+function stations(view) {
+  const v = view.verdict, run = view.run, pr = view.pr;
+  const scope = run ? parseJson(run.scope, null) : null;
+  const running = run && run.status === "running";
+  const ci = view.checks.filter((c) => c.kind === "ci");
+  const step = (name) => view.checks.find((c) => c.kind === "step" && c.name === name);
+  const cls = run ? parseJson(run.classification, null) : null;
+  const open = view.findings.filter((f) => f.status === "open");
+  const out = [];
+
+  if (!run) out.push({ key: "ci", name: "CI", lamp: "idle", text: "Waits for run checks" });
+  else if (scope && !scope.includes("ci")) out.push({ key: "ci", name: "CI", lamp: "off", text: "Not in this run" });
+  else if (ci.some((c) => c.status === "failed" || c.status === "errored")) out.push({ key: "ci", name: "CI", lamp: "stop", text: `${ci.filter((c) => c.status !== "passed").map((c) => c.name).join(", ")} failed` });
+  else if (ci.length === 1 && ci[0].status === "skipped") out.push({ key: "ci", name: "CI", lamp: "hold", text: "No CI configured" });
+  else if (ci.length && ci.every((c) => c.status === "passed")) out.push({ key: "ci", name: "CI", lamp: "go", text: `${plural(ci.length, "command")} passed` });
+  else out.push({ key: "ci", name: "CI", lamp: running ? "run" : "idle", text: running ? "Running the repo's commands" : "Didn't run" });
+
+  const ciRed = v.ci === "fail";
+  const tri = step("classifier");
+  if (!run) out.push({ key: "triage", name: "Risk triage", lamp: "idle", text: "Picks the reviewers" });
+  else if (scope) out.push({ key: "triage", name: "Risk triage", lamp: "off", text: "Skipped for single checks" });
+  else if (ciRed) out.push({ key: "triage", name: "Risk triage", lamp: "off", text: "Stopped by CI" });
+  else if (tri && tri.status === "errored") out.push({ key: "triage", name: "Risk triage", lamp: "hold", text: "Triage failed: every reviewer runs, and a person must look" });
+  else if (cls) out.push({ key: "triage", name: "Risk triage", lamp: "go", risk: cls.tier, text: cls.needsHuman ? "Needs a person" : "No person needed" });
+  else out.push({ key: "triage", name: "Risk triage", lamp: running ? "run" : "idle", text: running ? "Waiting for CI" : "Didn't run" });
+
+  const chosen = scope ? scope.filter((c) => c !== "ci") : cls ? cls.reviewers : [];
+  const subs = ["correctness", "security", "tests"].map((r) => {
+    const s = step(r), mine = open.filter((f) => f.reviewer === r && f.severity === "important").length;
+    const lamp = !chosen.includes(r) ? "off" : !s ? (running && !ciRed ? "run" : "idle") : s.status === "errored" ? "hold" : mine ? "stop" : "go";
+    return { name: REVIEWER_NAMES[r], lamp, title: !chosen.includes(r) ? "not picked" : !s ? "running" : s.status === "errored" ? `errored: ${s.log}` : mine ? plural(mine, "important finding") : "clean" };
+  });
+  const important = open.filter((f) => f.severity === "important").length;
+  const anyErr = subs.some((s) => s.lamp === "hold");
+  const reviewLamp = !run || (!chosen.length && !running) ? "idle" : ciRed ? "off" : subs.some((s) => s.lamp === "run") ? "run" : important ? "stop" : anyErr ? "hold" : "go";
+  out.push({ key: "review", name: "Agent review", lamp: reviewLamp, subs: run && !ciRed ? subs : null,
+    text: !run ? "Correctness, security, tests" : ciRed ? "Stopped by CI" : reviewLamp === "run" ? "Reviewing the change" : important ? plural(important, "important finding") : anyErr ? "A reviewer errored" : "No important findings" });
+
+  const stepLogs = view.checks.filter((c) => c.kind === "step" && REVIEWER_NAMES[c.name]).map((c) => c.log);
+  const dropped = stepLogs.reduce((n, l) => n + Number((/(\d+) dropped/.exec(l) || [0, 0])[1]), 0);
+  const verifyErr = view.checks.some((c) => c.kind === "step" && c.name.startsWith("verify ") && c.status === "errored");
+  out.push({ key: "verify", name: "Verification", lamp: reviewLamp === "idle" || reviewLamp === "off" ? reviewLamp : reviewLamp === "run" ? "run" : verifyErr ? "hold" : "go",
+    text: reviewLamp === "idle" ? "Each finding is re-checked" : reviewLamp === "off" ? "Stopped by CI" : reviewLamp === "run" ? "Re-checking findings" : verifyErr ? "Some findings couldn't be checked" : dropped ? `${plural(dropped, "false alarm")} dropped` : "Every finding confirmed" });
+
+  const need = v.requiredApprovals, got = v.approvals;
+  const nonAuthor = v.needsNonAuthor;
+  const reviewOver = v.checks === "done" || v.checks === "stale" || v.checks === "partial";
+  out.push({ key: "approvals", name: "Approvals", lamp: pr.state === "merged" ? "go" : !reviewOver || v.checks === "partial" ? "idle" : need === 0 ? "go" : got >= need && !nonAuthor ? "go" : "hold",
+    text: pr.state === "merged" ? "Approved" : !reviewOver ? "Set by the risk" : v.checks === "partial" ? "Set by a full run" : need === 0 ? "None needed" : `${got} of ${need}${nonAuthor ? ", one not the author" : ""}` });
+
+  out.push({ key: "merge", name: "Merge", lamp: pr.state === "merged" ? "go" : pr.state === "closed" ? "off" : v.mergeable ? "go" : reviewOver ? "stop" : "idle",
+    text: pr.state === "merged" ? "Merged" : pr.state === "closed" ? "Closed" : v.mergeable ? "Ready to merge" : reviewOver ? "Blocked" : "After every check" });
+  return out;
+}
+
+/** The one thing to do next, in plain words, and how urgent it looks. */
+function nextStep(pr, v) {
+  if (pr.state === "merged") return { tone: "go", text: "Merged." };
+  if (pr.state === "closed") return { tone: "", text: "Closed." };
+  if (v.mergeable) return { tone: "go", text: "Every check passed and the approvals are in. Ready to merge." };
+  if (pr.state === "draft" && v.checks === "not_run") return { tone: "", text: "Draft. The agent is still working; nothing runs until it asks for checks." };
+  if (v.checks === "running") return { tone: "", text: "Checks are running." };
+  if (v.checks === "stale") return { tone: "hold", text: `The head moved to ${short(pr.head)} after the checks ran on ${short(v.checkedSha)}. Run the checks again.` };
+  if (v.checks === "not_run") return { tone: "hold", text: "Checks haven't run on this commit." };
+  if (v.ci === "fail") return { tone: "stop", text: "CI failed, so the review agents didn't run. Fix it and run the checks again." };
+  if (v.checks === "partial") return { tone: "hold", text: "Only some checks ran. Run all of them before merging." };
+  if (v.openImportant) return { tone: "stop", text: `${plural(v.openImportant, "open important finding")}. The agent fixes them and runs the checks again, or a person answers them.` };
+  if (v.approvals < v.requiredApprovals || v.needsNonAuthor) {
+    const other = v.needsNonAuthor ? ", one of them from someone other than the author" : "";
+    return { tone: "hold", text: `Waiting for people: ${plural(v.requiredApprovals, "approval")} needed${other}. ${v.approvals ? `${v.approvals} so far.` : "None yet."}` };
+  }
+  return { tone: "hold", text: v.blockers.join("; ") };
+}
+
+function lamp(state, title) { return h("span", { class: `lamp ${state}`, title, "aria-label": title, role: "img" }); }
+
+function track(view) {
+  const stale = view.verdict.checks === "stale";
+  return h("section", { class: `track${stale ? " stale" : ""}`, "aria-label": "Checks" },
+    stations(view).map((s) => h("div", { class: "station" },
+      h("span", { class: `lamp ${s.lamp}`, "aria-hidden": "true" }),
+      h("h3", {}, s.name),
+      s.risk ? h("span", { class: `riskchip ${s.risk}` }, `${s.risk[0].toUpperCase()}${s.risk.slice(1)} risk`) : null,
+      h("p", {}, s.text),
+      s.subs ? h("div", { class: "subs" }, s.subs.map((x) => h("span", { title: x.title }, lamp(x.lamp, `${x.name}: ${x.title}`), x.name))) : null)));
+}
+
+/** A dashboard row's six lamps, from the compact summary. */
+function miniLamps(s) {
+  const v = s.verdict, step = (n) => s.steps.find((x) => x.kind === "step" && x.name === n);
+  const ran = !!s.run, running = s.run && s.run.status === "running", ciRed = v.ci === "fail";
+  const triage = step("classifier");
+  const lamps = [
+    !ran ? "idle" : v.ci === "pass" ? "go" : ciRed ? "stop" : v.ci === "none" ? "hold" : running ? "run" : "off",
+    !ran ? "idle" : ciRed ? "off" : triage && triage.status === "errored" ? "hold" : v.tier ? "go" : running ? "run" : "off",
+    !ran ? "idle" : ciRed ? "off" : v.review === "pending" ? (running ? "run" : "idle") : v.review === "clean" ? "go" : v.review === "findings" ? "stop" : v.review === "incomplete" ? "hold" : "off",
+    !ran ? "idle" : ciRed ? "off" : v.security === "pending" ? (running ? "run" : "idle") : v.security === "clear" ? "go" : v.security === "blocking" ? "stop" : "off",
+    s.pr.state === "merged" ? "go" : !ran || running ? "idle" : v.approvals >= v.requiredApprovals && !v.needsNonAuthor ? "go" : "hold",
+    s.pr.state === "merged" ? "go" : v.mergeable ? "go" : ran && !running ? "stop" : "idle",
+  ];
+  const names = ["CI", "Risk triage", "Agent review", "Security", "Approvals", "Merge"];
+  return h("span", { class: "mini", "aria-label": names.map((n, i) => `${n} ${lamps[i]}`).join(", "), role: "img" }, lamps.map((l, i) => h("span", { class: `lamp ${l}`, title: names[i] })));
+}
+
+// ── dashboard ─────────────────────────────────────────────────────────
+
+const BUCKETS = [
+  { key: "you", name: "Needs you", test: (s) => s.pr.state === "ready" && s.verdict.checks === "done" && (s.verdict.mergeable || (s.verdict.ci !== "fail" && s.verdict.openImportant === 0 && (s.verdict.approvals < s.verdict.requiredApprovals || s.verdict.needsNonAuthor))) },
+  { key: "agent", name: "Agent's turn", test: (s) => ["draft", "ready"].includes(s.pr.state) && s.verdict.checks !== "running" && !BUCKETS[0].test(s) },
+  { key: "running", name: "Running", test: (s) => ["draft", "ready"].includes(s.pr.state) && s.verdict.checks === "running" },
+  { key: "done", name: "Merged and closed", test: (s) => ["merged", "closed"].includes(s.pr.state) },
+];
+let bucket = null;
+
+async function dashboard() {
+  clearTimeout(timer);
+  frame("prs");
+  const { prs, unavailable } = await api("GET", `/api/prs`);
+  if (!bucket) bucket = (BUCKETS.find((b) => prs.some(b.test)) || BUCKETS[0]).key;
+  const b = BUCKETS.find((x) => x.key === bucket);
+  const rows = prs.filter(b.test);
+  show(
+    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Pull requests"), h("p", { class: "muted", style: "margin: 6px 0 0" }, "Agents push as often as they like. Checks run only when an agent, or you, asks for them."))),
+    h("div", { class: "tabs", role: "tablist" }, BUCKETS.map((x) => h("button", { role: "tab", "aria-selected": String(x.key === bucket), onclick: () => { bucket = x.key; dashboard().catch((e) => show(fail(e))); } }, x.name, " ", h("span", { class: "count" }, prs.filter(x.test).length)))),
+    h("div", { class: "prs", style: "margin-top: 14px" }, rows.length ? rows.map(prRow) : h("div", { class: "empty" }, emptyText(bucket, prs.length))),
+    unavailable && unavailable.length ? h("p", { class: "note", style: "margin-top: 12px" }, `Couldn't load ${unavailable.join(", ")} just now; they'll show again on the next refresh.`) : null,
+  );
+  if (prs.some((s) => s.verdict.checks === "running")) poll(async () => JSON.stringify((await api("GET", `/api/prs`)).prs.map((x) => [x.pr.id, x.repo, x.verdict, x.steps])), JSON.stringify(prs.map((x) => [x.pr.id, x.repo, x.verdict, x.steps])), route, 8000);
+}
+
+function emptyText(key, total) {
+  if (!total) return [h("h2", {}, "No pull requests yet"), h("p", {}, "Create a repository under Repos and tokens, push a branch, and open a draft PR (or let an agent do it over MCP).")];
+  return { you: [h("h2", {}, "Nothing waiting on you"), h("p", {}, "PRs land here once their checks pass and they need your approval or a merge.")],
+    agent: [h("p", {}, "No PR is waiting on an agent.")], running: [h("p", {}, "No checks are running.")], done: [h("p", {}, "Nothing merged or closed yet.")] }[key];
+}
+
+function prRow(s) {
+  const v = s.verdict, n = nextStep(s.pr, v);
+  return link(`/repos/${enc(s.repo)}/prs/${s.pr.id}`, [
+    miniLamps(s),
+    h("div", {},
+      h("div", { class: "title" }, s.pr.title),
+      h("div", { class: "meta" },
+        h("span", {}, `${s.repo} #${s.pr.id}`),
+        h("span", { class: "mono" }, `${s.pr.source} → ${s.pr.target}`),
+        h("span", { class: `tag ${s.pr.state}` }, s.pr.state),
+        v.checks === "stale" ? h("span", { class: "tag stale" }, "stale") : null,
+        h("span", {}, ago(s.updatedAt)))),
+    h("div", { class: "risk" }, h("div", {}, v.tier ? h("span", { class: `riskchip ${v.tier}` }, `${v.tier[0].toUpperCase()}${v.tier.slice(1)} risk`) : "Not triaged"),
+      h("div", {}, v.requiredApprovals ? `${v.approvals} of ${v.requiredApprovals} approvals` : v.tier ? "No approval needed" : "")),
+    h("div", { class: `next ${n.tone === "go" ? "go" : ""}` }, n.text),
+  ], "pr-row");
+}
+
+// ── repos and tokens ──────────────────────────────────────────────────
+
+async function settings() {
+  frame("settings");
+  const [{ repos }, { tokens }] = await Promise.all([api("GET", `/api/repos`), api("GET", `/api/tokens`)]);
+  const name = h("input", { placeholder: "repo-name", style: "flex: 1 1 200px" });
+  const msg = h("span", { class: "err small" });
+  const label = h("input", { placeholder: "What it's for, e.g. laptop agent", style: "flex: 1 1 200px" });
+  const made = h("div");
+  show(
+    h("div", { class: "head" }, h("h1", {}, "Repos and tokens")),
+    h("div", { class: "side-grid", style: "margin-top: 0" },
+      h("section", { class: "panel" },
+        h("h2", {}, "Repositories"),
+        repos.length ? repos.map((r) => h("div", { class: "list-line" }, link(`/repos/${enc(r.name)}`, r.name), h("span", { class: "spacer" }), h("span", { class: "muted small" }, `by ${r.created_by}`))) : h("p", { class: "muted" }, "No repositories yet."),
+        h("div", { class: "row", style: "margin-top: 14px" }, name, h("button", { onclick: async () => { try { await api("POST", `/api/repos`, { name: name.value.trim() }); route(); } catch (e) { msg.textContent = e.message; } } }, "Create repository")), msg),
+      h("section", { class: "panel" },
+        h("h2", {}, "Personal API tokens"),
+        h("p", { class: "muted small" }, "For git, the API, and coding agents over MCP at /mcp. An agent using your token acts as you, but can't approve."),
+        tokens.map((t) => h("div", { class: "list-line" }, h("span", {}, t.label), h("span", { class: "spacer" }), h("span", { class: "muted small" }, ago(t.created_at)), h("button", { class: "quiet danger", disabled: me.via !== "access" && !t.current, title: t.current ? "This is the token you're signed in with" : null, onclick: async () => { if (t.current && !confirm("Revoke the token you're signed in with? You'll be signed out.")) return; await api("DELETE", `/api/tokens/${t.id}`); route(); } }, t.current ? "Revoke (this one)" : "Revoke"))),
+        me.via === "access"
+          ? h("div", { class: "row", style: "margin-top: 14px" }, label, h("button", { onclick: async () => { const t = await api("POST", `/api/tokens`, { label: label.value.trim() || "token" }); made.replaceChildren(h("p", { class: "small", style: "margin-top: 12px" }, "Copy it now. It won't be shown again. It works for 90 days."), h("pre", {}, t.token)); } }, "Create token"))
+          : h("p", { class: "note", style: "margin-top: 14px" }, "Creating tokens, and revoking any but your own, needs an Access sign-in, so a token can't make more of itself."),
+        made)),
+  );
+}
+
+async function repoPage(repo) {
+  frame("settings");
+  const { prs } = await api("GET", `/api/repos/${enc(repo)}/prs`);
+  const creds = h("div");
+  const title = h("input", { placeholder: "What the change does", style: "width: 100%" });
+  const source = h("input", { placeholder: "branch with the work", style: "width: 100%" });
+  const target = h("input", { placeholder: "main", style: "width: 100%" });
+  const intent = Object.fromEntries(["what", "why", "testing", "risk", "revert"].map((k) => [k, h("textarea", {})]));
+  const LABELS = { what: "What it changes", why: "Why", testing: "How it's tested", risk: "Risk", revert: "How to revert" };
+  const msg = h("span", { class: "err small" });
+  show(
+    h("div", { class: "crumbs" }, link("/settings", "Repos and tokens"), h("span", {}, "/")),
+    h("div", { class: "head" }, h("h1", {}, repo)),
+    h("div", { class: "side-grid", style: "margin-top: 0" },
+      h("section", { class: "panel" },
+        h("h2", {}, "Pull requests"),
+        prs.length ? prs.map((p) => h("div", { class: "list-line" }, h("span", { class: `tag ${p.state}` }, p.state), link(`/repos/${enc(repo)}/prs/${p.id}`, `#${p.id} ${p.title}`))) : h("p", { class: "muted" }, "None yet."),
+        h("h2", { style: "margin-top: 24px" }, "Push a branch"),
+        h("button", { onclick: async () => { const c = await api("POST", `/api/repos/${enc(repo)}/git-credentials`); creds.replaceChildren(h("p", { class: "muted small", style: "margin-top: 10px" }, `A push token, valid for ${Math.round(c.expiresInSeconds / 3600)} hours:`), h("pre", {}, `${c.commands.env}\ngit clone ${c.remote}\ngit push ${c.remote} HEAD:<branch>`)); } }, "Get git credentials"),
+        h("p", { class: "note", style: "margin-top: 10px" }, "Push to a branch and open a PR. main only moves through a merge: a direct push to it is put back."),
+        creds),
+      h("section", { class: "panel" },
+        h("h2", {}, "Open a draft pull request"),
+        h("p", { class: "muted small" }, "Drafts and pushes run nothing. Run the checks when the work is done."),
+        h("label", {}, "Title"), title,
+        h("div", { class: "form-grid" }, h("div", {}, h("label", {}, "From branch"), source), h("div", {}, h("label", {}, "Into"), target)),
+        Object.entries(intent).map(([k, el]) => [h("label", {}, LABELS[k]), el]),
+        h("div", { class: "row", style: "margin-top: 14px" }, h("button", { class: "primary", onclick: async () => {
+          try {
+            const p = await api("POST", `/api/repos/${enc(repo)}/prs`, { title: title.value, source: source.value.trim(), target: target.value.trim() || undefined, intent: Object.fromEntries(Object.entries(intent).map(([k, el]) => [k, el.value])) });
+            go(`/repos/${enc(repo)}/prs/${p.id}`);
+          } catch (e) { msg.textContent = e.message; }
+        } }, "Open draft PR"), msg))),
+  );
+}
+
+// ── PR page ───────────────────────────────────────────────────────────
+
+const SEV = { important: 0, "pre-existing": 1, nit: 2 };
+let prTab = "overview";
+
+function findingCard(repo, view, f, refresh) {
+  const kind = h("select", { "aria-label": "Answer" }, ["wrong", "intentional", "wontfix"].map((k) => h("option", { value: k }, { wrong: "It's wrong", intentional: "It's intentional", wontfix: "Won't fix" }[k])));
+  const reason = h("input", { placeholder: "Why, for the next reviewer", "aria-label": "Reason" });
+  const msg = h("span", { class: "err small" });
+  const needsAccess = f.severity === "important" && me.via !== "access";
+  return h("article", { class: `finding ${f.severity}${f.status !== "open" ? " done" : ""}` },
+    h("div", { class: "row" }, h("span", { class: `sev ${f.severity}` }, f.severity === "pre-existing" ? "Pre-existing" : f.severity === "important" ? "Important" : "Nit"), h("h4", {}, f.title)),
+    h("div", { class: "where" }, h("span", { class: "mono" }, `${f.file}:${f.line}`), h("span", {}, REVIEWER_NAMES[f.reviewer] || f.reviewer), h("span", {}, f.class), f.status !== "open" ? h("span", { class: "tag merged" }, f.status) : null),
+    h("div", { class: "evidence" }, f.evidence),
+    f.suggestion ? h("p", { class: "fix" }, h("b", {}, "Suggested fix: "), f.suggestion) : null,
+    f.resolution ? h("p", { class: "note" }, `${f.resolution.by} answered: ${f.resolution.kind}. ${f.resolution.reason}`) : null,
+    f.status === "open" && ["draft", "ready"].includes(view.pr.state) ? answer() : null);
+  function answer() {
+    const box = h("div", { class: "answer" });
+    const opener = h("button", { class: "quiet", disabled: needsAccess, title: needsAccess ? "Answering an important finding needs an Access sign-in" : null, onclick: () => {
+      box.replaceChildren(kind, reason, h("button", { onclick: async () => {
+        try { await api("POST", `/api/repos/${enc(repo)}/prs/${view.pr.id}/findings/${f.id}/resolve`, { kind: kind.value, reason: reason.value }); refresh(); } catch (e) { msg.textContent = e.message; }
+      } }, "Send answer"), h("button", { class: "quiet", onclick: () => box.replaceChildren(opener) }, "Cancel"), msg);
+      reason.focus();
+    } }, needsAccess ? "Answering needs Access" : "Answer instead of fixing");
+    box.append(opener);
+    return box;
+  }
+}
+
+/** A unified diff, file by file, with each finding under the line it points at. */
+function parseDiff(text) {
+  const files = [];
+  let f = null;
+  for (const line of text.replace(/\n$/, "").split("\n")) {
+    if (line.startsWith("diff --git")) { const m = / b\/(.+)$/.exec(line); f = { path: m ? m[1] : line, lines: [], add: 0, del: 0 }; files.push(f); continue; }
+    if (!f || /^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode)/.test(line)) continue;
+    f.lines.push(line);
+    if (line[0] === "+") f.add++; else if (line[0] === "-") f.del++;
+  }
+  return files;
+}
+
+function fileDiff(file, findings, card) {
+  const table = h("table");
+  let oldLine = 0, newLine = 0;
+  const here = findings.filter((x) => x.file === file.path);
+  const placed = new Set();
+  for (const line of file.lines) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
+    if (hunk) { oldLine = +hunk[1]; newLine = +hunk[2]; table.append(h("tr", { class: "hunk" }, h("td", { class: "n" }), h("td", { class: "n" }), h("td", { class: "c" }, line))); continue; }
+    const kind = line[0] === "+" ? "add" : line[0] === "-" ? "del" : "ctx";
+    table.append(h("tr", { class: kind }, h("td", { class: "n" }, kind === "add" ? "" : oldLine), h("td", { class: "n" }, kind === "del" ? "" : newLine), h("td", { class: "c" }, line)));
+    if (kind !== "del") for (const x of here.filter((x) => x.line === newLine && !placed.has(x.id))) { placed.add(x.id); table.append(h("tr", { class: "inline" }, h("td", { colspan: 3 }, h("div", { class: "pin" }, card(x))))); }
+    if (kind !== "add") oldLine++;
+    if (kind !== "del") newLine++;
+  }
+  const unplaced = here.filter((x) => !placed.has(x.id));
+  const id = `file-${file.path.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  return h("details", { class: "diff", open: true, id },
+    h("summary", {}, h("span", { style: "flex: 1; min-width: 0; overflow-wrap: anywhere" }, file.path), here.length ? h("span", { class: "tag closed" }, plural(here.length, "finding")) : null, h("span", { class: "plus" }, `+${file.add}`), h("span", { class: "minus" }, `−${file.del}`)),
+    unplaced.length ? h("div", { style: "padding: 8px 12px; background: var(--paper)" }, unplaced.map(card)) : null,
+    h("div", { class: "scroll" }, table));
+}
+
+function runMenu(repo, view, refresh, msg) {
+  const holder = h("div", { class: "split" });
+  const busy = view.verdict.checks === "running" && view.run && view.run.sha === view.pr.head;
+  const start = async (only) => {
+    try { await api("POST", `/api/repos/${enc(repo)}/prs/${view.pr.id}/checks`, { sha: view.pr.head, ...(only ? { only } : {}) }); refresh(); } catch (e) { msg.textContent = e.message; }
+  };
+  const ITEMS = [
+    [null, "All checks", "CI, risk triage, every reviewer the risk calls for, verification"],
+    [["ci"], "CI only", "The repo's own commands. No agents."],
+    [["security"], "Security review only", "One agent session, plus verification"],
+    [["correctness"], "Correctness review only", "One agent session, plus verification"],
+    [["tests"], "Tests review only", "One agent session, plus verification"],
+  ];
+  let menu = null;
+  const close = () => { if (menu) { menu.remove(); menu = null; caret.setAttribute("aria-expanded", "false"); } };
+  const toggle = (e) => {
+    e.stopPropagation();
+    if (menu) return close();
+    menu = h("div", { class: "menu", role: "menu", onkeydown: (k) => {
+      const items = [...menu.querySelectorAll("button")], at = items.indexOf(document.activeElement);
+      if (k.key === "Escape") { close(); caret.focus(); }
+      else if (k.key === "ArrowDown") { k.preventDefault(); items[(at + 1) % items.length].focus(); }
+      else if (k.key === "ArrowUp") { k.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+    } }, ITEMS.map(([only, name, what]) => h("button", { role: "menuitem", onclick: () => { close(); start(only); } }, name, h("span", {}, what))));
+    holder.append(menu);
+    caret.setAttribute("aria-expanded", "true");
+    menu.querySelector("button").focus();
+    document.addEventListener("click", close, { once: true });
+  };
+  const caret = h("button", { class: "primary", disabled: busy, "aria-label": "Run single checks", "aria-haspopup": "menu", "aria-expanded": "false", onclick: toggle }, "▾");
+  holder.append(
+    h("button", { class: "primary", disabled: busy, onclick: () => start(null) }, busy ? "Checks running…" : view.run ? `Run checks on ${short(view.pr.head)}` : "Run checks"),
+    caret);
+  return holder;
+}
+
+async function prPage(repo, id) {
+  clearTimeout(timer);
+  frame("prs");
+  const refresh = () => prPage(repo, id).catch((e) => show(fail(e)));
+  const view = await api("GET", `/api/repos/${enc(repo)}/prs/${id}`);
+  const pr = view.pr, v = view.verdict;
+  const msg = h("span", { class: "err small" });
+  const act = (call) => async () => { try { await call(); refresh(); } catch (e) { msg.textContent = e.data && e.data.blockers ? e.data.blockers.join("; ") : e.message; } };
+  const open = ["draft", "ready"].includes(pr.state);
+  const iApproved = view.approvals.some((a) => a.by === me.email && a.sha === pr.head);
+  const canApprove = me.via === "access";
+  const n = nextStep(pr, v);
+  const card = (f) => findingCard(repo, view, f, refresh);
+  const findings = [...view.findings].sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1) || SEV[a.severity] - SEV[b.severity]);
+  const openCount = findings.filter((f) => f.status === "open").length;
+  const body = h("div");
+
+  const tabs = [["overview", `Overview`], ["files", "Files changed"], ["checks", `Checks${view.checks.length ? ` (${view.checks.length})` : ""}`], ["activity", "Activity"]];
+  const tabBar = h("div", { class: "tabs section", role: "tablist" }, tabs.map(([k, label]) => h("button", { role: "tab", "aria-selected": String(prTab === k), onclick: () => { prTab = k; refresh(); } }, label, k === "overview" && openCount ? h("span", { class: "count" }, openCount) : null)));
+
+  show(
+    h("div", { class: "crumbs" }, link("/", "Pull requests"), h("span", {}, "/"), link(`/repos/${enc(repo)}`, repo)),
+    h("div", { class: "pr-head" },
+      h("div", { style: "flex: 1; min-width: 0" },
+        h("h1", {}, pr.title, h("span", { class: "muted", style: "font-weight: 400" }, ` #${pr.id}`)),
+        h("div", { class: "facts" },
+          h("span", { class: `tag ${pr.state}` }, pr.state),
+          h("span", { class: "mono" }, `${pr.source} → ${pr.target}`),
+          h("span", {}, "by ", h("b", {}, pr.author)),
+          h("span", {}, "head ", h("b", { class: "mono" }, short(pr.head)))))),
+    v.checks === "stale" ? h("div", { class: "banner", role: "status" }, lamp("hold", "stale"), h("span", { style: "flex: 1" }, `These results are for ${short(v.checkedSha)}. The branch has moved to ${short(pr.head)} since.`)) : null,
+    track(view),
+    h("div", { class: `nextline ${n.tone}` }, h("span", {}, n.text)),
+    open ? h("div", { class: "actions" },
+      runMenu(repo, view, refresh, msg),
+      pr.state === "ready" ? h("button", { disabled: !canApprove || iApproved, title: !canApprove ? "Approving needs an Access sign-in: a token could be an agent's" : null, onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/approve`, { sha: view.pr.head })) }, iApproved ? `You approved ${short(pr.head)}` : `Approve ${short(pr.head)}`) : null,
+      pr.state === "ready" ? h("button", { class: "go", disabled: !v.mergeable, title: v.mergeable ? null : v.blockers.join("; "), onclick: act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/merge`)) }, "Merge") : null,
+      h("span", { class: "spacer" }),
+      pr.state === "ready" ? h("button", { class: "quiet", onclick: () => (v.checks !== "running" || confirm("Checks are running. Back to draft stops them; what they've spent so far is lost.")) && act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/draft`))() }, "Back to draft") : null,
+      h("button", { class: "quiet danger", onclick: () => confirm(`Close #${pr.id} without merging? It can't be reopened.`) && act(() => api("POST", `/api/repos/${enc(repo)}/prs/${pr.id}/close`))() }, "Close PR"),
+      msg) : null,
+    open && !canApprove && pr.state === "ready" ? h("p", { class: "note" }, "You're signed in with a token, so you can run checks but not approve. Approvals need an Access sign-in.") : null,
+    tabBar,
+    body,
+  );
+
+  if (prTab === "overview") {
+    const intent = Object.entries({ what: "What it changes", why: "Why", testing: "How it's tested", risk: "Risk, as the author sees it", revert: "How to revert" }).filter(([k]) => pr.intent[k]);
+    body.replaceChildren(
+      v.needsHuman && v.humanReasons.length ? h("section", { class: "section panel" }, h("h2", {}, "Why a person needs to look"), h("ul", { class: "reasons" }, v.humanReasons.map((r) => h("li", {}, r)))) : null,
+      intent.length ? h("section", { class: "section" }, h("h2", {}, "What the author says"), h("dl", { class: "intent" }, intent.map(([k, label]) => [h("dt", {}, label), h("dd", {}, pr.intent[k])]))) : null,
+      h("section", { class: "section" }, h("h2", {}, openCount ? `Open findings (${openCount})` : "Findings"),
+        openCount ? findings.filter((f) => f.status === "open").map(card) : h("p", { class: "muted" }, v.checks === "running" ? "Reviewers are working." : view.run ? "Nothing open." : "No checks have run yet."),
+        findings.length > openCount ? h("details", { class: "check", style: "margin-top: 16px" },
+          h("summary", {}, lamp("go", "fixed"), h("b", {}, `Fixed or answered (${findings.length - openCount})`), h("span", { class: "kind" }, "Earlier findings that a later run no longer reports, or that someone answered")),
+          h("div", { style: "padding: 0 16px 8px" }, findings.filter((f) => f.status !== "open").map(card))) : null),
+    );
+  } else if (prTab === "files") {
+    body.replaceChildren(h("p", { class: "muted section" }, "Loading the diff…"));
+    api("GET", `/api/repos/${enc(repo)}/prs/${pr.id}/diff`).then((d) => {
+      const files = parseDiff(d.diff);
+      const live = view.findings.filter((f) => f.status === "open");
+      if (!files.length) return body.replaceChildren(h("p", { class: "muted section" }, "No changes."));
+      body.replaceChildren(h("div", { class: "files section" },
+        h("nav", { class: "filelist", "aria-label": "Files" }, h("div", { class: "muted small", style: "padding: 4px 8px 8px" }, `${plural(files.length, "file")} changed`),
+          files.map((f) => h("a", { href: `#file-${f.path.replace(/[^a-zA-Z0-9]/g, "-")}`, title: f.path }, live.some((x) => x.file === f.path) ? h("span", { class: "flag", title: "has findings" }) : null, h("span", { class: "fname" }, f.path), h("span", { class: "plus" }, `+${f.add}`), h("span", { class: "minus" }, `−${f.del}`)))),
+        h("div", {}, files.map((f) => fileDiff(f, live, card)))));
+    }).catch((e) => body.replaceChildren(fail(e)));
+  } else if (prTab === "checks") {
+    const label = (c) => c.kind === "ci" ? "CI command" : c.name === "classifier" ? "Risk triage" : REVIEWER_NAMES[c.name] ? "Review agent" : c.name.startsWith("verify") ? "Verification" : "Pipeline";
+    const lampOf = (c) => ({ passed: "go", failed: "stop", errored: "hold", skipped: "off", running: "run" })[c.status] || "idle";
+    body.replaceChildren(h("div", { class: "section" },
+      view.run ? h("p", { class: "muted small" }, `Run ${view.run.number} on ${short(view.run.sha)}, started ${ago(view.run.started_at)}${view.run.finished_at ? `, took ${Math.max(1, Math.round((view.run.finished_at - view.run.started_at) / 60000))} min` : ""}.`) : null,
+      view.checks.length ? view.checks.map((c) => h("details", { class: "check", open: c.status === "failed" || c.status === "errored" },
+        h("summary", {}, lamp(lampOf(c), c.status), h("b", {}, c.kind === "ci" ? c.name : REVIEWER_NAMES[c.name] || (c.name === "classifier" ? "Risk triage" : c.name)), h("span", { class: "kind" }, label(c)), h("span", { class: "spacer" }), h("span", { class: "muted small" }, c.status), c.ms ? h("span", { class: "muted small" }, `${Math.max(1, Math.round(c.ms / 1000))} s`) : null),
+        c.log ? h("pre", {}, c.log) : h("p", { class: "muted small", style: "margin: 0 16px 12px" }, "No output.")))
+      : h("p", { class: "muted" }, view.run ? "Starting…" : "No checks have run yet. They run when an agent, or you, asks for them.")));
+  } else {
+    const say = (e) => {
+      const d = e.detail || {};
+      const by = d.by ? ` by ${d.by}` : "";
+      return ({
+        "pr.opened": `Opened${by}`, "pr.pushed": `Pushed ${short(d.sha)}`, "pr.ready": `Marked ready${by}`, "pr.draft": `Back to draft${by}`, "pr.closed": `Closed${by}`, "pr.merged": `Merged${by}`,
+        "checks.requested": `Checks requested${by} on ${short(d.sha)}${d.only && d.only.length ? ` (only ${d.only.join(", ")})` : ""}`,
+        "run.started": `Run ${d.number} started on ${short(d.sha)}`, "run.finished": `Run finished: ${d.outcome === "ci_failed" ? "CI failed" : "done"}`, "run.cancelled": `Run cancelled: ${d.why}`,
+        "pr.approved": `Approved ${short(d.sha)}${by}`, "finding.resolved": `Finding answered${by}`, "pr.merge_refused": `Merge refused${by}`,
+        "run.classified": `Triaged: ${d.tier || ""} risk`, "run.findings": `${REVIEWER_NAMES[d.reviewer] || "A reviewer"} posted ${d.count ?? ""} finding${d.count === 1 ? "" : "s"}`,
+      })[e.kind] || `${e.kind.replace(".", " ")}${by}`;
+    };
+    body.replaceChildren(h("section", { class: "section panel" }, h("ul", { class: "events" }, view.events.map((e) => h("li", {}, h("time", { datetime: new Date(e.at).toISOString(), title: new Date(e.at).toLocaleString() }, ago(e.at)), h("span", {}, say(e)))))));
+  }
+  const key = (x) => JSON.stringify([x.pr.head, x.verdict, x.checks.map((c) => [c.name, c.status]), x.findings.length]);
+  if (open && v.checks === "running") poll(async () => key(await api("GET", `/api/repos/${enc(repo)}/prs/${id}`)), key(view), refresh, 5000);
+}
+
+async function route() {
+  clearTimeout(timer);
+  try {
+    if (!me) me = await api("GET", `/api/me`);
+    const parts = location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (parts[0] === "repos" && parts[2] === "prs" && parts[3]) await prPage(parts[1], Number(parts[3]));
+    else if (parts[0] === "repos" && parts[1]) await repoPage(parts[1]);
+    else if (parts[0] === "settings") await settings();
+    else await dashboard();
+  } catch (e) {
+    if (e.message !== "not signed in") show(fail(e));
+  }
+}
+window.addEventListener("popstate", () => { prTab = "overview"; route(); });
+route();
+</script>
+</body>
+</html>

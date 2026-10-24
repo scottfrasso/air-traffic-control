@@ -1,0 +1,6 @@
+{
+  // Tests and the container script, typechecked too (code review, 10-17): `pnpm typecheck` runs both configs.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": ["./worker-configuration.d.ts", "node"], "noEmit": true, "allowImportingTsExtensions": true },
+  "include": ["src", "test", "container", "worker-configuration.d.ts"]
+}
